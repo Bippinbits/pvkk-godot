@@ -119,6 +119,14 @@ bool is_shadow_ray(uint packed) {
 	return (packed & SHADOW_RAY_FLAG) != 0u;
 }
 
+const uint PRIMARY_MISS_FLAG = (1u << 27);
+uint set_primary_miss(uint packed) {
+	return packed | PRIMARY_MISS_FLAG;
+}
+bool is_primary_miss(uint packed) {
+	return (packed & PRIMARY_MISS_FLAG) != 0u;
+}
+
 const uint PATH_TERMINATED_FLAG = (1u << 26);
 uint set_path_terminated(uint packed) {
 	return packed | PATH_TERMINATED_FLAG;

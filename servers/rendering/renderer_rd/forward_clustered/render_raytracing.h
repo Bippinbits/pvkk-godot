@@ -290,6 +290,34 @@ struct RTMaterialCacheEntry {
 	uint32_t cached_rid_version = 0;
 };
 
+/// Lookup key for per-viewport raytracing state.
+///
+/// Shared viewports can trace different worlds (environments) into the same
+/// render buffers; each pair needs its own TLAS / SSBO state. Hash is used for
+/// the map bucket, then `operator==` compares the actual values.
+struct RTViewportStateKey {
+	RenderSceneBuffersRD *render_buffers = nullptr;
+	RID environment;
+
+	bool operator==(const RTViewportStateKey &p_other) const {
+		return render_buffers == p_other.render_buffers && environment == p_other.environment;
+	}
+
+	bool operator!=(const RTViewportStateKey &p_other) const {
+		return !(*this == p_other);
+	}
+
+	uint32_t hash() const {
+		uint32_t h = hash_murmur3_one_64((uint64_t)(uintptr_t)render_buffers);
+		h = hash_murmur3_one_64(environment.get_id(), h);
+		return hash_fmix32(h);
+	}
+
+	RTViewportStateKey() {}
+	RTViewportStateKey(RenderSceneBuffersRD *p_render_buffers, RID p_environment) :
+			render_buffers(p_render_buffers), environment(p_environment) {}
+};
+
 /// Per-viewport raytracing state.
 ///
 /// Each viewport has its own visibility set (frustum/LOD/visibility ranges), so
@@ -302,6 +330,7 @@ struct RTMaterialCacheEntry {
 /// `build_tlas` for that viewport, freed via `RenderRaytracing::free_viewport_state`
 /// from `RenderBufferDataForwardClustered::free_data()`.
 struct RTViewportState {
+	RenderSceneBuffersRD *render_buffers = nullptr;
 	RID tlas;
 	uint32_t tlas_max_instances = 0;
 
@@ -388,7 +417,9 @@ class RenderRaytracing {
 	LocalVector<uint8_t> instance_masks; // Per-instance ray mask (0x00 = invisible to rays, 0xFF = normal)
 	LocalVector<uint32_t> sbt_offsets; // 0 = default material hit group
 
-	HashMap<RenderSceneBuffersRD *, RTViewportState *> viewport_states;
+	// Keyed by (render buffers, environment): shared viewports trace different
+	// worlds into the same render buffers, each needing its own TLAS state.
+	HashMap<RTViewportStateKey, RTViewportState *> viewport_states;
 
 	RTViewportState *_get_or_create_viewport_state(const RenderDataRD *p_render_data);
 	RTViewportState *_get_viewport_state(const RenderDataRD *p_render_data) const;

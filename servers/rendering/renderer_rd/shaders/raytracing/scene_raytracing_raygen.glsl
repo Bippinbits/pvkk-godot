@@ -22,9 +22,12 @@
 #define GLSL 1
 #define RT_STAGE_RAYGEN 1
 #include "raytracing_common_inc.glsl"
+#include "raytracing_samplers_inc.glsl"
 
 layout(set = 0, binding = 0, rgba32f) uniform image2D image;
 layout(set = 0, binding = 1) uniform accelerationStructureEXT tlas;
+layout(set = 0, binding = 29) uniform texture2D prepass_depth_texture;
+layout(set = 0, binding = 30) uniform texture2D prepass_color_texture;
 
 layout(location = 0) rayPayloadEXT PathPayload payload;
 
@@ -43,12 +46,25 @@ void main() {
 	vec4 origin = inv_view * vec4(0.0, 0.0, 0.0, 1.0);
 	vec4 direction = inv_view * vec4(normalize(target.xyz), 0);
 
+	// Depth composite against a co-tenant viewport (reverse-Z clear is 0.0): primary rays
+	// stop at its depth, and on a primary miss its color/velocity/guides win the pixel.
+	float composite_t_max = 10000.0;
+	float composite_prepass_depth = 0.0;
+	if ((RT_FLAGS & RT_FLAG_DEPTH_COMPOSITE_ENABLED) != 0u) {
+		composite_prepass_depth = texelFetch(sampler2D(prepass_depth_texture, SAMPLER_NEAREST_CLAMP), ivec2(pixel), 0).r;
+		if (composite_prepass_depth > 0.0) {
+			vec4 prepass_pos = scene_data_block.data.inv_projection_matrix * vec4(d.x, d.y, composite_prepass_depth, 1.0);
+			composite_t_max = length(prepass_pos.xyz / prepass_pos.w);
+		}
+	}
+
 	// Sample count from specialization constant, frame index from uniform
 	const uint samples_per_pixel = RT_GET_SAMPLE_COUNT();
 	uint frame_index = uint(get_rt_param(RT_PARAM_FRAME_INDEX));
 
 	// Accumulate multiple samples per pixel
 	vec3 total_radiance = vec3(0.0);
+	bool composite_passthrough = false;
 
 	const uint max_bounces = RT_GET_MAX_BOUNCES();
 
@@ -67,10 +83,11 @@ void main() {
 
 		[[dont_unroll]] for (uint bounce = 0u; bounce <= max_bounces; bounce++) {
 			path_pack(payload, ps);
+			float t_far = (bounce == 0u) ? composite_t_max : 10000.0;
 
 #ifdef USE_SER
 			hitObjectNV hitObject;
-			hitObjectTraceRayNV(hitObject, tlas, RT_RAY_FLAGS, 0xFF, 0, 0, 0, ray_origin, 0.001, ray_dir, 10000.0, 0);
+			hitObjectTraceRayNV(hitObject, tlas, RT_RAY_FLAGS, 0xFF, 0, 0, 0, ray_origin, 0.001, ray_dir, t_far, 0);
 
 			// Reorder with a coherence hint that has 8 bits
 			uint hint = 0;
@@ -82,7 +99,7 @@ void main() {
 
 			hitObjectExecuteShaderNV(hitObject, 0);
 #else
-			traceRayEXT(tlas, RT_RAY_FLAGS, 0xFF, 0, 0, 0, ray_origin, 0.001, ray_dir, 10000.0, 0);
+			traceRayEXT(tlas, RT_RAY_FLAGS, 0xFF, 0, 0, 0, ray_origin, 0.001, ray_dir, t_far, 0);
 #endif
 
 			ps = path_unpack(payload);
@@ -96,6 +113,15 @@ void main() {
 		}
 
 		total_radiance += ps.radiance;
+		composite_passthrough = composite_passthrough || (composite_prepass_depth > 0.0 && is_primary_miss(ps.packed_bounces_flags));
+	}
+
+	if (composite_passthrough) {
+		// The co-tenant pixel is nearer than anything traced: keep its color and depth,
+		// leave its velocity and DLSS-RR guides untouched.
+		imageStore(image, ivec2(pixel), texelFetch(sampler2D(prepass_color_texture, SAMPLER_NEAREST_CLAMP), ivec2(pixel), 0));
+		imageStore(rt_depth_image, ivec2(pixel), vec4(composite_prepass_depth));
+		return;
 	}
 
 	vec3 final_radiance = total_radiance / float(samples_per_pixel);
@@ -123,6 +149,8 @@ void main() {
 // clang-format on
 
 layout(location = 0) rayPayloadInEXT PathPayload payload;
+
+layout(set = 0, binding = 29) uniform texture2D prepass_depth_texture;
 
 #ifdef USE_RADIANCE_OCTMAP_ARRAY
 
@@ -168,6 +196,14 @@ void main() {
 	// Miss always ends the path.
 	ps.packed_bounces_flags = set_path_terminated(ps.packed_bounces_flags);
 
+	bool composite_passthrough = false;
+	if (get_total_bounces(ps.packed_bounces_flags) == 0u) {
+		ps.packed_bounces_flags = set_primary_miss(ps.packed_bounces_flags);
+		if ((RT_FLAGS & RT_FLAG_DEPTH_COMPOSITE_ENABLED) != 0u) {
+			composite_passthrough = texelFetch(sampler2D(prepass_depth_texture, radiance_sampler), ivec2(gl_LaunchIDEXT.xy), 0).r > 0.0;
+		}
+	}
+
 #ifdef RT_DEBUG_ENABLED
 	{
 		int VIS_MODE = int(get_rt_param(RT_PARAM_VIS_MODE));
@@ -183,7 +219,7 @@ void main() {
 	// Primary ray miss: write depth, velocity, and DLSS RR defaults (sample 0 only).
 	{
 		uint total_bounces = get_total_bounces(ps.packed_bounces_flags);
-		if (total_bounces == 0u && is_sample_zero(ps.packed_bounces_flags)) {
+		if (total_bounces == 0u && is_sample_zero(ps.packed_bounces_flags) && !composite_passthrough) {
 			ivec2 pixel = ivec2(gl_LaunchIDEXT.xy);
 
 			imageStore(rt_depth_image, pixel, vec4(0.0));
@@ -224,7 +260,7 @@ void main() {
 #ifdef DLSS_RR_ENABLED
 	{
 		uint total_bounces = get_total_bounces(ps.packed_bounces_flags);
-		if (total_bounces == 0u && is_sample_zero(ps.packed_bounces_flags)) {
+		if (total_bounces == 0u && is_sample_zero(ps.packed_bounces_flags) && !composite_passthrough) {
 			ivec2 pixel = ivec2(gl_LaunchIDEXT.xy);
 			imageStore(dlss_rr_diffuse_albedo, pixel, vec4(DLSSRR_encodeDiffuseAlbedo(sky_color), 1.0));
 			imageStore(dlss_rr_specular_albedo, pixel, vec4(0.0));

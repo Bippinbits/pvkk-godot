@@ -63,7 +63,7 @@ void RenderRaytracing::initialize(RenderForwardClustered *p_owner) {
 }
 
 RenderRaytracing::~RenderRaytracing() {
-	for (KeyValue<RenderSceneBuffersRD *, RTViewportState *> &kv : viewport_states) {
+	for (KeyValue<RTViewportStateKey, RTViewportState *> &kv : viewport_states) {
 		_free_viewport_state_internal(kv.value);
 	}
 	viewport_states.clear();
@@ -91,16 +91,21 @@ RenderRaytracing::~RenderRaytracing() {
 // Per-viewport state lifecycle
 // ---------------------------------------------------------------------------
 
+static RTViewportStateKey _viewport_state_key(const RenderDataRD *p_render_data) {
+	return RTViewportStateKey(p_render_data->render_buffers.ptr(), p_render_data->environment);
+}
+
 RTViewportState *RenderRaytracing::_get_or_create_viewport_state(const RenderDataRD *p_render_data) {
 	if (!p_render_data || p_render_data->render_buffers.is_null()) {
 		return nullptr;
 	}
-	RenderSceneBuffersRD *key = p_render_data->render_buffers.ptr();
-	HashMap<RenderSceneBuffersRD *, RTViewportState *>::Iterator it = viewport_states.find(key);
+	RTViewportStateKey key = _viewport_state_key(p_render_data);
+	HashMap<RTViewportStateKey, RTViewportState *>::Iterator it = viewport_states.find(key);
 	if (it != viewport_states.end()) {
 		return it->value;
 	}
 	RTViewportState *state = memnew(RTViewportState);
+	state->render_buffers = p_render_data->render_buffers.ptr();
 	viewport_states.insert(key, state);
 	return state;
 }
@@ -109,8 +114,8 @@ RTViewportState *RenderRaytracing::_get_viewport_state(const RenderDataRD *p_ren
 	if (!p_render_data || p_render_data->render_buffers.is_null()) {
 		return nullptr;
 	}
-	RenderSceneBuffersRD *key = p_render_data->render_buffers.ptr();
-	HashMap<RenderSceneBuffersRD *, RTViewportState *>::ConstIterator it = viewport_states.find(key);
+	RTViewportStateKey key = _viewport_state_key(p_render_data);
+	HashMap<RTViewportStateKey, RTViewportState *>::ConstIterator it = viewport_states.find(key);
 	return (it != viewport_states.end()) ? it->value : nullptr;
 }
 
@@ -146,12 +151,16 @@ void RenderRaytracing::_free_viewport_state_internal(RTViewportState *p_state) {
 }
 
 void RenderRaytracing::free_viewport_state(RenderSceneBuffersRD *p_render_buffers) {
-	HashMap<RenderSceneBuffersRD *, RTViewportState *>::Iterator it = viewport_states.find(p_render_buffers);
-	if (it == viewport_states.end()) {
-		return;
+	LocalVector<RTViewportStateKey> to_remove;
+	for (KeyValue<RTViewportStateKey, RTViewportState *> &kv : viewport_states) {
+		if (kv.value->render_buffers == p_render_buffers) {
+			_free_viewport_state_internal(kv.value);
+			to_remove.push_back(kv.key);
+		}
 	}
-	_free_viewport_state_internal(it->value);
-	viewport_states.remove(it);
+	for (const RTViewportStateKey &key : to_remove) {
+		viewport_states.erase(key);
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -3243,6 +3252,23 @@ RID RenderRaytracing::update_uniform_set(RTViewportState *p_state, const RenderD
 		u.binding = 28;
 		u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
 		u.append_id(rb->get_velocity_buffer(false));
+		uniforms.push_back(u);
+	}
+
+	// Bindings 29-30: Pre-pass depth/color for depth composite (shared viewports).
+	{
+		const bool composite = (p_rt_flags & SceneShaderRaytracing::RT_FLAG_DEPTH_COMPOSITE_ENABLED) != 0;
+		RID fallback = RendererRD::TextureStorage::get_singleton()->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_BLACK);
+		RD::Uniform u;
+		u.binding = 29;
+		u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+		u.append_id(composite ? rb->get_depth_texture() : fallback);
+		uniforms.push_back(u);
+
+		u = RD::Uniform();
+		u.binding = 30;
+		u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+		u.append_id(composite ? rb->get_internal_texture() : fallback);
 		uniforms.push_back(u);
 	}
 

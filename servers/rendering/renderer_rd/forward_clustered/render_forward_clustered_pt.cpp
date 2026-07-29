@@ -59,7 +59,7 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 		_age_out_motion_vectors(p_render_data);
 
 		// Path tracing is off for this view: drop any DLSS Ray Reconstruction state
-		if (rb_data.is_valid()) {
+		if (rb_data.is_valid() && !p_render_data->skip_post_and_tonemap) {
 			if (raytracing && raytracing->dlss_rr_has_buffers(rb.ptr())) {
 				raytracing->dlss_rr_free_buffers(rb.ptr());
 			}
@@ -171,11 +171,24 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 		const bool fog_enabled = rt_environment.is_valid() && environment_get_fog_enabled(rt_environment);
 		rt_flags = SceneShaderRaytracing::compute_rt_flags(rt_environment, fog_enabled);
 
+		if (p_render_data->load_color_and_depth) {
+			rt_flags |= SceneShaderRaytracing::RT_FLAG_DEPTH_COMPOSITE_ENABLED;
+		}
+
+		if (p_render_data->skip_post_and_tonemap) {
+			// Signal pass follows the owner: guides are written only when the shared buffers exist.
+			if (raytracing->dlss_rr_has_buffers(rb.ptr())) {
+				rt_flags |= SceneShaderRaytracing::RT_FLAG_DLSS_RR_ENABLED;
+			} else {
+				rt_flags &= ~SceneShaderRaytracing::RT_FLAG_DLSS_RR_ENABLED;
+			}
+		}
+
 		const bool dlss_rr_enabled = (rt_flags & SceneShaderRaytracing::RT_FLAG_DLSS_RR_ENABLED) != 0;
 		if (dlss_rr_enabled) {
 			raytracing->dlss_rr_ensure_buffers(rb.ptr());
 			using_depth_reconstruct = true;
-		} else if (raytracing->dlss_rr_has_buffers(rb.ptr())) {
+		} else if (!p_render_data->skip_post_and_tonemap && raytracing->dlss_rr_has_buffers(rb.ptr())) {
 			raytracing->dlss_rr_free_buffers(rb.ptr());
 		}
 
@@ -183,7 +196,7 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 		if (rt_state) {
 			rt_uniform_set = raytracing->update_uniform_set(rt_state, p_render_data, rt_flags);
 		}
-	} else if (rb_data.is_valid() && raytracing && raytracing->dlss_rr_has_buffers(rb.ptr())) {
+	} else if (rb_data.is_valid() && raytracing && !p_render_data->skip_post_and_tonemap && raytracing->dlss_rr_has_buffers(rb.ptr())) {
 		// No RT shader available: free DLSS RR buffers so DLSS falls back to SR.
 		raytracing->dlss_rr_free_buffers(rb.ptr());
 	}
@@ -468,6 +481,10 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 	{
 		RENDER_TIMESTAMP("Process Post Transparent Compositor Effects");
 		_process_compositor_effects(RSE::COMPOSITOR_EFFECT_CALLBACK_TYPE_POST_TRANSPARENT, p_render_data);
+	}
+
+	if (p_render_data->skip_post_and_tonemap) {
+		return;
 	}
 
 	rb->set_depth_reconstruct_requested(using_depth_reconstruct);
