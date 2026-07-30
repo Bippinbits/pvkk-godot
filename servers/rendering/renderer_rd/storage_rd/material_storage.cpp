@@ -2111,6 +2111,7 @@ void MaterialStorage::shader_set_code(RID p_shader, const String &p_code) {
 
 	for (Material *E : shader->owners) {
 		Material *material = E;
+		material->rt_invalidation_counter++; // RT caches shader-derived state per material.
 		material->dependency.changed_notify(Dependency::DEPENDENCY_CHANGED_MATERIAL);
 		_material_queue_update(material, true, true);
 	}
@@ -2144,10 +2145,17 @@ void MaterialStorage::shader_set_code_rt(RID p_shader, const String &p_code_rt) 
 	if (changed) {
 		for (Material *E : shader->owners) {
 			Material *material = E;
+			material->rt_invalidation_counter++;
 			material->dependency.changed_notify(Dependency::DEPENDENCY_CHANGED_MATERIAL);
 			_material_queue_update(material, false, false);
 		}
 	}
+}
+
+void MaterialStorage::shader_set_builtin_standard_3d(RID p_shader, bool p_enabled) {
+	Shader *shader = shader_owner.get_or_null(p_shader);
+	ERR_FAIL_NULL(shader);
+	shader->builtin_standard_3d = p_enabled;
 }
 
 void MaterialStorage::shader_set_path_hint(RID p_shader, const String &p_path) {

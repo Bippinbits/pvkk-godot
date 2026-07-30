@@ -1545,10 +1545,24 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 		mat.albedo_color[1] = c.g;
 		mat.albedo_color[2] = c.b;
 		mat.albedo_color[3] = c.a;
+	}
+
+	// A ShaderMaterial may declare `albedo`, `emission`, ... too, so only the
+	// shader's origin can classify the material.
+	mat_data->is_custom_shader = !material_storage->material_is_builtin_standard_3d(p_material_rid);
+
+	if (!mat_data->is_custom_shader) {
 		mat_data->rt_sbt_offset = 0;
-		mat_data->is_custom_shader = false;
+		// Switched away from a custom shader: uniform storage is dead.
+		if (mat_data->uniform_pool_slot != UINT32_MAX) {
+			mat_ubo_pool_release(mat_data->uniform_pool_slot);
+			mat_data->uniform_pool_slot = UINT32_MAX;
+		}
+		if (mat_data->uniform_buffer.is_valid()) {
+			RD::get_singleton()->free_rid(mat_data->uniform_buffer);
+			mat_data->uniform_buffer = RID();
+		}
 	} else {
-		mat_data->is_custom_shader = true;
 		uint32_t shader_id = material_storage->material_get_shader_id(p_material_rid);
 		mat_data->rt_sbt_offset = SceneShaderRaytracing::get_singleton()->register_custom_shader(shader_id, p_material_rid);
 
