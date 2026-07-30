@@ -19,6 +19,7 @@ vec2 uv2_interp = vec2(0.0);
 vec4 color_interp = vec4(1.0);
 vec3 view = vec3(0.0, 0.0, -1.0);
 mat4 read_model_matrix = mat4(1.0);
+mat3 model_normal_matrix = mat3(1.0);
 mat4 read_view_matrix = mat4(1.0);
 mat4 inv_view_matrix = mat4(1.0);
 mat4 projection_matrix = mat4(1.0);

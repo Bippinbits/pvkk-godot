@@ -28,6 +28,9 @@ mat4 rt_inv_aabb_xform;
 get_aabb_compression_xforms(rt_geom, rt_aabb_xform, rt_inv_aabb_xform);
 
 read_model_matrix = mat4(gl_ObjectToWorldEXT) * rt_inv_aabb_xform;
+// Matches the rasterizer's uniform-scale case; instance scale flags that would
+// select the inverse-transpose form are not available to hit shaders.
+model_normal_matrix = mat3(read_model_matrix);
 read_view_matrix = rt_view_matrix;
 inv_view_matrix = transpose(mat4(scene_data_block.data.inv_view_matrix[0],
 		scene_data_block.data.inv_view_matrix[1],

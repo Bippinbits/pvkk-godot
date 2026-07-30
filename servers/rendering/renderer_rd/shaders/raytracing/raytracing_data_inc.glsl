@@ -80,8 +80,16 @@ struct InstanceMotionData {
 };
 
 // ============================================================================
-// MATERIAL DATA (matches C++ layout, 96 bytes)
+// MATERIAL DATA (matches C++ layout, 112 bytes)
 // ============================================================================
+
+// MaterialData::flags bits (must match RT_MAT_FLAG_* in render_raytracing.h).
+#define RT_MAT_FLAG_HAS_NORMAL_MAP 1u
+#define RT_MAT_FLAG_HAS_EMISSION_TEX 2u
+#define RT_MAT_FLAG_POINT_FILTER 4u
+#define RT_MAT_FLAG_TRIPLANAR 8u
+#define RT_MAT_FLAG_TRIPLANAR_WORLD 16u
+
 struct MaterialData {
 	uint albedo_texture_idx;
 	uint normal_texture_idx;
@@ -92,15 +100,17 @@ struct MaterialData {
 	vec3 emission_color;
 	float emission_strength;
 
+	vec3 uv1_scale; // UV1 scale (default 1,1,1)
+	float normal_map_depth; // Normal map strength (default 1.0)
+	vec3 uv1_offset; // UV1 offset (default 0,0,0)
+	float specular; // Dielectric specular [0..1], default 0.5 -> F0 = 0.04.
+
 	float metallic;
 	float roughness;
 	float ao_strength;
-	uint flags; // Bit 0: has_normal_map, Bit 1: has_emission
+	uint flags; // See RT_MAT_FLAG_*.
 
-	vec2 uv1_scale; // UV1 scale (default 1,1)
-	vec2 uv1_offset; // UV1 offset (default 0,0)
-
-	float normal_map_depth; // Normal map strength (default 1.0)
-	float specular; // Dielectric specular [0..1], default 0.5 -> F0 = 0.04.
 	uint64_t uniform_address; // BDA for custom shader uniform buffer (0 = none)
+	float uv1_blend_sharpness; // Triplanar per-axis blend exponent (default 1.0)
+	float _pad;
 };

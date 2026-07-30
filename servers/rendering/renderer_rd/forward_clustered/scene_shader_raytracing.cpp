@@ -989,7 +989,7 @@ SceneShaderRaytracing::PipelineBuildTask *SceneShaderRaytracing::_make_pipeline_
 		String fragment_code = entry.fragment_code;
 		if (fragment_code.is_empty() && entry.is_procedural) {
 			fragment_code =
-					"vec2 mat_uv = uv_interp * rt_mat.uv1_scale + rt_mat.uv1_offset;\n"
+					"vec2 mat_uv = uv_interp * rt_mat.uv1_scale.xy + rt_mat.uv1_offset.xy;\n"
 					"vec4 albedo_tex = sample_material_texture(rt_mat.albedo_texture_idx, mat_uv, rt_mat.flags);\n"
 					"albedo = albedo_tex.rgb * rt_mat.albedo_color.rgb;\n"
 					"alpha = albedo_tex.a * rt_mat.albedo_color.a;\n"

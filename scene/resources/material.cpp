@@ -669,6 +669,9 @@ void BaseMaterial3D::init_shaders() {
 	shader_names->albedo_texture_size = "albedo_texture_size";
 	shader_names->z_clip_scale = "z_clip_scale";
 	shader_names->fov_override = "fov_override";
+
+	shader_names->rt_uv1_triplanar = "rt_uv1_triplanar";
+	shader_names->rt_uv1_world_triplanar = "rt_uv1_world_triplanar";
 }
 
 HashMap<uint64_t, Ref<StandardMaterial3D>> BaseMaterial3D::materials_for_2d;
@@ -691,6 +694,12 @@ void BaseMaterial3D::_update_shader() {
 	if (mk == current_key) {
 		return; //no update required in the end
 	}
+
+	// Triplanar mapping is emitted as shader code below, which the pathtracer's
+	// fixed-function material evaluation never runs. Mirror the flags into
+	// params so it can reproduce the mapping (see RenderRaytracing::process_material).
+	_material_set_param(shader_names->rt_uv1_triplanar, flags[FLAG_UV1_USE_TRIPLANAR]);
+	_material_set_param(shader_names->rt_uv1_world_triplanar, flags[FLAG_UV1_USE_WORLD_TRIPLANAR]);
 
 	{
 		MutexLock lock(shader_map_mutex);

@@ -420,14 +420,22 @@ void main() {
 	m.metalness = metallic;
 	m.specular = specular;
 	m.emissive = emission * scene_data_block.data.emissive_exposure_normalization;
-	m.normal = normalize(mat3(inv_view_matrix) * normal); // view space -> world space
+	// view space -> world space
+	mat3 view_to_world = mat3(inv_view_matrix);
+	m.normal = normalize(view_to_world * normal);
+
+	// The vertex stage may have rewritten TANGENT/BINORMAL (triplanar mapping
+	// does), so the shading frame comes from the shader, not the mesh TBN.
+	vec3 world_tangent = normalize(view_to_world * tangent);
+	vec3 world_bitangent = normalize(view_to_world * binormal);
 
 	// Apply normal map if it was written.
 	if (normal_map != vec3(0.5, 0.5, 1.0)) {
 		vec3 ts_normal;
 		ts_normal.xy = normal_map.xy * 2.0 - 1.0;
 		ts_normal.z = sqrt(max(0.0, 1.0 - dot(ts_normal.xy, ts_normal.xy)));
-		m.normal = apply_normal_map(h, ts_normal, normal_map_depth);
+		vec3 mapped = world_tangent * ts_normal.x + world_bitangent * ts_normal.y + m.normal * ts_normal.z;
+		m.normal = normalize(mix(m.normal, mapped, normal_map_depth));
 	}
 
 #ifdef RT_DEBUG_ENABLED
@@ -438,7 +446,7 @@ void main() {
 			float NdotV = max(dot(m.normal, V), 0.0001);
 			vec3 orm = vec3(1.0, m.roughness, m.metalness);
 			debug_visualize(VIS_MODE, h.geometry_normal, m.normal, normal_map,
-					h.tangent, h.bitangent, h.uv, m.albedo, orm, m.metalness, m.roughness, m.specular, m.emissive, V, NdotV);
+					world_tangent, world_bitangent, h.uv, m.albedo, orm, m.metalness, m.roughness, m.specular, m.emissive, V, NdotV);
 			return;
 		}
 	}
@@ -447,28 +455,33 @@ void main() {
 #else
 	// HG0: StandardMaterial3D evaluation.
 	MaterialData mat = materials[h.geometry_idx];
-	vec2 uv = h.uv * mat.uv1_scale + mat.uv1_offset;
+	MaterialUV muv = material_uv_from_world(mat, geometries[h.geometry_idx], h.uv, h.hit_pos, h.geometry_normal);
+
+	// Triplanar mapping derives its own tangent frame from the blend normal.
+	if (muv.triplanar) {
+		material_uv_triplanar_tangents(muv, h.tangent, h.bitangent);
+	}
 
 	// Normal mapping.
 	vec3 tangent_space_normal = vec3(0.0, 0.0, 1.0);
 	vec3 final_normal = h.geometry_normal;
-	if ((mat.flags & 1u) != 0u) {
-		vec3 normal_sample = sample_bindless_texture(mat.normal_texture_idx, uv).rgb;
+	if ((mat.flags & RT_MAT_FLAG_HAS_NORMAL_MAP) != 0u) {
+		vec3 normal_sample = material_uv_sample(mat.normal_texture_idx, muv, mat.flags).rgb;
 		tangent_space_normal.xy = normal_sample.xy * 2.0 - 1.0;
 		tangent_space_normal.z = sqrt(max(0.0, 1.0 - dot(tangent_space_normal.xy, tangent_space_normal.xy)));
 		final_normal = apply_normal_map(h, tangent_space_normal, mat.normal_map_depth);
 	}
 
 	// Texture sampling.
-	vec4 albedo_tex = sample_material_texture(mat.albedo_texture_idx, uv, mat.flags);
+	vec4 albedo_tex = material_uv_sample(mat.albedo_texture_idx, muv, mat.flags);
 	vec3 albedo = albedo_tex.rgb * mat.albedo_color.rgb;
-	vec3 orm = sample_material_texture(mat.orm_texture_idx, uv, mat.flags).rgb;
+	vec3 orm = material_uv_sample(mat.orm_texture_idx, muv, mat.flags).rgb;
 	float roughness = saturate(orm.g * mat.roughness);
 	float metalness = saturate(orm.b * mat.metallic);
 
 	vec3 emissive = vec3(0.0);
-	if ((mat.flags & 2u) != 0u) {
-		emissive = sample_material_texture(mat.emission_texture_idx, uv, mat.flags).rgb * mat.emission_color * mat.emission_strength;
+	if ((mat.flags & RT_MAT_FLAG_HAS_EMISSION_TEX) != 0u) {
+		emissive = material_uv_sample(mat.emission_texture_idx, muv, mat.flags).rgb * mat.emission_color * mat.emission_strength;
 		emissive *= scene_data_block.data.emissive_exposure_normalization;
 	}
 
@@ -488,8 +501,9 @@ void main() {
 		if (VIS_MODE != 0) {
 			vec3 V = -gl_WorldRayDirectionEXT;
 			float NdotV = max(dot(m.normal, V), 0.0001);
+			vec2 debug_uv = muv.triplanar ? muv.triplanar_pos.xy : muv.uv;
 			debug_visualize(VIS_MODE, h.geometry_normal, final_normal, tangent_space_normal,
-					h.tangent, h.bitangent, uv, albedo, orm, metalness, roughness, mat.specular, emissive, V, NdotV);
+					h.tangent, h.bitangent, debug_uv, albedo, orm, metalness, roughness, mat.specular, emissive, V, NdotV);
 			return;
 		}
 	}
@@ -546,6 +560,8 @@ layout(set = 1, binding = 0) uniform texture2D bindless_textures[];
 #include "raytracing_samplers_inc.glsl"
 
 // clang-format off
+#include "raytracing_material_eval_inc.glsl"
+
 layout(set = 0, binding = 32, std430) readonly buffer MotionTransforms {
 	InstanceMotionData motion_transforms[];
 };
@@ -597,10 +613,18 @@ void main() {
 	}
 #else
 	// HG0: Standard material alpha test.
-	vec2 uv = fetch_uv(geom, i0, i1, i2, bary);
 	MaterialData mat = materials[geometry_idx];
-	uv = uv * mat.uv1_scale + mat.uv1_offset;
-	float alpha = texture(sampler2D(bindless_textures[nonuniformEXT(mat.albedo_texture_idx)], SAMPLER_LINEAR_WITH_MIPMAPS_REPEAT), uv).a;
+
+	vec3 world_pos = gl_WorldRayOriginEXT + gl_WorldRayDirectionEXT * gl_HitTEXT;
+	vec3 world_normal = vec3(0.0, 1.0, 0.0);
+	if ((mat.flags & RT_MAT_FLAG_TRIPLANAR) != 0u) {
+		// Only triplanar needs a normal, and fetching the frame is not free.
+		TBNResult ah_tbn = fetch_tbn(geom, i0, i1, i2, bary);
+		world_normal = normalize(mat3(gl_ObjectToWorldEXT) * ah_tbn.normal);
+	}
+
+	MaterialUV muv = material_uv_from_world(mat, geom, fetch_uv(geom, i0, i1, i2, bary), world_pos, world_normal);
+	float alpha = material_uv_sample(mat.albedo_texture_idx, muv, mat.flags).a;
 	alpha *= mat.albedo_color.a;
 
 	if (alpha < 0.5) {
@@ -674,6 +698,7 @@ layout(buffer_reference, std140) readonly buffer CustomMaterialUniforms{
 float global_time = scene_data_block.data.time;
 float global_prev_time = 0.0;
 mat4 read_model_matrix = mat4(0.0);
+mat3 model_normal_matrix = mat3(0.0);
 mat4 m_INV_MODEL_MATRIX = mat4(0.0);
 mat4 read_view_matrix = transpose(mat4(scene_data_block.data.view_matrix[0], scene_data_block.data.view_matrix[1], scene_data_block.data.view_matrix[2], vec4(0.0, 0.0, 0.0, 1.0)));
 mat4 inv_view_matrix = transpose(mat4(scene_data_block.data.inv_view_matrix[0], scene_data_block.data.inv_view_matrix[1], scene_data_block.data.inv_view_matrix[2], vec4(0.0, 0.0, 0.0, 1.0)));
@@ -727,6 +752,7 @@ void main() {
 	mat4 rt_inv_aabb_xform;
 	get_aabb_compression_xforms(rt_geom, rt_aabb_xform, rt_inv_aabb_xform);
 	read_model_matrix = mat4(gl_ObjectToWorldEXT) * rt_inv_aabb_xform;
+	model_normal_matrix = mat3(read_model_matrix);
 	m_INV_MODEL_MATRIX = rt_aabb_xform * mat4(gl_WorldToObjectEXT);
 
 	/* RT_CUSTOM_INTERSECTION_CODE */

@@ -1404,8 +1404,11 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 		s_default_mat.data.ao_strength = 1.0f;
 		s_default_mat.data.uv1_scale[0] = 1.0f;
 		s_default_mat.data.uv1_scale[1] = 1.0f;
+		s_default_mat.data.uv1_scale[2] = 1.0f;
 		s_default_mat.data.uv1_offset[0] = 0.0f;
 		s_default_mat.data.uv1_offset[1] = 0.0f;
+		s_default_mat.data.uv1_offset[2] = 0.0f;
+		s_default_mat.data.uv1_blend_sharpness = 1.0f;
 		s_default_mat_initialized = true;
 	}
 
@@ -1468,8 +1471,11 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 	mat.emission_texture_idx = 0;
 	mat.uv1_scale[0] = 1.0f;
 	mat.uv1_scale[1] = 1.0f;
+	mat.uv1_scale[2] = 1.0f;
 	mat.uv1_offset[0] = 0.0f;
 	mat.uv1_offset[1] = 0.0f;
+	mat.uv1_offset[2] = 0.0f;
+	mat.uv1_blend_sharpness = 1.0f;
 	mat.normal_map_depth = 1.0f;
 	mat.uniform_address = 0;
 
@@ -1722,12 +1728,13 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 		mat.emission_strength = emission_energy_var;
 	}
 
-	// UV1 scale and offset (vec3 in Godot, we only use xy).
+	// UV1 scale and offset (vec3 in Godot; Z is only used by triplanar mapping).
 	Variant uv1_scale_var = material_storage->material_get_param(p_material_rid, "uv1_scale");
 	if (uv1_scale_var.get_type() == Variant::VECTOR3) {
 		Vector3 s = uv1_scale_var;
 		mat.uv1_scale[0] = s.x;
 		mat.uv1_scale[1] = s.y;
+		mat.uv1_scale[2] = s.z;
 	}
 
 	Variant uv1_offset_var = material_storage->material_get_param(p_material_rid, "uv1_offset");
@@ -1735,6 +1742,25 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 		Vector3 o = uv1_offset_var;
 		mat.uv1_offset[0] = o.x;
 		mat.uv1_offset[1] = o.y;
+		mat.uv1_offset[2] = o.z;
+	}
+
+	// Triplanar mapping. BaseMaterial3D bakes this into its generated shader,
+	// which the fixed-function hit group never runs, so it mirrors the state
+	// into these params purely for us (see BaseMaterial3D::_update_shader).
+	Variant triplanar_var = material_storage->material_get_param(p_material_rid, "rt_uv1_triplanar");
+	if (triplanar_var.get_type() == Variant::BOOL && (bool)triplanar_var) {
+		mat.flags |= RT_MAT_FLAG_TRIPLANAR;
+
+		Variant world_var = material_storage->material_get_param(p_material_rid, "rt_uv1_world_triplanar");
+		if (world_var.get_type() == Variant::BOOL && (bool)world_var) {
+			mat.flags |= RT_MAT_FLAG_TRIPLANAR_WORLD;
+		}
+
+		Variant sharpness_var = material_storage->material_get_param(p_material_rid, "uv1_blend_sharpness");
+		if (sharpness_var.get_type() == Variant::FLOAT) {
+			mat.uv1_blend_sharpness = sharpness_var;
+		}
 	}
 
 	// Point filtering: check if material requests nearest filtering (e.g. pixel art).

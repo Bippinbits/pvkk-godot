@@ -84,23 +84,6 @@ HitData compute_hit_data() {
 // HELPERS
 // ============================================================================
 
-vec4 sample_bindless_texture(uint tex_idx, vec2 uv) {
-	return texture(sampler2D(bindless_textures[nonuniformEXT(tex_idx)], SAMPLER_LINEAR_WITH_MIPMAPS_REPEAT), uv);
-}
-
-/// Sample with point/nearest filtering (for pixel art textures).
-vec4 sample_bindless_texture_point(uint tex_idx, vec2 uv) {
-	return texture(sampler2D(bindless_textures[nonuniformEXT(tex_idx)], SAMPLER_NEAREST_REPEAT), uv);
-}
-
-/// Sample with the appropriate filter based on material flags (bit 2 = point filtering).
-vec4 sample_material_texture(uint tex_idx, vec2 uv, uint mat_flags) {
-	if ((mat_flags & 4u) != 0u) {
-		return sample_bindless_texture_point(tex_idx, uv);
-	}
-	return sample_bindless_texture(tex_idx, uv);
-}
-
 /// Apply tangent-space normal map to geometry normal.
 vec3 apply_normal_map(HitData h, vec3 tangent_space_normal, float normal_map_depth) {
 	vec3 mapped = h.tangent * tangent_space_normal.x + h.bitangent * tangent_space_normal.y + h.geometry_normal * tangent_space_normal.z;

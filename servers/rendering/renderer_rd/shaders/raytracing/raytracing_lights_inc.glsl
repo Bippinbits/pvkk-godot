@@ -174,7 +174,7 @@ bool ray_query_alpha_test(uint geometry_idx, uint primitive_id, vec2 candidate_b
 	vec2 uv = fetch_uv(geom, i0, i1, i2, bary);
 
 	MaterialData mat = materials[geometry_idx];
-	uv = uv * mat.uv1_scale + mat.uv1_offset;
+	uv = uv * mat.uv1_scale.xy + mat.uv1_offset.xy;
 	float alpha = texture(sampler2D(bindless_textures[nonuniformEXT(mat.albedo_texture_idx)], SAMPLER_LINEAR_WITH_MIPMAPS_REPEAT), uv).a;
 	alpha *= mat.albedo_color.a;
 

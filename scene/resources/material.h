@@ -519,6 +519,12 @@ private:
 		StringName albedo_texture_size;
 		StringName z_clip_scale;
 		StringName fov_override;
+
+		// Not shader uniforms: triplanar mapping exists only as generated shader
+		// code, so it is mirrored into params for renderers that evaluate this
+		// material analytically instead of running its shader (the pathtracer).
+		StringName rt_uv1_triplanar;
+		StringName rt_uv1_world_triplanar;
 	};
 
 	static Mutex material_mutex;
