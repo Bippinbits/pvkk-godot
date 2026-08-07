@@ -62,7 +62,7 @@ public:
 
 	/* PIPELINES */
 
-	virtual void mesh_generate_pipelines(RID p_mesh, bool p_background_compilation) = 0;
+	virtual void mesh_generate_pipelines(RID p_mesh) = 0;
 	virtual uint32_t get_pipeline_compilations(RS::PipelineSource p_source) = 0;
 
 	/* SDFGI UPDATE */

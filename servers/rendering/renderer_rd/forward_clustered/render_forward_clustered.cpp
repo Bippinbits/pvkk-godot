@@ -4891,7 +4891,7 @@ uint32_t RenderForwardClustered::geometry_instance_get_pair_mask() {
 	return (1 << RS::INSTANCE_VOXEL_GI);
 }
 
-void RenderForwardClustered::mesh_generate_pipelines(RID p_mesh, bool p_background_compilation) {
+void RenderForwardClustered::mesh_generate_pipelines(RID p_mesh) {
 	RendererRD::MaterialStorage *material_storage = RendererRD::MaterialStorage::get_singleton();
 	RendererRD::MeshStorage *mesh_storage = RendererRD::MeshStorage::get_singleton();
 	RID shadow_mesh = mesh_storage->mesh_get_shadow_mesh(p_mesh);
@@ -4937,13 +4937,6 @@ void RenderForwardClustered::mesh_generate_pipelines(RID p_mesh, bool p_backgrou
 		surface.uses_depth = surface.uses_opaque || (surface.uses_transparent && material->shader_data->uses_depth_in_alpha_pass());
 		surface.can_use_lightmap = mesh_storage->mesh_surface_get_format(mesh_surface) & RS::ARRAY_FORMAT_TEX_UV2;
 		_mesh_compile_pipelines_for_surface(surface, global_pipeline_data_required, RS::PIPELINE_SOURCE_MESH, &pipeline_pairs);
-	}
-
-	// Wait for all the pipelines that were compiled. This will force the loader to wait on all ubershader pipelines to be ready.
-	if (!p_background_compilation && !pipeline_pairs.is_empty()) {
-		for (ShaderPipelinePair pair : pipeline_pairs) {
-			pair.first->pipeline_hash_map.wait_for_pipeline(pair.second.hash());
-		}
 	}
 }
 

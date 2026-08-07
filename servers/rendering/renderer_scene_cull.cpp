@@ -1576,8 +1576,8 @@ Variant RendererSceneCull::instance_geometry_get_shader_parameter_default_value(
 	return instance->instance_uniforms.get_default(p_parameter);
 }
 
-void RendererSceneCull::mesh_generate_pipelines(RID p_mesh, bool p_background_compilation) {
-	scene_render->mesh_generate_pipelines(p_mesh, p_background_compilation);
+void RendererSceneCull::mesh_generate_pipelines(RID p_mesh) {
+	scene_render->mesh_generate_pipelines(p_mesh);
 }
 
 uint32_t RendererSceneCull::get_pipeline_compilations(RS::PipelineSource p_source) {

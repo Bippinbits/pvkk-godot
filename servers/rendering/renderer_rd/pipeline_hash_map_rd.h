@@ -142,6 +142,10 @@ public:
 		// Queue a background compilation task.
 		WorkerThreadPool::TaskID task_id = WorkerThreadPool::get_singleton()->add_template_task(creation_object, creation_function, p_key, p_high_priority, "PipelineCompilation");
 		compilation_tasks.insert(p_key_hash, task_id);
+
+		if (ResourceLoader::is_within_load()) {
+			ResourceLoader::add_required_task_to_finish(task_id);
+		}
 	}
 
 	void wait_for_pipeline(uint32_t p_key_hash) {

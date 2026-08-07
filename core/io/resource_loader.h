@@ -223,6 +223,7 @@ private:
 	static thread_local int load_nesting;
 	static thread_local HashMap<int, HashMap<String, Ref<Resource>>> res_ref_overrides; // Outermost key is nesting level.
 	static thread_local ThreadLoadTask *curr_load_task;
+	static thread_local LocalVector<WorkerThreadPool::TaskID> required_tasks_to_finish;
 
 	static SafeBinaryMutex<BINARY_MUTEX_TAG> thread_load_mutex;
 	friend SafeBinaryMutex<BINARY_MUTEX_TAG> &_get_res_loader_mutex();
@@ -326,6 +327,8 @@ public:
 	static bool add_custom_resource_format_loader(const String &script_path);
 	static void add_custom_loaders();
 	static void remove_custom_loaders();
+
+	static void add_required_task_to_finish(WorkerThreadPool::TaskID p_task);
 
 	static void set_create_missing_resources_if_class_unavailable(bool p_enable);
 	_FORCE_INLINE_ static bool is_creating_missing_resources_if_class_unavailable_enabled() { return create_missing_resources_if_class_unavailable; }

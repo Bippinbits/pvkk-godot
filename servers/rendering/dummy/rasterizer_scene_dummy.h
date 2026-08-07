@@ -101,7 +101,7 @@ public:
 
 	/* PIPELINES */
 
-	virtual void mesh_generate_pipelines(RID p_mesh, bool p_background_compilation) override {}
+	virtual void mesh_generate_pipelines(RID p_mesh) override {}
 	virtual uint32_t get_pipeline_compilations(RS::PipelineSource p_source) override { return 0; }
 
 	/* SDFGI UPDATE */
