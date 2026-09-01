@@ -3839,6 +3839,9 @@ void RenderingServer::init() {
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/limits/cluster_builder/max_clustered_elements", PROPERTY_HINT_RANGE, "32,8192,1"), 512);
 	GLOBAL_DEF("rendering/pathtracing/use_shader_execution_reordering", true);
 	GLOBAL_DEF("rendering/pathtracing/async_shader_compilation", true);
+	// Transparency budgets are live UBO parameters.
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/pathtracing/max_transparency_layers", PROPERTY_HINT_RANGE, "0,64,1"), 4);
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/pathtracing/transparency_max_bounce", PROPERTY_HINT_RANGE, "0,8,1"), 2);
 	GLOBAL_DEF_RST("rendering/pathtracing/multimesh_cache_cpu_transforms", false);
 	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/pathtracing/deformed_mesh_cache_ttl_frames", PROPERTY_HINT_RANGE, "1,3600,1"), 60);
 	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/pathtracing/multimesh_blas_cache_ttl_frames", PROPERTY_HINT_RANGE, "1,18000,1"), 3600);

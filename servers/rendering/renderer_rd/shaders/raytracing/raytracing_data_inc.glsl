@@ -48,7 +48,9 @@ struct GeometryData {
 	uint prev_vertex_address_lo;
 	uint prev_vertex_address_hi;
 
-	uint _pad[5];
+	uint layers; // VisualInstance3D render layers of the owning instance.
+	uint instance_uniforms_ofs; // Per-instance shader uniforms offset in the global buffer.
+	uint _pad[3];
 };
 
 void get_aabb_compression_xforms(GeometryData geom, out mat4 aabb_xform, out mat4 inv_aabb_xform) {
@@ -89,6 +91,20 @@ struct InstanceMotionData {
 #define RT_MAT_FLAG_POINT_FILTER 4u
 #define RT_MAT_FLAG_TRIPLANAR 8u
 #define RT_MAT_FLAG_TRIPLANAR_WORLD 16u
+
+// Blend class of transparent surfaces (bits 5-7). Opaque surfaces leave 0.
+#define RT_MAT_BLEND_CLASS_SHIFT 5u
+#define RT_MAT_BLEND_CLASS_MASK (7u << 5u)
+#define RT_BLEND_CLASS_MIX 0u
+#define RT_BLEND_CLASS_ADD 1u
+#define RT_BLEND_CLASS_SUB 2u
+#define RT_BLEND_CLASS_OIT 3u
+#define RT_BLEND_CLASS_MUL 4u
+#define RT_BLEND_CLASS_PREMULT 5u
+#define RT_MAT_FLAG_DEPTH_DRAW_ALWAYS 256u
+#define RT_MAT_FLAG_UNSHADED 512u
+#define RT_MAT_FLAG_TRANSPARENT 1024u
+#define RT_MAT_FLAG_ALPHA_SCISSOR 2048u
 
 struct MaterialData {
 	uint albedo_texture_idx;

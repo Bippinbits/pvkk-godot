@@ -50,20 +50,24 @@ binormal = mat3(rt_world_to_object_decomp) * rt_bitangent;
 uv_interp = rt_uv;
 uv2_interp = rt_uv;
 color_interp = rt_color;
-view = -gl_WorldRayDirectionEXT;
+// VIEW is view-space in the rasterizer; rotate the incoming ray to match.
+view = -normalize(mat3(rt_view_matrix) * gl_WorldRayDirectionEXT);
 rt_front_facing = rt_front_face;
 rt_screen_uv = vec2(gl_LaunchIDEXT.xy) / vec2(gl_LaunchSizeEXT.xy);
 rt_frag_coord = vec4(gl_LaunchIDEXT.xy, 0.0, 1.0);
 
+rt_modelview_matrix = rt_view_matrix * read_model_matrix;
+rt_modelview_normal_matrix = mat3(rt_modelview_matrix);
+
 // Run vertex shader (computes varyings, may modify built-ins).
 /* RT_CUSTOM_VERTEX_CALL */
 
-// Post-vertex transform: object-space -> view-space (mirrors rasterizer post-vertex).
-mat4 rt_modelview = rt_view_matrix * read_model_matrix;
-vertex = (rt_modelview * vec4(vertex, 1.0)).xyz;
-normal = normalize(mat3(rt_modelview) * normal);
-tangent = normalize(mat3(rt_modelview) * tangent);
-binormal = normalize(mat3(rt_modelview) * binormal);
+// Post-vertex transform: object-space -> view-space (mirrors rasterizer post-vertex,
+// honoring MODELVIEW_MATRIX overrides from the vertex code).
+vertex = (rt_modelview_matrix * vec4(vertex, 1.0)).xyz;
+normal = normalize(rt_modelview_normal_matrix * normal);
+tangent = normalize(rt_modelview_normal_matrix * tangent);
+binormal = normalize(rt_modelview_normal_matrix * binormal);
 
 // Fragment outputs with sensible defaults.
 vec3 albedo = vec3(1.0);
@@ -88,6 +92,26 @@ float alpha_scissor_threshold = 0.0;
 float alpha_hash_scale = 1.0;
 float alpha_antialiasing_edge = 0.0;
 vec2 alpha_texture_coordinate = vec2(0.0);
+vec3 light_vertex = vertex;
+vec2 rt_point_coord = vec2(0.0);
+float rt_depth = 0.0;
+float premul_alpha = 1.0;
+vec4 custom_radiance = vec4(0.0);
+vec4 custom_irradiance = vec4(0.0);
+vec4 transmittance_color = vec4(0.0);
+float transmittance_depth = 0.0;
+float transmittance_boost = 0.0;
+// Raster-only builtins. FOG writes are discarded. VOLUMETRIC_FOG reads see the
+// analytic fog at this hit in the raster froxel convention (rgb = premultiplied
+// inscatter, a = transmittance); neutral no-fog is a = 1.
+vec4 fog = vec4(0.0);
+vec4 volumetric_fog_rt = vec4(0.0, 0.0, 0.0, 1.0);
+#ifdef RT_STAGE_CLOSEST_HIT
+if ((RT_FLAGS & RT_FLAG_FOG_ENABLED) != 0u) {
+	vec4 rt_analytic_fog = fog_process(scene_data_block.data, vertex);
+	volumetric_fog_rt = vec4(rt_analytic_fog.rgb * rt_analytic_fog.a, 1.0 - rt_analytic_fog.a);
+}
+#endif
 
 {
 	/* RT_CUSTOM_FRAGMENT_CODE */

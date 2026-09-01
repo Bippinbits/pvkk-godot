@@ -31,9 +31,9 @@ struct RTLightData {
 	float indirect_energy; // Godot indirect energy multiplier.
 	float inv_spot_attenuation; // Spot cone softness.
 	float cos_spot_angle; // Cosine of spot cone half-angle.
-	float _pad0;
+	uint light_masks; // Bits 0-19: light_cull_mask (lighting test). Bits 24-31: TLAS shadow-ray mask.
 	vec3 spot_direction; // Spot direction (normalized, world space).
-	float _pad1;
+	uint pad0;
 };
 
 // Light buffer SSBO (binding provided by the including shader via RT_LIGHT_BUFFER_BINDING).
@@ -163,9 +163,7 @@ float lights_get_specular_multiplier(float specular_amount, float roughness) {
 // Inline Alpha Test (shared by all ray query proceed loops)
 // ============================================================================
 
-/// Inline alpha test for ray query candidates. Returns true if the hit is opaque (alpha >= 0.5).
-/// Mirrors the any-hit shader logic for use with inline ray queries.
-bool ray_query_alpha_test(uint geometry_idx, uint primitive_id, vec2 candidate_bary) {
+vec4 ray_query_surface(uint geometry_idx, uint primitive_id, vec2 candidate_bary) {
 	vec3 bary = vec3(1.0 - candidate_bary.x - candidate_bary.y, candidate_bary.x, candidate_bary.y);
 
 	GeometryData geom = geometries[geometry_idx];
@@ -175,77 +173,112 @@ bool ray_query_alpha_test(uint geometry_idx, uint primitive_id, vec2 candidate_b
 
 	MaterialData mat = materials[geometry_idx];
 	uv = uv * mat.uv1_scale.xy + mat.uv1_offset.xy;
-	float alpha = texture(sampler2D(bindless_textures[nonuniformEXT(mat.albedo_texture_idx)], SAMPLER_LINEAR_WITH_MIPMAPS_REPEAT), uv).a;
-	alpha *= mat.albedo_color.a;
+	vec4 albedo = texture(sampler2D(bindless_textures[nonuniformEXT(mat.albedo_texture_idx)], SAMPLER_LINEAR_WITH_MIPMAPS_REPEAT), uv);
+	albedo *= mat.albedo_color;
+	if ((mat.flags & RT_MAT_BLEND_CLASS_MASK) == RT_BLEND_CLASS_PREMULT && albedo.a > 1e-6) {
+		albedo.rgb /= albedo.a;
+	}
 
-	return alpha >= 0.5;
+	return clamp(albedo, vec4(0.0), vec4(1.0));
+}
+
+float ray_query_alpha(uint geometry_idx, uint primitive_id, vec2 candidate_bary) {
+	return ray_query_surface(geometry_idx, primitive_id, candidate_bary).a;
+}
+
+/// Inline alpha test for non-transparent ray query candidates.
+bool ray_query_alpha_test(uint geometry_idx, uint primitive_id, vec2 candidate_bary) {
+	return ray_query_alpha(geometry_idx, primitive_id, candidate_bary) >= 0.5;
 }
 
 // ============================================================================
 // Shadow Ray (traceRayEXT pipeline)
 // ============================================================================
 
-/// Returns true if light is visible.
+/// Returns colored light transmittance.
 /// Uses SkipClosestHitShader so only any_hit (alpha test) and miss are invoked.
-/// TerminateOnFirstHit causes early exit on first confirmed opaque hit.
-bool lights_trace_shadow_ray(vec3 origin, vec3 direction, float max_dist, inout uint rng_state) {
+/// TerminateOnFirstHit exits on the first opaque or stochastic alpha blocker.
+/// p_shadow_mask is the light's 8-bit shadow-caster group mask.
+vec3 lights_trace_shadow_ray(vec3 origin, vec3 direction, float max_dist, uint p_shadow_mask, inout uint rng_state) {
 #ifdef USE_RAY_QUERY_SHADOWS
-	// Ray queries are significantly faster, but can not handle complex alpha materials
+	// Ray queries are faster but approximate custom or animated material outputs
+	// with a direct albedo texture sample.
+	vec3 transmittance = vec3(1.0);
 	rayQueryEXT shadow_rq;
 	rayQueryInitializeEXT(shadow_rq, tlas,
-			gl_RayFlagsTerminateOnFirstHitEXT,
-			0xFF, origin, 0.001, direction, max_dist - 0.001);
+			gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsNoOpaqueEXT,
+			p_shadow_mask, origin, 0.001, direction, max_dist - 0.001);
 
 	while (rayQueryProceedEXT(shadow_rq)) {
 		if (rayQueryGetIntersectionTypeEXT(shadow_rq, false) == gl_RayQueryCandidateIntersectionTriangleEXT) {
-			// quick and dirty way to check transparency by sampling the alpha texture
-			// this completely ignores the actual material, so might not be accurate
-			if (ray_query_alpha_test(
-						rayQueryGetIntersectionInstanceCustomIndexEXT(shadow_rq, false),
-						rayQueryGetIntersectionPrimitiveIndexEXT(shadow_rq, false),
-						rayQueryGetIntersectionBarycentricsEXT(shadow_rq, false))) {
+			uint geometry_idx = rayQueryGetIntersectionInstanceCustomIndexEXT(shadow_rq, false);
+			uint primitive_idx = rayQueryGetIntersectionPrimitiveIndexEXT(shadow_rq, false);
+			vec2 bary = rayQueryGetIntersectionBarycentricsEXT(shadow_rq, false);
+			vec4 surface = ray_query_surface(geometry_idx, primitive_idx, bary);
+			float alpha = surface.a;
+			bool transparent_shadow = (materials[geometry_idx].flags & RT_MAT_FLAG_TRANSPARENT) != 0u;
+			if (transparent_shadow && rand(rng_state) >= alpha) {
+				transmittance *= mix(vec3(1.0), surface.rgb, alpha);
+			} else if (transparent_shadow || alpha >= 0.5) {
 				rayQueryConfirmIntersectionEXT(shadow_rq);
 			}
 		}
 	}
 
-	return rayQueryGetIntersectionTypeEXT(shadow_rq, true) == gl_RayQueryCommittedIntersectionNoneEXT;
+	return rayQueryGetIntersectionTypeEXT(shadow_rq, true) == gl_RayQueryCommittedIntersectionNoneEXT
+			? transmittance
+			: vec3(0.0);
 #elif defined(USE_SER)
+	PathPayload saved_payload = payload;
+	PathState shadow_ps;
+	shadow_ps.radiance = vec3(0.0);
+	shadow_ps.throughput = vec3(1.0);
+	shadow_ps.packed_bounces_flags = set_shadow_ray(0u);
+	shadow_ps.rng_state = rng_state;
+	shadow_ps.hit_t = 0.0;
+	shadow_ps.offset_normal = vec3(0.0, 0.0, 1.0);
+	shadow_ps.next_ray_dir = vec3(0.0, 0.0, 1.0);
+	path_pack(payload, shadow_ps);
+
 	hitObjectNV hitObject;
 	hitObjectTraceRayNV(hitObject, tlas,
-			gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT,
-			0xFF, 0, 0, 0,
+			gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT | gl_RayFlagsNoOpaqueEXT,
+			p_shadow_mask, 0, 0, 0,
 			origin, 0.001, direction, max_dist - 0.001, 0);
 
-	return !(hitObjectIsHitNV(hitObject));
+	shadow_ps = path_unpack(payload);
+	rng_state = shadow_ps.rng_state;
+	payload = saved_payload;
+	return hitObjectIsHitNV(hitObject) ? vec3(0.0) : shadow_ps.throughput;
 #else
-	/// The miss shader writes radiance = vec3(1.0) for shadow rays (visible).
+	/// The miss shader copies accumulated transmittance to radiance.
 	/// If an opaque hit occurs, miss is never called and radiance stays vec3(0.0).
 	// Save full payload, set up shadow ray, then restore after trace.
 	PathPayload saved_payload = payload;
 
 	PathState shadow_ps;
 	shadow_ps.radiance = vec3(0.0);
-	shadow_ps.throughput = vec3(0.0);
+	shadow_ps.throughput = vec3(1.0);
 	shadow_ps.packed_bounces_flags = set_shadow_ray(0u);
-	shadow_ps.rng_state = 0u;
+	shadow_ps.rng_state = rng_state;
 	shadow_ps.hit_t = 0.0;
 	shadow_ps.offset_normal = vec3(0.0, 0.0, 1.0);
 	shadow_ps.next_ray_dir = vec3(0.0, 0.0, 1.0);
 	path_pack(payload, shadow_ps);
 
 	traceRayEXT(tlas,
-			gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT,
-			0xFF, 0, 0, 0,
+			gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT | gl_RayFlagsNoOpaqueEXT,
+			p_shadow_mask, 0, 0, 0,
 			origin, 0.001, direction, max_dist - 0.001, 0);
 
-	// Unpack to check visibility (miss shader packs radiance = 1.0).
+	// Unpack the colored visibility written by the miss shader.
 	shadow_ps = path_unpack(payload);
-	bool visible = shadow_ps.radiance.x > 0.5;
+	vec3 transmittance = shadow_ps.radiance;
+	rng_state = shadow_ps.rng_state;
 
 	payload = saved_payload;
 
-	return visible;
+	return transmittance;
 #endif
 }
 
@@ -262,7 +295,8 @@ vec3 lights_evaluate_direct_lighting(
 		MaterialProperties material,
 		inout uint rng_state,
 		bool is_indirect_bounce,
-		uint light_count) {
+		uint light_count,
+		uint instance_layers) {
 	if (light_count == 0u) {
 		return vec3(0.0);
 	}
@@ -276,10 +310,12 @@ vec3 lights_evaluate_direct_lighting(
 		uint idx = min(uint(rand(rng_state) * float(light_count)), light_count - 1u);
 		RTLightData test_light = rt_lights[idx];
 
+		// light_cull_mask: the light only affects intersecting layers.
+		bool is_valid = (test_light.light_masks & instance_layers & 0xFFFFFu) != 0u;
+
 		// Range check for positional lights.
 		bool is_positional = (test_light.type == RT_LIGHT_TYPE_OMNI || test_light.type == RT_LIGHT_TYPE_SPOT);
-		bool is_valid = !is_positional;
-		if (!is_valid) {
+		if (is_valid && is_positional) {
 			vec3 to_l = test_light.position - hit_pos;
 			float d2 = dot(to_l, to_l);
 			is_valid = (test_light.max_range_squared == 0.0 || d2 <= test_light.max_range_squared);
@@ -345,9 +381,8 @@ vec3 lights_evaluate_direct_lighting(
 			spot_atten = 1.0 - pow(spot_rim, light.inv_spot_attenuation);
 		}
 
-		if (!lights_trace_shadow_ray(hit_pos, L, shadow_dist, rng_state)) {
-			return vec3(0.0);
-		}
+		vec3 shadow_transmittance = lights_trace_shadow_ray(
+				hit_pos, L, shadow_dist, (light.light_masks >> 24u) & 0xFFu, rng_state);
 
 		// Evaluate BRDF (diffuse + specular separately for specular_amount control).
 		vec3 brdf_diffuse, brdf_specular;
@@ -364,7 +399,7 @@ vec3 lights_evaluate_direct_lighting(
 		float indirect_mul = is_indirect_bounce ? light.indirect_energy : 1.0;
 
 		// NdotL is already included in brdf_value (evalLambertian/evalMicrofacet bake it in).
-		vec3 contribution = brdf_value * light.emission * atten * indirect_mul;
+		vec3 contribution = brdf_value * light.emission * shadow_transmittance * atten * indirect_mul;
 		return contribution / max(light_select_pdf, 1e-10);
 	}
 	// === CONE LIGHT PATH (directional) ===
@@ -378,9 +413,8 @@ vec3 lights_evaluate_direct_lighting(
 			return vec3(0.0);
 		}
 
-		if (!lights_trace_shadow_ray(hit_pos, L, ls.max_distance, rng_state)) {
-			return vec3(0.0);
-		}
+		vec3 shadow_transmittance = lights_trace_shadow_ray(
+				hit_pos, L, ls.max_distance, (light.light_masks >> 24u) & 0xFFu, rng_state);
 
 		vec3 brdf_diffuse, brdf_specular;
 		evalCombinedBRDFSeparate(N, L, V, material, brdf_diffuse, brdf_specular);
@@ -390,6 +424,6 @@ vec3 lights_evaluate_direct_lighting(
 
 		float indirect_mul = is_indirect_bounce ? light.indirect_energy : 1.0;
 
-		return brdf_value * light.emission * indirect_mul / max(light_select_pdf, 1e-10);
+		return brdf_value * light.emission * shadow_transmittance * indirect_mul / max(light_select_pdf, 1e-10);
 	}
 }

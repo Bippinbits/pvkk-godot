@@ -19,7 +19,10 @@
 #define RT_PARAM_SAMPLE_COUNT 1 // rt_params[0].y - Samples per pixel
 #define RT_PARAM_MAX_BOUNCES 2 // rt_params[0].z - Maximum ray bounces
 #define RT_PARAM_DENOISER 3 // rt_params[0].w - Denoiser selection (0=none, 1=DLSS RR)
-// Indices 4-13 reserved for future use
+#define RT_PARAM_MAX_TRANSPARENCY_LAYERS 4 // rt_params[1].x - per-segment peel budget for all blend modes (0 = transparency off)
+#define RT_PARAM_TRANSPARENCY_MAX_BOUNCE 5 // rt_params[1].y - last bounce with transparency handling
+#define RT_PARAM_TRANSPARENT_COUNT 6 // rt_params[1].z - instances in the unified TLAS transparent camera lane
+// Indices 7-13 reserved for future use
 #define RT_PARAM_LIGHT_COUNT 14 // rt_params[3].z - Number of active lights in light buffer
 #define RT_PARAM_FRAME_INDEX 15 // rt_params[3].w - Frame counter for temporal variation
 
@@ -37,12 +40,17 @@
 
 struct PathPayload {
 	uint packed_rt[3]; // 12 bytes - radiance+throughput interleaved as fp16
-	uint packed_bounces_flags; //  4 bytes - [flags:8][unused:8][diffuse:8][total:8]
+	uint packed_bounces_flags; //  4 bytes - [flags:8][peel_alpha:8][diffuse:8][total:8]
 	uint rng_state; //  4 bytes - RNG state for PCG
 	float hit_t; //  4 bytes - ray distance, used by raygen to rebuild origin
 	uint oct_offset_nrm; //  4 bytes - packUnorm2x16(vec3_to_oct(offset normal))
 	uint oct_next_dir; //  4 bytes - packUnorm2x16(vec3_to_oct(next direction))
 };
+
+const uint PEEL_RAY_FLAG = (1u << 28);
+const uint PEEL_FIRST_LAYER_FLAG = (1u << 29);
+const uint PEEL_HAS_CONTINUATION_FLAG = (1u << 30);
+const uint PEEL_DEPTH_BARRIER_HIT_FLAG = (1u << 31);
 
 /// Unpacked fp32 working copy of the payload.
 struct PathState {
@@ -125,6 +133,14 @@ uint set_primary_miss(uint packed) {
 }
 bool is_primary_miss(uint packed) {
 	return (packed & PRIMARY_MISS_FLAG) != 0u;
+}
+
+// Peel traces store per-layer alpha in the spare byte (bits 16-23).
+float get_peel_alpha(uint packed) {
+	return float((packed >> 16u) & 0xFFu) / 255.0;
+}
+uint set_peel_alpha(uint packed, float a) {
+	return (packed & ~0x00FF0000u) | (uint(clamp(a, 0.0, 1.0) * 255.0 + 0.5) << 16u);
 }
 
 const uint PATH_TERMINATED_FLAG = (1u << 26);

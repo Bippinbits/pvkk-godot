@@ -544,6 +544,9 @@
 		<constant name="RT_DEBUG_BRDF_REJECTION" value="22" enum="PathtracingDebugMode">
 			Displays rays that were rejected by the BRDF sampling process, useful for debugging importance sampling issues.
 		</constant>
+		<constant name="RT_DEBUG_TRANSPARENCY_LAYERS" value="23" enum="PathtracingDebugMode">
+			Displays the transparency cost of the primary segment as a heatmap: green (no transparent hits), yellow (2 peeled layers), red (4 or more peeled layers).
+		</constant>
 		<constant name="FOG_MODE_EXPONENTIAL" value="0" enum="FogMode">
 			Use a physically-based fog model defined primarily by fog density.
 		</constant>

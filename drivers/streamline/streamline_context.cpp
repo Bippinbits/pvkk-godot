@@ -172,6 +172,62 @@ void StreamlineContext::init_device_d3d12(void *d3d12_device) {
 	if (!is_game) \
 		return;
 
+bool StreamlineContext::dlss_clamp_render_size(int p_target_width, int p_target_height, int &r_render_width, int &r_render_height) {
+	if (slDLSSGetOptimalSettings == nullptr || !streamline_capabilities.dlss_available) {
+		return false;
+	}
+
+	// Ordered from the highest render resolution to the lowest.
+	const sl::DLSSMode modes[] = { sl::DLSSMode::eDLAA, sl::DLSSMode::eMaxQuality, sl::DLSSMode::eBalanced, sl::DLSSMode::eMaxPerformance, sl::DLSSMode::eUltraPerformance };
+	constexpr int mode_count = sizeof(modes) / sizeof(modes[0]);
+
+	sl::DLSSOptimalSettings settings[mode_count] = {};
+	bool valid[mode_count] = {};
+
+	for (int i = 0; i < mode_count; i++) {
+		sl::DLSSOptions options = {};
+		options.outputWidth = p_target_width;
+		options.outputHeight = p_target_height;
+		options.mode = modes[i];
+		valid[i] = slDLSSGetOptimalSettings(options, settings[i]) == sl::Result::eOk;
+
+		if (valid[i] &&
+				r_render_width >= (int)settings[i].renderWidthMin && r_render_width <= (int)settings[i].renderWidthMax &&
+				r_render_height >= (int)settings[i].renderHeightMin && r_render_height <= (int)settings[i].renderHeightMax) {
+			return false; // A mode already accepts this size; leave it alone.
+		}
+	}
+
+	// The requested size falls in a gap between two modes, or below the lowest one. Round down to
+	// the exact size of the nearest mode that does not render more pixels than were asked for, so
+	// lowering the resolution scale never makes the frame more expensive.
+	int chosen = -1;
+	for (int i = 0; i < mode_count; i++) {
+		if (valid[i] && (int)settings[i].optimalRenderWidth <= r_render_width) {
+			chosen = i;
+			break;
+		}
+	}
+
+	if (chosen == -1) {
+		// Below even Ultra Performance: use the lowest mode that is available.
+		for (int i = mode_count - 1; i >= 0; i--) {
+			if (valid[i]) {
+				chosen = i;
+				break;
+			}
+		}
+	}
+
+	if (chosen == -1) {
+		return false;
+	}
+
+	r_render_width = (int)settings[chosen].optimalRenderWidth;
+	r_render_height = (int)settings[chosen].optimalRenderHeight;
+	return true;
+}
+
 void StreamlineContext::dlssg_disable() {
 	STREAMLINE_GAME_ONLY; // Disable DLSS-G for editor or project settings.
 

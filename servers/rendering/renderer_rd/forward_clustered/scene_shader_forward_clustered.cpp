@@ -100,6 +100,7 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	actions.render_mode_values["blend_sub"] = Pair<int *, int>(&blend_mode, BLEND_MODE_SUB);
 	actions.render_mode_values["blend_mul"] = Pair<int *, int>(&blend_mode, BLEND_MODE_MUL);
 	actions.render_mode_values["blend_premul_alpha"] = Pair<int *, int>(&blend_mode, BLEND_MODE_PREMULTIPLIED_ALPHA);
+	actions.render_mode_values["blend_oit"] = Pair<int *, int>(&blend_mode, BLEND_MODE_OIT);
 
 	actions.render_mode_values["alpha_to_coverage"] = Pair<int *, int>(&alpha_antialiasing_mode, ALPHA_ANTIALIASING_ALPHA_TO_COVERAGE);
 	actions.render_mode_values["alpha_to_coverage_and_one"] = Pair<int *, int>(&alpha_antialiasing_mode, ALPHA_ANTIALIASING_ALPHA_TO_COVERAGE_AND_TO_ONE);
@@ -265,6 +266,8 @@ void SceneShaderForwardClustered::ShaderData::set_code_rt(const String &p_code_r
 	bool local_uses_alpha_clip = false;
 	bool local_uses_alpha_antialiasing = false;
 	bool local_uses_depth_prepass_alpha = false;
+	bool local_rt_force_opaque = false;
+	bool local_rt_force_transparent = false;
 
 	ShaderCompiler::IdentifierActions actions;
 	actions.entry_point_stages["vertex"] = ShaderCompiler::STAGE_VERTEX;
@@ -277,6 +280,10 @@ void SceneShaderForwardClustered::ShaderData::set_code_rt(const String &p_code_r
 	actions.render_mode_values["blend_sub"] = Pair<int *, int>(&blend_modei, BLEND_MODE_SUB);
 	actions.render_mode_values["blend_mul"] = Pair<int *, int>(&blend_modei, BLEND_MODE_MUL);
 	actions.render_mode_values["blend_premul_alpha"] = Pair<int *, int>(&blend_modei, BLEND_MODE_PREMULTIPLIED_ALPHA);
+	actions.render_mode_values["blend_oit"] = Pair<int *, int>(&blend_modei, BLEND_MODE_OIT);
+
+	actions.render_mode_flags["rt_force_opaque"] = &local_rt_force_opaque;
+	actions.render_mode_flags["rt_force_transparent"] = &local_rt_force_transparent;
 
 	actions.render_mode_values["alpha_to_coverage"] = Pair<int *, int>(&alpha_antialiasing_modei, ALPHA_ANTIALIASING_ALPHA_TO_COVERAGE);
 	actions.render_mode_values["alpha_to_coverage_and_one"] = Pair<int *, int>(&alpha_antialiasing_modei, ALPHA_ANTIALIASING_ALPHA_TO_COVERAGE_AND_TO_ONE);
@@ -345,6 +352,8 @@ void SceneShaderForwardClustered::ShaderData::set_code_rt(const String &p_code_r
 	rt->uses_alpha_antialiasing = local_uses_alpha_antialiasing;
 	rt->uses_depth_prepass_alpha = local_uses_depth_prepass_alpha;
 	rt->uses_blend_alpha = blend_mode_uses_blend_alpha(BlendMode(rt->blend_mode));
+	rt->force_opaque = local_rt_force_opaque;
+	rt->force_transparent = local_rt_force_transparent;
 
 	rt->uses_screen_texture = rt_gen_code.uses_screen_texture;
 	rt->uses_depth_texture = rt_gen_code.uses_depth_texture;
@@ -421,6 +430,10 @@ uint16_t SceneShaderForwardClustered::ShaderData::_get_shader_version(PipelineVe
 
 			if (p_color_pass_flags & PIPELINE_COLOR_PASS_FLAG_MULTIVIEW) {
 				shader_flags |= SHADER_COLOR_PASS_FLAG_MULTIVIEW;
+			}
+
+			if (p_color_pass_flags & PIPELINE_COLOR_PASS_FLAG_OIT) {
+				shader_flags |= SHADER_COLOR_PASS_FLAG_OIT;
 			}
 
 			return ShaderVersion::SHADER_VERSION_COLOR_PASS * 2 + shader_flags;
@@ -546,6 +559,30 @@ void SceneShaderForwardClustered::ShaderData::_create_pipeline(PipelineKey p_pip
 			}
 
 			blend_state = blend_state_color_blend;
+
+			if (p_pipeline_key.color_pass_flags & PIPELINE_COLOR_PASS_FLAG_OIT) {
+				// WBOIT MRT: accum (ONE/ONE) + revealage (ZERO/ONE_MINUS_SRC_COLOR).
+				RD::PipelineColorBlendState::Attachment accum_attachment;
+				accum_attachment.enable_blend = true;
+				accum_attachment.color_blend_op = RD::BLEND_OP_ADD;
+				accum_attachment.alpha_blend_op = RD::BLEND_OP_ADD;
+				accum_attachment.src_color_blend_factor = RD::BLEND_FACTOR_ONE;
+				accum_attachment.dst_color_blend_factor = RD::BLEND_FACTOR_ONE;
+				accum_attachment.src_alpha_blend_factor = RD::BLEND_FACTOR_ONE;
+				accum_attachment.dst_alpha_blend_factor = RD::BLEND_FACTOR_ONE;
+
+				RD::PipelineColorBlendState::Attachment reveal_attachment;
+				reveal_attachment.enable_blend = true;
+				reveal_attachment.color_blend_op = RD::BLEND_OP_ADD;
+				reveal_attachment.alpha_blend_op = RD::BLEND_OP_ADD;
+				reveal_attachment.src_color_blend_factor = RD::BLEND_FACTOR_ZERO;
+				reveal_attachment.dst_color_blend_factor = RD::BLEND_FACTOR_ONE_MINUS_SRC_COLOR;
+				reveal_attachment.src_alpha_blend_factor = RD::BLEND_FACTOR_ZERO;
+				reveal_attachment.dst_alpha_blend_factor = RD::BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+
+				blend_state.attachments = { accum_attachment, reveal_attachment };
+				depth_stencil_state.enable_depth_write = false; // OIT never writes depth.
+			}
 
 			if (depth_draw == DEPTH_DRAW_OPAQUE) {
 				depth_stencil_state.enable_depth_write = false; //alpha does not draw depth
@@ -771,6 +808,7 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 			"\n#define USE_LIGHTMAP\n", // SHADER_COLOR_PASS_FLAG_LIGHTMAP
 			"\n#define USE_MULTIVIEW\n", // SHADER_COLOR_PASS_FLAG_MULTIVIEW
 			"\n#define MOTION_VECTORS\n", // SHADER_COLOR_PASS_FLAG_MOTION_VECTORS
+			"\n#define MODE_OIT\n", // SHADER_COLOR_PASS_FLAG_OIT
 		};
 
 		for (int i = 0; i < SHADER_COLOR_PASS_FLAG_COUNT; i++) {
@@ -785,7 +823,12 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 			ShaderGroup group = SHADER_GROUP_BASE;
 			bool advanced_group = (i & SHADER_COLOR_PASS_FLAG_SEPARATE_SPECULAR) || (i & SHADER_COLOR_PASS_FLAG_LIGHTMAP) || (i & SHADER_COLOR_PASS_FLAG_MOTION_VECTORS);
 			bool multiview_group = i & SHADER_COLOR_PASS_FLAG_MULTIVIEW;
-			if (advanced_group && multiview_group) {
+			bool oit_group = i & SHADER_COLOR_PASS_FLAG_OIT;
+			if (oit_group) {
+				// OIT never combines with the specular/motion MRT passes.
+				bool oit_valid = !((i & SHADER_COLOR_PASS_FLAG_SEPARATE_SPECULAR) || (i & SHADER_COLOR_PASS_FLAG_MOTION_VECTORS));
+				group = !oit_valid ? SHADER_GROUP_OIT_UNUSED : (multiview_group ? SHADER_GROUP_OIT_MULTIVIEW : SHADER_GROUP_OIT);
+			} else if (advanced_group && multiview_group) {
 				group = SHADER_GROUP_ADVANCED_MULTIVIEW;
 			} else if (advanced_group) {
 				group = SHADER_GROUP_ADVANCED;
@@ -1127,6 +1170,13 @@ void SceneShaderForwardClustered::set_default_specialization(const ShaderSpecial
 
 void SceneShaderForwardClustered::enable_multiview_shader_group() {
 	shader.enable_group(SHADER_GROUP_MULTIVIEW);
+}
+
+void SceneShaderForwardClustered::enable_oit_shader_group(bool p_needs_multiview) {
+	if (p_needs_multiview || RendererCompositorRD::get_singleton()->is_xr_enabled()) {
+		shader.enable_group(SHADER_GROUP_OIT_MULTIVIEW);
+	}
+	shader.enable_group(SHADER_GROUP_OIT);
 }
 
 void SceneShaderForwardClustered::enable_advanced_shader_group(bool p_needs_multiview) {

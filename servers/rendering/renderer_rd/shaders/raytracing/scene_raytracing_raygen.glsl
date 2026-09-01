@@ -31,6 +31,37 @@ layout(set = 0, binding = 30) uniform texture2D prepass_color_texture;
 
 layout(location = 0) rayPayloadEXT PathPayload payload;
 
+struct ContinuationReservoir {
+	PathState selected;
+	float selected_weight;
+	float total_weight;
+	bool has_selection;
+};
+
+ContinuationReservoir continuation_reservoir_initial() {
+	ContinuationReservoir r;
+	r.selected_weight = 0.0;
+	r.total_weight = 0.0;
+	r.has_selection = false;
+	return r;
+}
+
+void continuation_reservoir_add(inout ContinuationReservoir r, PathState candidate, inout uint rng_state) {
+	if (is_path_terminated(candidate.packed_bounces_flags)) {
+		return;
+	}
+	float weight = max(candidate.throughput.x, max(candidate.throughput.y, candidate.throughput.z));
+	if (weight <= 1e-6) {
+		return;
+	}
+	r.total_weight += weight;
+	if (!r.has_selection || rand(rng_state) < weight / r.total_weight) {
+		r.selected = candidate;
+		r.selected_weight = weight;
+		r.has_selection = true;
+	}
+}
+
 void main() {
 	uvec2 pixel = gl_LaunchIDEXT.xy;
 	const vec2 pixel_center = vec2(pixel) + vec2(0.5);
@@ -66,6 +97,10 @@ void main() {
 	vec3 total_radiance = vec3(0.0);
 	bool composite_passthrough = false;
 
+#ifdef RT_DEBUG_ENABLED
+	uint debug_tlayers = 0u; // VIS 23: primary-segment transparency hits
+#endif
+
 	const uint max_bounces = RT_GET_MAX_BOUNCES();
 
 	// TODO: when we have a spp > 0 the first raycast is always identical,
@@ -82,12 +117,15 @@ void main() {
 		vec3 ray_dir = direction.xyz;
 
 		[[dont_unroll]] for (uint bounce = 0u; bounce <= max_bounces; bounce++) {
+			vec3 throughput_entry = ps.throughput;
+			vec3 radiance_pre = ps.radiance;
+			uint flags_entry = ps.packed_bounces_flags;
 			path_pack(payload, ps);
 			float t_far = (bounce == 0u) ? composite_t_max : 10000.0;
 
 #ifdef USE_SER
 			hitObjectNV hitObject;
-			hitObjectTraceRayNV(hitObject, tlas, RT_RAY_FLAGS, 0xFF, 0, 0, 0, ray_origin, 0.001, ray_dir, t_far, 0);
+			hitObjectTraceRayNV(hitObject, tlas, RT_RAY_FLAGS, RT_VIS_MASK, 0, 0, 0, ray_origin, 0.001, ray_dir, t_far, 0);
 
 			// Reorder with a coherence hint that has 8 bits
 			uint hint = 0;
@@ -99,11 +137,109 @@ void main() {
 
 			hitObjectExecuteShaderNV(hitObject, 0);
 #else
-			traceRayEXT(tlas, RT_RAY_FLAGS, 0xFF, 0, 0, 0, ray_origin, 0.001, ray_dir, t_far, 0);
+			traceRayEXT(tlas, RT_RAY_FLAGS, RT_VIS_MASK, 0, 0, 0, ray_origin, 0.001, ray_dir, t_far, 0);
 #endif
 
 			ps = path_unpack(payload);
-			if (is_path_terminated(ps.packed_bounces_flags)) {
+			bool opaque_terminated = is_path_terminated(ps.packed_bounces_flags);
+
+			// Transparency over this segment is bounded closest-hit peeling.
+			// Non-scissored transparent instances are opaque to traversal, so
+			// only the closest hit runs a shader on each layer.
+			bool transparency_enabled = get_rt_param(RT_PARAM_TRANSPARENT_COUNT) > 0.0 &&
+					get_rt_param(RT_PARAM_MAX_TRANSPARENCY_LAYERS) > 0.0 &&
+					bounce <= uint(get_rt_param(RT_PARAM_TRANSPARENCY_MAX_BOUNCE));
+#ifdef RT_DEBUG_ENABLED
+			// The transparency heatmap (VIS 23) needs the traces to run.
+			int vm_gate = int(get_rt_param(RT_PARAM_VIS_MODE));
+			transparency_enabled = transparency_enabled && (vm_gate == 0 || vm_gate == 23);
+#endif
+			if (transparency_enabled) {
+				float seg_end = opaque_terminated ? t_far : ps.hit_t;
+				uint peel_hits = 0u;
+				vec3 throughput_after_opaque = ps.throughput;
+				vec3 radiance_after_opaque = ps.radiance;
+				PathState opaque_continuation = ps;
+				ContinuationReservoir continuation = continuation_reservoir_initial();
+				uint continuation_rng = ps.rng_state;
+
+				float T_total = 1.0;
+				uint layer_cap = min(uint(get_rt_param(RT_PARAM_MAX_TRANSPARENCY_LAYERS)), 64u);
+				float peel_tmin = 0.001;
+				for (uint l = 0u; l < layer_cap && T_total > (1.0 / 256.0); l++) {
+					ps.hit_t = -1.0;
+					ps.packed_bounces_flags = flags_entry | PEEL_RAY_FLAG;
+					if (l == 0u) {
+						ps.packed_bounces_flags |= PEEL_FIRST_LAYER_FLAG;
+					}
+					ps.rng_state = continuation_rng;
+					ps.throughput = throughput_entry * T_total;
+					path_pack(payload, ps);
+					traceRayEXT(tlas, RT_RAY_FLAGS, RT_TMASK_TRANSPARENT,
+							0, 0, 0, ray_origin, peel_tmin, ray_dir, seg_end, 0);
+					ps = path_unpack(payload);
+					if (ps.hit_t < 0.0) {
+						break;
+					}
+					continuation_rng = ps.rng_state;
+					if ((ps.packed_bounces_flags & PEEL_HAS_CONTINUATION_FLAG) != 0u) {
+						PathState layer_continuation = ps;
+						layer_continuation.packed_bounces_flags &=
+								~(PEEL_RAY_FLAG | PEEL_FIRST_LAYER_FLAG | PEEL_HAS_CONTINUATION_FLAG | PEEL_DEPTH_BARRIER_HIT_FLAG);
+						continuation_reservoir_add(continuation, layer_continuation, continuation_rng);
+					}
+					float a = get_peel_alpha(ps.packed_bounces_flags);
+					T_total *= (1.0 - a);
+					peel_hits++;
+					// Advance by one representable positive float to avoid
+					// re-hitting this layer without an identity any-hit shader.
+					peel_tmin = uintBitsToFloat(floatBitsToUint(ps.hit_t) + 1u);
+					if ((ps.packed_bounces_flags & PEEL_DEPTH_BARRIER_HIT_FLAG) != 0u) {
+						break;
+					}
+				}
+
+				if (peel_hits == 0u) {
+					// Preserve primary-miss/composite state when the transparent
+					// lane had no geometry. The peel payload starts from flags_entry.
+					ps = opaque_continuation;
+					opaque_terminated = is_path_terminated(ps.packed_bounces_flags);
+				} else {
+					vec3 peel_sum = ps.radiance - radiance_after_opaque;
+					vec3 segment_radiance = radiance_after_opaque - radiance_pre;
+					if (bounce == 0u && composite_prepass_depth > 0.0 &&
+							is_primary_miss(opaque_continuation.packed_bounces_flags)) {
+						vec3 composite_color = texelFetch(
+								sampler2D(prepass_color_texture, SAMPLER_NEAREST_CLAMP), ivec2(pixel), 0).rgb;
+						segment_radiance = throughput_entry * composite_color;
+					}
+					vec3 resolved_radiance = radiance_pre + segment_radiance * T_total + peel_sum;
+
+					opaque_continuation.throughput = throughput_after_opaque * T_total;
+					opaque_continuation.rng_state = continuation_rng;
+					continuation_reservoir_add(continuation, opaque_continuation, continuation_rng);
+					if (continuation.has_selection) {
+						ps = continuation.selected;
+						ps.throughput *= continuation.total_weight / continuation.selected_weight;
+						ps.radiance = resolved_radiance;
+						ps.rng_state = continuation_rng;
+						opaque_terminated = false;
+					} else {
+						ps.radiance = resolved_radiance;
+						ps.throughput = vec3(0.0);
+						ps.packed_bounces_flags = set_path_terminated(flags_entry);
+						ps.rng_state = continuation_rng;
+						opaque_terminated = true;
+					}
+				}
+#ifdef RT_DEBUG_ENABLED
+				if (bounce == 0u && sample_idx == 0u) {
+					debug_tlayers = peel_hits;
+				}
+#endif
+			}
+
+			if (opaque_terminated) {
 				break;
 			}
 			// Reconstruct the next ray origin from the current ray + hit distance, apply bias
@@ -115,6 +251,17 @@ void main() {
 		total_radiance += ps.radiance;
 		composite_passthrough = composite_passthrough || (composite_prepass_depth > 0.0 && is_primary_miss(ps.packed_bounces_flags));
 	}
+
+#ifdef RT_DEBUG_ENABLED
+	if (int(get_rt_param(RT_PARAM_VIS_MODE)) == 23) {
+		// Transparency cost heatmap: green 0 -> yellow 2 -> red 4+.
+		float heat_x = clamp(float(debug_tlayers) * 0.25, 0.0, 1.0);
+		vec3 heat = (heat_x < 0.5) ? mix(vec3(0.0, 1.0, 0.0), vec3(1.0, 1.0, 0.0), heat_x * 2.0)
+								   : mix(vec3(1.0, 1.0, 0.0), vec3(1.0, 0.0, 0.0), heat_x * 2.0 - 1.0);
+		imageStore(image, ivec2(pixel), vec4(heat, 1.0));
+		return;
+	}
+#endif
 
 	if (composite_passthrough) {
 		// The co-tenant pixel is nearer than anything traced: keep its color and depth,
@@ -140,7 +287,6 @@ void main() {
 
 #define GLSL 1
 #define RT_STAGE_MISS 1
-
 // clang-format off
 #include "raytracing_inc.glsl"
 #include "../scene_data_inc.glsl"
@@ -182,12 +328,17 @@ vec3 radiance_octmap_sample(vec2 p_oct_uv, float p_roughness) {
 #endif // USE_RADIANCE_OCTMAP_ARRAY
 
 void main() {
+	// Transparency peel traces own their payload; the scene miss must not touch it.
+	if ((payload.packed_bounces_flags & PEEL_RAY_FLAG) != 0u) {
+		return;
+	}
+
 	PathState ps = path_unpack(payload);
 
 #if !defined(USE_SER)
-	// Shadow rays that miss mean the light is visible (no occluder).
+	// A shadow-ray miss returns its accumulated colored transmittance.
 	if (is_shadow_ray(ps.packed_bounces_flags)) {
-		ps.radiance = vec3(1.0);
+		ps.radiance = ps.throughput;
 		path_pack(payload, ps);
 		return;
 	}
@@ -309,7 +460,6 @@ void main() {
 
 #define GLSL 1
 #define RT_STAGE_CLOSEST_HIT 1
-
 // clang-format off
 #include "raytracing_inc.glsl"
 #include "../scene_data_inc.glsl"
@@ -441,7 +591,8 @@ void main() {
 #ifdef RT_DEBUG_ENABLED
 	{
 		int VIS_MODE = int(get_rt_param(RT_PARAM_VIS_MODE));
-		if (VIS_MODE != 0) {
+		// VIS 23 (transparency heatmap) shades normally; raygen overrides the image.
+		if (VIS_MODE != 0 && VIS_MODE != 23) {
 			vec3 V = -gl_WorldRayDirectionEXT;
 			float NdotV = max(dot(m.normal, V), 0.0001);
 			vec3 orm = vec3(1.0, m.roughness, m.metalness);
@@ -498,7 +649,8 @@ void main() {
 #ifdef RT_DEBUG_ENABLED
 	{
 		int VIS_MODE = int(get_rt_param(RT_PARAM_VIS_MODE));
-		if (VIS_MODE != 0) {
+		// VIS 23 (transparency heatmap) shades normally; raygen overrides the image.
+		if (VIS_MODE != 0 && VIS_MODE != 23) {
 			vec3 V = -gl_WorldRayDirectionEXT;
 			float NdotV = max(dot(m.normal, V), 0.0001);
 			vec2 debug_uv = muv.triplanar ? muv.triplanar_pos.xy : muv.uv;
@@ -527,7 +679,6 @@ void main() {
 
 #define GLSL 1
 #define RT_STAGE_ANY_HIT 1
-
 // clang-format off
 #include "raytracing_inc.glsl"
 #include "../scene_data_inc.glsl"
@@ -577,10 +728,20 @@ layout(set = 0, binding = 32, std430) readonly buffer MotionTransforms {
 void main() {
 	uint geometry_idx = gl_InstanceCustomIndexEXT;
 	GeometryData geom = geometries[geometry_idx];
+	MaterialData mat = materials[geometry_idx];
+	bool transparent = (mat.flags & RT_MAT_FLAG_TRANSPARENT) != 0u;
+	bool alpha_scissor = (mat.flags & RT_MAT_FLAG_ALPHA_SCISSOR) != 0u;
+	if (!transparent && !alpha_scissor) {
+		return; // Ordinary opaque shadow candidate: accept immediately.
+	}
 
 	uint i0, i1, i2;
 	get_triangle_indices(geom, i0, i1, i2);
 	vec3 bary = vec3(1.0 - attribs.x - attribs.y, attribs.x, attribs.y);
+
+	float hit_alpha = 1.0;
+	vec3 hit_tint = vec3(1.0);
+	float scissor_threshold = 0.0;
 
 #ifdef RT_CUSTOM_HIT_GROUP
 	// Compute hit data inline (cannot include closest_hit_common_inc here).
@@ -608,29 +769,53 @@ void main() {
 
 #include "raytracing_custom_fragment_inc.glsl"
 
-	if (alpha_scissor_threshold > 0.0 && alpha < alpha_scissor_threshold) {
-		ignoreIntersectionEXT;
-	}
+	hit_alpha = alpha;
+	hit_tint = clamp(albedo, vec3(0.0), vec3(1.0));
+	scissor_threshold = alpha_scissor_threshold;
 #else
-	// HG0: Standard material alpha test.
-	MaterialData mat = materials[geometry_idx];
+	// HG0: StandardMaterial3D alpha evaluation.
+	{
+		vec3 world_pos = gl_WorldRayOriginEXT + gl_WorldRayDirectionEXT * gl_HitTEXT;
+		vec3 world_normal = vec3(0.0, 1.0, 0.0);
+		if ((mat.flags & RT_MAT_FLAG_TRIPLANAR) != 0u) {
+			// Only triplanar needs a normal, and fetching the frame is not free.
+			TBNResult ah_tbn = fetch_tbn(geom, i0, i1, i2, bary);
+			world_normal = normalize(mat3(gl_ObjectToWorldEXT) * ah_tbn.normal);
+		}
 
-	vec3 world_pos = gl_WorldRayOriginEXT + gl_WorldRayDirectionEXT * gl_HitTEXT;
-	vec3 world_normal = vec3(0.0, 1.0, 0.0);
-	if ((mat.flags & RT_MAT_FLAG_TRIPLANAR) != 0u) {
-		// Only triplanar needs a normal, and fetching the frame is not free.
-		TBNResult ah_tbn = fetch_tbn(geom, i0, i1, i2, bary);
-		world_normal = normalize(mat3(gl_ObjectToWorldEXT) * ah_tbn.normal);
-	}
-
-	MaterialUV muv = material_uv_from_world(mat, geom, fetch_uv(geom, i0, i1, i2, bary), world_pos, world_normal);
-	float alpha = material_uv_sample(mat.albedo_texture_idx, muv, mat.flags).a;
-	alpha *= mat.albedo_color.a;
-
-	if (alpha < 0.5) {
-		ignoreIntersectionEXT;
+		MaterialUV muv = material_uv_from_world(mat, geom, fetch_uv(geom, i0, i1, i2, bary), world_pos, world_normal);
+		vec4 albedo_tex = material_uv_sample(mat.albedo_texture_idx, muv, mat.flags);
+		hit_alpha = albedo_tex.a * mat.albedo_color.a;
+		hit_tint = clamp(albedo_tex.rgb * mat.albedo_color.rgb, vec3(0.0), vec3(1.0));
 	}
 #endif
+
+	if ((mat.flags & RT_MAT_BLEND_CLASS_MASK) == RT_BLEND_CLASS_PREMULT && hit_alpha > 1e-6) {
+		hit_tint = clamp(hit_tint / hit_alpha, vec3(0.0), vec3(1.0));
+	}
+
+	if (scissor_threshold > 0.0) {
+		if (hit_alpha < scissor_threshold) {
+			ignoreIntersectionEXT;
+		}
+	} else if (!transparent && hit_alpha < 0.5) {
+		ignoreIntersectionEXT;
+	}
+
+	// Transparent shadow candidates use stochastic coverage. Surviving rays
+	// accumulate a colored filter in the existing throughput payload.
+	if (transparent && is_shadow_ray(payload.packed_bounces_flags)) {
+		PathState shadow_ps = path_unpack(payload);
+		float shadow_alpha = clamp(hit_alpha, 0.0, 1.0);
+		bool blocks_light = rand(shadow_ps.rng_state) < shadow_alpha;
+		if (!blocks_light) {
+			shadow_ps.throughput *= mix(vec3(1.0), hit_tint, shadow_alpha);
+		}
+		path_pack(payload, shadow_ps);
+		if (!blocks_light) {
+			ignoreIntersectionEXT;
+		}
+	}
 }
 
 #[intersection]

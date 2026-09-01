@@ -92,7 +92,8 @@ RenderRaytracing::~RenderRaytracing() {
 // ---------------------------------------------------------------------------
 
 static RTViewportStateKey _viewport_state_key(const RenderDataRD *p_render_data) {
-	return RTViewportStateKey(p_render_data->render_buffers.ptr(), p_render_data->environment);
+	return RTViewportStateKey(
+			p_render_data->render_buffers.ptr(), p_render_data->viewport, p_render_data->environment);
 }
 
 RTViewportState *RenderRaytracing::_get_or_create_viewport_state(const RenderDataRD *p_render_data) {
@@ -143,6 +144,9 @@ void RenderRaytracing::_free_viewport_state_internal(RTViewportState *p_state) {
 	}
 	if (p_state->params_buffer.is_valid()) {
 		RD::get_singleton()->free_rid(p_state->params_buffer);
+	}
+	if (p_state->scene_ubo.is_valid()) {
+		RD::get_singleton()->free_rid(p_state->scene_ubo);
 	}
 	if (p_state->scene_uniform_set.is_valid() && RD::get_singleton()->uniform_set_is_valid(p_state->scene_uniform_set)) {
 		RD::get_singleton()->free_rid(p_state->scene_uniform_set);
@@ -523,11 +527,7 @@ RTMergedMMEntry *RenderRaytracing::_access_merged_mm_slot(RID &r_handle) {
 // ---------------------------------------------------------------------------
 
 void RenderRaytracing::prepare_frame() {
-	blass.clear();
-	blas_transforms.clear();
-	instance_flags.clear();
-	instance_masks.clear();
-	sbt_offsets.clear();
+	tlas_instances.clear();
 	geometry_data.clear();
 	material_data.clear();
 	motion_indices.clear();
@@ -1818,30 +1818,34 @@ void RenderRaytracing::build_acceleration_structures(RTViewportState *p_state, c
 
 	RENDER_TIMESTAMP("TLAS Build");
 
-	uint32_t needed = MAX(blass.size(), (uint32_t)1);
-	if (!p_state->tlas.is_valid() || needed > p_state->tlas_max_instances) {
-		if (p_state->tlas.is_valid()) {
-			RD::get_singleton()->free_rid(p_state->tlas);
+	_build_one_tlas(p_state->tlas, p_state->tlas_max_instances, tlas_instances, "RT TLAS");
+}
+
+void RenderRaytracing::_build_one_tlas(RID &r_tlas, uint32_t &r_max_instances, const RTInstanceArrays &p_instances, const String &p_name) {
+	uint32_t needed = MAX(p_instances.blass.size(), (uint32_t)1);
+	if (!r_tlas.is_valid() || needed > r_max_instances) {
+		if (r_tlas.is_valid()) {
+			RD::get_singleton()->free_rid(r_tlas);
 		}
-		p_state->tlas_max_instances = needed * 2;
-		p_state->tlas = RD::get_singleton()->tlas_create(p_state->tlas_max_instances, RD::ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT);
-		RD::get_singleton()->set_resource_name(p_state->tlas, "RT TLAS");
+		r_max_instances = needed * 2;
+		r_tlas = RD::get_singleton()->tlas_create(r_max_instances, RD::ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT);
+		RD::get_singleton()->set_resource_name(r_tlas, p_name);
 	}
 
 	LocalVector<RD::AccelerationStructureInstance> instances;
-	instances.resize(blass.size());
-	for (uint32_t i = 0; i < blass.size(); i++) {
+	instances.resize(p_instances.blass.size());
+	for (uint32_t i = 0; i < p_instances.blass.size(); i++) {
 		RD::AccelerationStructureInstance &inst = instances[i];
-		inst.id = i;
-		inst.transform = blas_transforms[i];
-		inst.blas = blass[i];
-		inst.flags = BitField<RD::AccelerationStructureInstanceFlagBits>(instance_flags[i]);
-		inst.mask = (i < instance_masks.size()) ? instance_masks[i] : 0xFF;
-		uint32_t sbt_off = (i < sbt_offsets.size()) ? sbt_offsets[i] : 0;
+		inst.id = p_instances.custom_indices[i];
+		inst.transform = p_instances.transforms[i];
+		inst.blas = p_instances.blass[i];
+		inst.flags = BitField<RD::AccelerationStructureInstanceFlagBits>(p_instances.flags[i]);
+		inst.mask = p_instances.masks[i];
+		uint32_t sbt_off = p_instances.sbt_offsets[i];
 		inst.hit_sbt_range = RD::HitShaderBindingTableRange((1ULL << 32) | uint64_t(sbt_off));
 	}
 
-	RD::get_singleton()->tlas_build(p_state->tlas, instances);
+	RD::get_singleton()->tlas_build(r_tlas, instances);
 }
 
 void RenderRaytracing::finalize_buffers(RTViewportState *p_state) {
@@ -2279,6 +2283,54 @@ _FORCE_INLINE_ static uint32_t _rt_indices_to_primitives(RSE::PrimitiveType p_pr
 	return (p_indices - subtractor[p_primitive]) / divisor[p_primitive];
 }
 
+// Blend-class bits (RT_MAT_BLEND_CLASS_*) for the per-instance MaterialData
+// copy of transparent surfaces; closest-hit uses them during peeling.
+static uint32_t _rt_blend_class_mat_flags(const SceneShaderForwardClustered::ShaderData *sd,
+		SceneShaderForwardClustered::ShaderData::RTBlendClass p_class) {
+	const int bm = sd ? (sd->rt ? sd->rt->blend_mode : sd->blend_mode) : (int)SceneShaderForwardClustered::ShaderData::BLEND_MODE_MIX;
+	uint32_t v = RT_MAT_BLEND_CLASS_MIX;
+	if (p_class == SceneShaderForwardClustered::ShaderData::RT_BLEND_OIT) {
+		v = RT_MAT_BLEND_CLASS_OIT;
+	} else {
+		switch (bm) {
+			case SceneShaderForwardClustered::ShaderData::BLEND_MODE_ADD:
+				v = RT_MAT_BLEND_CLASS_ADD;
+				break;
+			case SceneShaderForwardClustered::ShaderData::BLEND_MODE_SUB:
+				v = RT_MAT_BLEND_CLASS_SUB;
+				break;
+			case SceneShaderForwardClustered::ShaderData::BLEND_MODE_MUL:
+				v = RT_MAT_BLEND_CLASS_MUL;
+				break;
+			case SceneShaderForwardClustered::ShaderData::BLEND_MODE_OIT:
+				v = RT_MAT_BLEND_CLASS_OIT;
+				break;
+			case SceneShaderForwardClustered::ShaderData::BLEND_MODE_PREMULTIPLIED_ALPHA:
+				v = RT_MAT_BLEND_CLASS_PREMULT;
+				break;
+			default:
+				break;
+		}
+	}
+	uint32_t flags = v << RT_MAT_BLEND_CLASS_SHIFT;
+	if (sd && sd->rt_depth_draw_always()) {
+		flags |= RT_MAT_FLAG_DEPTH_DRAW_ALWAYS;
+	}
+	if (sd && sd->unshaded) {
+		flags |= RT_MAT_FLAG_UNSHADED;
+	}
+	return flags;
+}
+
+static bool _rt_uses_alpha_scissor(const SceneShaderForwardClustered::ShaderData *p_shader,
+		const RTMaterialData *p_material, const SceneShaderRaytracing *p_rt_shader) {
+	if (p_material->rt_sbt_offset > 0) {
+		const SceneShaderRaytracing::CustomShaderEntry *entry = p_rt_shader->get_custom_shader_entry(p_material->rt_sbt_offset);
+		return !entry || entry->uses_alpha_clip;
+	}
+	return p_shader && (p_shader->uses_alpha_clip || p_shader->uses_alpha_antialiasing);
+}
+
 RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data, uint32_t p_rt_flags) {
 	if (!p_render_data || !p_render_data->rt_instances) {
 		return nullptr;
@@ -2299,6 +2351,27 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 	RendererRD::MaterialStorage *material_storage = RendererRD::MaterialStorage::get_singleton();
 	LocalVector<RID> dirty_blas_list;
 	LocalVector<RID> dirty_blas_update_list;
+
+	const uint32_t camera_visible_layers = p_render_data->scene_data ? p_render_data->scene_data->camera_visible_layers : 0xFFFFFFFFu;
+
+	// Shadow-caster group table: collected from every light this frame so
+	// instance masks and light shadow_ray_masks agree (see RTShadowGroupTable).
+	state->shadow_groups.reset();
+	{
+		RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
+		if (p_render_data->lights) {
+			const PagedArray<RID> &frame_lights = *p_render_data->lights;
+			for (uint32_t li = 0; li < (uint32_t)frame_lights.size(); li++) {
+				state->shadow_groups.register_caster_mask(light_storage->light_get_shadow_caster_mask(light_storage->light_instance_get_base_light(frame_lights[li])));
+			}
+		}
+		if (p_render_data->rt_lights) {
+			const PagedArray<RID> &frame_rt_lights = *p_render_data->rt_lights;
+			for (uint32_t li = 0; li < (uint32_t)frame_rt_lights.size(); li++) {
+				state->shadow_groups.register_caster_mask(light_storage->light_get_shadow_caster_mask(light_storage->light_instance_get_base_light(frame_rt_lights[li])));
+			}
+		}
+	}
 
 #ifdef TOOLS_ENABLED
 	uint32_t tlas_instance_count = 0;
@@ -2326,8 +2399,14 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 		bool transform_moved;
 		RTMaterialData *mat_data;
 		uint32_t inst_flags;
+		uint8_t tlas_mask;
+		bool transparent;
+		uint32_t layer_mask;
+		uint32_t instance_uniforms_ofs = 0xFFFFFFFFu;
+		uint32_t blend_class_flags = 0;
 	};
 	LocalVector<PendingMMSurface> pending_mm_surfaces;
+	uint32_t transparent_instance_count = 0;
 
 	const PagedArray<RenderGeometryInstance *> &rt_instances = *p_render_data->rt_instances;
 	for (uint32_t i = 0; i < (uint32_t)rt_instances.size(); i++) {
@@ -2343,6 +2422,15 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 				(inst->transform_status == RenderForwardClustered::GeometryInstanceForwardClustered::TransformStatus::TELEPORTED)
 				? inst->transform
 				: inst->prev_transform;
+
+		// Unified TLAS mask: camera lane plus shadow-caster groups.
+		const bool camera_visible = (inst->layer_mask & camera_visible_layers) != 0 && !inst->rt_shadows_only;
+		uint8_t opaque_instance_mask = camera_visible ? uint8_t(RT_VIS_BIT) : uint8_t(0);
+		uint8_t shadow_instance_mask = 0;
+		if (inst->rt_shadow_caster) {
+			shadow_instance_mask = state->shadow_groups.group_bits_for_layers(inst->layer_mask);
+			opaque_instance_mask |= shadow_instance_mask;
+		}
 
 		// Handle procedural RT instances (intersection shaders).
 		if (inst->rt_procedural) {
@@ -2380,10 +2468,10 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 #endif
 			}
 
-			if (ps->blas.is_valid()) {
-				blass.push_back(ps->blas);
-				blas_transforms.push_back(instance_transform);
-				sbt_offsets.push_back(hg_index);
+			if (ps->blas.is_valid() && opaque_instance_mask != 0) {
+				tlas_instances.blass.push_back(ps->blas);
+				tlas_instances.transforms.push_back(instance_transform);
+				tlas_instances.sbt_offsets.push_back(hg_index);
 
 				RT_GeometryData geom = {};
 				geom.flags = RT_GEOM_FLAG_PROCEDURAL;
@@ -2391,7 +2479,10 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 				geom.aabb_size_x = (float)ps->culling_aabb.size.x;
 				geom.aabb_size_y = (float)ps->culling_aabb.size.y;
 				geom.aabb_size_z = (float)ps->culling_aabb.size.z;
+				geom.layers = inst->layer_mask;
+				geom.instance_uniforms_ofs = uint32_t(inst->shader_uniforms_offset);
 				geometry_data.push_back(geom);
+				tlas_instances.custom_indices.push_back(geometry_data.size() - 1);
 
 				if (inst->transform_status == RenderForwardClustered::GeometryInstanceForwardClustered::TransformStatus::MOVED) {
 					motion_indices.push_back((int32_t)motion_transforms.size());
@@ -2410,8 +2501,8 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 				// Procedural instances disable triangle culling and are opaque.
 				uint32_t inst_flags = RD::ACCELERATION_STRUCTURE_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT |
 						RD::ACCELERATION_STRUCTURE_INSTANCE_FORCE_OPAQUE_BIT;
-				instance_flags.push_back(inst_flags);
-				instance_masks.push_back(0xFF);
+				tlas_instances.flags.push_back(inst_flags);
+				tlas_instances.masks.push_back(opaque_instance_mask);
 			}
 			continue;
 		}
@@ -2439,7 +2530,15 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 
 			const RenderForwardClustered::GeometryInstanceSurfaceDataCache *mm_surf = inst->surface_caches;
 			while (mm_surf) {
-				if (mm_surf->rt_pass_flags & RenderForwardClustered::GeometryInstanceSurfaceDataCache::FLAG_PASS_ALPHA) {
+				// Transparent surfaces use the transparent camera lane in the unified TLAS.
+				const SceneShaderForwardClustered::ShaderData::RTBlendClass mm_blend_class = mm_surf->shader
+						? mm_surf->shader->rt_blend_class()
+						: SceneShaderForwardClustered::ShaderData::RT_BLEND_OPAQUE;
+				const bool mm_transparent = mm_blend_class != SceneShaderForwardClustered::ShaderData::RT_BLEND_OPAQUE;
+				const uint8_t mm_tlas_mask = mm_transparent
+						? uint8_t((camera_visible ? RT_MASK_TRANSPARENT : 0) | shadow_instance_mask)
+						: opaque_instance_mask;
+				if (mm_tlas_mask == 0) {
 					mm_surf = mm_surf->next;
 					continue;
 				}
@@ -2499,6 +2598,11 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 						inst_flags |= RD::ACCELERATION_STRUCTURE_INSTANCE_FORCE_OPAQUE_BIT;
 					}
 				}
+				if (_rt_uses_alpha_scissor(mm_surf->shader, mat_data, rt_shader_singleton)) {
+					inst_flags &= ~RD::ACCELERATION_STRUCTURE_INSTANCE_FORCE_OPAQUE_BIT;
+				} else {
+					inst_flags |= RD::ACCELERATION_STRUCTURE_INSTANCE_FORCE_OPAQUE_BIT;
+				}
 
 				PendingMMSurface pending;
 				pending.mm_rid = mm_rid;
@@ -2513,6 +2617,16 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 				pending.transform_moved = transform_moved;
 				pending.mat_data = mat_data;
 				pending.inst_flags = inst_flags;
+				pending.tlas_mask = mm_tlas_mask;
+				pending.transparent = mm_transparent;
+				pending.layer_mask = inst->layer_mask;
+				pending.instance_uniforms_ofs = uint32_t(inst->shader_uniforms_offset);
+				pending.blend_class_flags = mm_transparent
+						? _rt_blend_class_mat_flags(mm_surf->shader, mm_blend_class) | RT_MAT_FLAG_TRANSPARENT
+						: 0u;
+				if (_rt_uses_alpha_scissor(mm_surf->shader, mat_data, rt_shader_singleton)) {
+					pending.blend_class_flags |= RT_MAT_FLAG_ALPHA_SCISSOR;
+				}
 				pending_mm_surfaces.push_back(pending);
 
 				mm_surf = mm_surf->next;
@@ -2524,8 +2638,15 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 		const RenderForwardClustered::GeometryInstanceSurfaceDataCache *surf = inst->surface_caches;
 		bool instance_static = inst->transform_status == RenderForwardClustered::GeometryInstanceForwardClustered::TransformStatus::NONE;
 		while (surf) {
-			// Skip surfaces routed to the raster alpha overlay
-			if (surf->rt_pass_flags & RenderForwardClustered::GeometryInstanceSurfaceDataCache::FLAG_PASS_ALPHA) {
+			// Transparent surfaces use the transparent camera lane in the unified TLAS.
+			const SceneShaderForwardClustered::ShaderData::RTBlendClass surf_blend_class = surf->shader
+					? surf->shader->rt_blend_class()
+					: SceneShaderForwardClustered::ShaderData::RT_BLEND_OPAQUE;
+			const bool surf_transparent = surf_blend_class != SceneShaderForwardClustered::ShaderData::RT_BLEND_OPAQUE;
+			const uint8_t surf_tlas_mask = surf_transparent
+					? uint8_t((camera_visible ? RT_MASK_TRANSPARENT : 0) | shadow_instance_mask)
+					: opaque_instance_mask;
+			if (surf_tlas_mask == 0) {
 				surf = surf->next;
 				continue;
 			}
@@ -2598,10 +2719,14 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 				surf->cached_final_transform = final_transform;
 				surf->cached_final_transform_valid = true;
 			}
-			blas_transforms.push_back(final_transform);
+			RTInstanceArrays &out = tlas_instances;
+			out.transforms.push_back(final_transform);
 
-			blass.push_back(surf_data->blas);
+			out.blass.push_back(surf_data->blas);
 			geometry_data.push_back(surf_data->geometry);
+			geometry_data[geometry_data.size() - 1].layers = inst->layer_mask;
+			geometry_data[geometry_data.size() - 1].instance_uniforms_ofs = uint32_t(inst->shader_uniforms_offset);
+			out.custom_indices.push_back(geometry_data.size() - 1);
 
 			if (inst->transform_status == RenderForwardClustered::GeometryInstanceForwardClustered::TransformStatus::MOVED) {
 				motion_indices.push_back((int32_t)motion_transforms.size());
@@ -2631,8 +2756,15 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 			}
 #endif
 
-			sbt_offsets.push_back(mat_data->rt_sbt_offset);
+			out.sbt_offsets.push_back(mat_data->rt_sbt_offset);
 			material_data.push_back(mat_data->data);
+			if (surf_transparent) {
+				material_data[material_data.size() - 1].flags |=
+						_rt_blend_class_mat_flags(surf->shader, surf_blend_class) | RT_MAT_FLAG_TRANSPARENT;
+			}
+			if (_rt_uses_alpha_scissor(surf->shader, mat_data, rt_shader_singleton)) {
+				material_data[material_data.size() - 1].flags |= RT_MAT_FLAG_ALPHA_SCISSOR;
+			}
 
 			// Determine per-instance TLAS flags from material properties.
 			uint32_t inst_flags = 0;
@@ -2667,8 +2799,16 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 					inst_flags |= RD::ACCELERATION_STRUCTURE_INSTANCE_FORCE_OPAQUE_BIT;
 				}
 			}
-			instance_flags.push_back(inst_flags);
-			instance_masks.push_back(0xFF);
+			if (_rt_uses_alpha_scissor(surf->shader, mat_data, rt_shader_singleton)) {
+				inst_flags &= ~RD::ACCELERATION_STRUCTURE_INSTANCE_FORCE_OPAQUE_BIT;
+			} else {
+				inst_flags |= RD::ACCELERATION_STRUCTURE_INSTANCE_FORCE_OPAQUE_BIT;
+			}
+			out.flags.push_back(inst_flags);
+			out.masks.push_back(surf_tlas_mask);
+			if (surf_transparent && (surf_tlas_mask & RT_MASK_TRANSPARENT) != 0) {
+				transparent_instance_count++;
+			}
 
 			surf = surf->next;
 		}
@@ -2690,15 +2830,23 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 						pending.mm_count, pending.surface_index, pending.surface_counter,
 						compute_list, dirty_blas_list, dirty_blas_update_list, &merged_sd);
 
+		RTInstanceArrays &mm_out = tlas_instances;
 		if (use_merged) {
-			blass.push_back(merged_sd.blas);
-			blas_transforms.push_back(pending.instance_transform);
+			mm_out.blass.push_back(merged_sd.blas);
+			mm_out.transforms.push_back(pending.instance_transform);
 			geometry_data.push_back(merged_sd.geometry);
-			sbt_offsets.push_back(pending.mat_data->rt_sbt_offset);
+			geometry_data[geometry_data.size() - 1].layers = pending.layer_mask;
+			geometry_data[geometry_data.size() - 1].instance_uniforms_ofs = pending.instance_uniforms_ofs;
+			mm_out.custom_indices.push_back(geometry_data.size() - 1);
+			mm_out.sbt_offsets.push_back(pending.mat_data->rt_sbt_offset);
 			material_data.push_back(pending.mat_data->data);
+			material_data[material_data.size() - 1].flags |= pending.blend_class_flags;
 			motion_indices.push_back(-1);
-			instance_flags.push_back(pending.inst_flags);
-			instance_masks.push_back(0xFF);
+			mm_out.flags.push_back(pending.inst_flags);
+			mm_out.masks.push_back(pending.tlas_mask);
+			if (pending.transparent && (pending.tlas_mask & RT_MASK_TRANSPARENT) != 0) {
+				transparent_instance_count++;
+			}
 #ifdef TOOLS_ENABLED
 			if (collect_render_info) {
 				tlas_instance_count++;
@@ -2749,11 +2897,15 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 					final_transform = final_transform * surf_data->aabb_transform;
 				}
 
-				blass.push_back(surf_data->blas);
-				blas_transforms.push_back(final_transform);
+				mm_out.blass.push_back(surf_data->blas);
+				mm_out.transforms.push_back(final_transform);
 				geometry_data.push_back(surf_data->geometry);
-				sbt_offsets.push_back(pending.mat_data->rt_sbt_offset);
+				geometry_data[geometry_data.size() - 1].layers = pending.layer_mask;
+				geometry_data[geometry_data.size() - 1].instance_uniforms_ofs = pending.instance_uniforms_ofs;
+				mm_out.custom_indices.push_back(geometry_data.size() - 1);
+				mm_out.sbt_offsets.push_back(pending.mat_data->rt_sbt_offset);
 				material_data.push_back(pending.mat_data->data);
+				material_data[material_data.size() - 1].flags |= pending.blend_class_flags;
 
 				if (pending.transform_moved) {
 					Transform3D prev_final = pending.prev_instance_transform * mm_xform;
@@ -2768,8 +2920,11 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 					motion_indices.push_back(-1);
 				}
 
-				instance_flags.push_back(pending.inst_flags);
-				instance_masks.push_back(0xFF);
+				mm_out.flags.push_back(pending.inst_flags);
+				mm_out.masks.push_back(pending.tlas_mask);
+				if (pending.transparent && (pending.tlas_mask & RT_MASK_TRANSPARENT) != 0) {
+					transparent_instance_count++;
+				}
 			}
 
 #ifdef TOOLS_ENABLED
@@ -2806,6 +2961,8 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 
 	RD::get_singleton()->compute_list_end();
 
+	state->transparent_instance_count = transparent_instance_count;
+
 	build_acceleration_structures(state, dirty_blas_list, dirty_blas_update_list);
 	finalize_buffers(state);
 
@@ -2816,7 +2973,7 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 // Light gathering
 // ---------------------------------------------------------------------------
 
-uint32_t RenderRaytracing::gather_lights(const RenderDataRD *p_render_data, RT_LightData *r_light_data, uint32_t p_max_lights) {
+uint32_t RenderRaytracing::gather_lights(const RenderDataRD *p_render_data, const RTViewportState *p_state, RT_LightData *r_light_data, uint32_t p_max_lights) {
 	uint32_t rt_light_count = 0;
 
 	if (!p_render_data || !p_render_data->lights) {
@@ -2912,6 +3069,8 @@ uint32_t RenderRaytracing::gather_lights(const RenderDataRD *p_render_data, RT_L
 		ld.position[1] = dir.y;
 		ld.position[2] = dir.z;
 		ld.type = RT_LIGHT_TYPE_DIRECTIONAL;
+		ld.light_masks = (ls->light_get_cull_mask(base) & 0xFFFFFu) |
+				((p_state ? p_state->shadow_groups.ray_mask_for_caster_mask(ls->light_get_shadow_caster_mask(base)) : 0xFCu) << 24u);
 		Color linear_col = ls->light_get_color(base).srgb_to_linear();
 		float energy = compute_light_energy(base, RSE::LIGHT_DIRECTIONAL);
 		ld.emission[0] = linear_col.r * energy;
@@ -2959,6 +3118,8 @@ uint32_t RenderRaytracing::gather_lights(const RenderDataRD *p_render_data, RT_L
 		ld.position[1] = xform.origin.y;
 		ld.position[2] = xform.origin.z;
 		ld.type = (type == RSE::LIGHT_SPOT) ? RT_LIGHT_TYPE_SPOT : RT_LIGHT_TYPE_OMNI;
+		ld.light_masks = (ls->light_get_cull_mask(base) & 0xFFFFFu) |
+				((p_state ? p_state->shadow_groups.ray_mask_for_caster_mask(ls->light_get_shadow_caster_mask(base)) : 0xFCu) << 24u);
 
 		Color linear_col = ls->light_get_color(base).srgb_to_linear();
 		float energy = compute_light_energy(base, type);
@@ -3003,6 +3164,24 @@ uint32_t RenderRaytracing::gather_lights(const RenderDataRD *p_render_data, RT_L
 // Uniform set update
 // ---------------------------------------------------------------------------
 
+void RenderRaytracing::update_scene_ubo(RTViewportState *p_state, const RenderDataRD *p_render_data, const Size2i &p_screen_size, const Color &p_default_bg_color) {
+	ERR_FAIL_NULL(p_state);
+	ERR_FAIL_NULL(p_render_data);
+	ERR_FAIL_NULL(p_render_data->scene_data);
+
+	if (p_state->scene_ubo.is_null()) {
+		p_state->scene_ubo = p_render_data->scene_data->create_uniform_buffer();
+		RD::get_singleton()->set_resource_name(p_state->scene_ubo, "RT Scene Data UBO");
+	}
+
+	RID env = owner->is_environment(p_render_data->environment) ? p_render_data->environment : RID();
+	RID reflection_probe_instance = p_render_data->reflection_probe.is_valid() ? RendererRD::LightStorage::get_singleton()->reflection_probe_instance_get_probe(p_render_data->reflection_probe) : RID();
+	float luminance_multiplier = p_render_data->render_buffers.is_valid() ? p_render_data->render_buffers->get_luminance_multiplier() : 1.0;
+
+	// Keep the arguments in sync with the _setup_environment() call in the PT camera pass.
+	p_render_data->scene_data->update_ubo(p_state->scene_ubo, owner->get_debug_draw_mode(), env, reflection_probe_instance, p_render_data->camera_attributes, false, p_screen_size, p_screen_size, p_default_bg_color, luminance_multiplier, false, false);
+}
+
 RID RenderRaytracing::update_uniform_set(RTViewportState *p_state, const RenderDataRD *p_render_data, uint32_t p_rt_flags) {
 	ERR_FAIL_NULL_V(p_state, RID());
 
@@ -3044,7 +3223,8 @@ RID RenderRaytracing::update_uniform_set(RTViewportState *p_state, const RenderD
 		RD::Uniform u;
 		u.binding = 2;
 		u.uniform_type = RD::UNIFORM_TYPE_UNIFORM_BUFFER;
-		u.append_id(owner->scene_state.uniform_buffers[0]);
+		ERR_FAIL_COND_V(p_state->scene_ubo.is_null(), RID());
+		u.append_id(p_state->scene_ubo);
 		uniforms.push_back(u);
 	}
 
@@ -3122,6 +3302,9 @@ RID RenderRaytracing::update_uniform_set(RTViewportState *p_state, const RenderD
 		// rt_params layout (see RaytracingParamIndex enum):
 		// [0] = VIS_MODE, [1] = SAMPLE_COUNT, [2] = MAX_BOUNCES,
 		// [3] = DLSS_RR_ENABLED, [14] = LIGHT_COUNT, [15] = FRAME_INDEX
+		rt_ubo.params[SceneShaderRaytracing::RT_PARAM_MAX_TRANSPARENCY_LAYERS] = (float)GLOBAL_GET_CACHED(int, "rendering/pathtracing/max_transparency_layers");
+		rt_ubo.params[SceneShaderRaytracing::RT_PARAM_TRANSPARENCY_MAX_BOUNCE] = (float)GLOBAL_GET_CACHED(int, "rendering/pathtracing/transparency_max_bounce");
+		rt_ubo.params[SceneShaderRaytracing::RT_PARAM_TRANSPARENT_COUNT] = (float)p_state->transparent_instance_count;
 		rt_ubo.params[SceneShaderRaytracing::RT_PARAM_FRAME_INDEX] = float(p_state->frame_counter++);
 
 		// Unjittered VP for motion vectors (matches raster convention).
@@ -3140,7 +3323,7 @@ RID RenderRaytracing::update_uniform_set(RTViewportState *p_state, const RenderD
 		uint32_t rt_light_count = 0;
 		RT_LightData rt_light_data[RT_LIGHTS_MAX] = {};
 
-		rt_light_count = gather_lights(p_render_data, rt_light_data, RT_LIGHTS_MAX);
+		rt_light_count = gather_lights(p_render_data, p_state, rt_light_data, RT_LIGHTS_MAX);
 
 		rt_ubo.params[SceneShaderRaytracing::RT_PARAM_LIGHT_COUNT] = float(rt_light_count);
 

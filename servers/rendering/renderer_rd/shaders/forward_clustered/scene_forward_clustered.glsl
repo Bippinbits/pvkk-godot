@@ -1063,6 +1063,10 @@ layout(location = 1) out uvec2 voxel_gi_buffer;
 
 layout(location = 0) out vec4 diffuse_buffer; //diffuse (rgb) and roughness
 layout(location = 1) out vec4 specular_buffer; //specular and SSS (subsurface scatter)
+#elif defined(MODE_OIT)
+
+layout(location = 0) out vec4 oit_accum_buffer; // weighted premultiplied color (rgb), weight sum (a)
+layout(location = 1) out float oit_reveal_buffer; // alpha, blended into the revealage product
 #else
 
 layout(location = 0) out vec4 frag_color;
@@ -2952,6 +2956,10 @@ void fragment_shader(in SceneData scene_data) {
 
 #else //MODE_SEPARATE_SPECULAR
 
+#ifdef MODE_OIT
+	vec4 frag_color; // Local; converted to the weighted OIT outputs below.
+#endif
+
 	alpha *= scene_data.pass_alpha_multiplier;
 
 #ifdef MODE_UNSHADED
@@ -2968,6 +2976,15 @@ void fragment_shader(in SceneData scene_data) {
 #if defined(PREMUL_ALPHA_USED) && !defined(MODE_RENDER_DEPTH)
 	frag_color.rgb *= premul_alpha;
 #endif //PREMUL_ALPHA_USED
+
+#ifdef MODE_OIT
+	// Weighted-blended OIT, McGuire/Bavoil eq. 10: post-projection depth,
+	// scene-scale independent. Reverse-Z, so the near-weight is d^3 directly.
+	// Path-traced transparency uses bounded peeling instead of this weight.
+	float oit_weighted_alpha = alpha * max(0.01, 3000.0 * pow(gl_FragCoord.z, 3.0));
+	oit_accum_buffer = vec4(frag_color.rgb * oit_weighted_alpha, oit_weighted_alpha);
+	oit_reveal_buffer = alpha;
+#endif //MODE_OIT
 
 #endif //MODE_SEPARATE_SPECULAR
 

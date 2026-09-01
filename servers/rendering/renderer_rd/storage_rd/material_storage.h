@@ -62,6 +62,8 @@ public:
 			BLEND_MODE_MUL,
 			BLEND_MODE_ALPHA_TO_COVERAGE,
 			BLEND_MODE_PREMULTIPLIED_ALPHA,
+			// Weighted-blended OIT (McGuire/Bavoil); raster falls back to premultiplied mix.
+			BLEND_MODE_OIT,
 			BLEND_MODE_DISABLED
 		};
 

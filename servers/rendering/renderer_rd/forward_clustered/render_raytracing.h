@@ -84,7 +84,9 @@ struct alignas(16) RT_GeometryData {
 	// For deformed geometry: previous-frame position buffer used for motion vectors.
 	uint32_t prev_vertex_buffer_address_lo;
 	uint32_t prev_vertex_buffer_address_hi;
-	uint32_t _pad[5];
+	uint32_t layers; // VisualInstance3D render layers of the owning instance.
+	uint32_t instance_uniforms_ofs; // Per-instance shader uniforms offset in the global buffer.
+	uint32_t _pad[3];
 };
 static_assert(sizeof(RT_GeometryData) == 128, "RT_GeometryData must be 128 bytes for std430");
 
@@ -137,9 +139,9 @@ struct alignas(16) RT_LightData {
 	float indirect_energy;
 	float inv_spot_attenuation;
 	float cos_spot_angle;
-	float _pad0;
+	uint32_t light_masks; // Bits 0-19: light_cull_mask (lighting test). Bits 24-31: TLAS mask for shadow rays.
 	float spot_direction[3];
-	float _pad1;
+	uint32_t pad0;
 };
 static_assert(sizeof(RT_LightData) == 80, "RT_LightData must be 80 bytes for std430");
 
@@ -163,6 +165,18 @@ enum {
 	RT_MAT_FLAG_POINT_FILTER = 4u,
 	RT_MAT_FLAG_TRIPLANAR = 8u,
 	RT_MAT_FLAG_TRIPLANAR_WORLD = 16u,
+	// Blend class of transparent surfaces (bits 5-7); opaque surfaces leave 0.
+	RT_MAT_BLEND_CLASS_SHIFT = 5u,
+	RT_MAT_BLEND_CLASS_MIX = 0u,
+	RT_MAT_BLEND_CLASS_ADD = 1u,
+	RT_MAT_BLEND_CLASS_SUB = 2u,
+	RT_MAT_BLEND_CLASS_OIT = 3u,
+	RT_MAT_BLEND_CLASS_MUL = 4u,
+	RT_MAT_BLEND_CLASS_PREMULT = 5u,
+	RT_MAT_FLAG_DEPTH_DRAW_ALWAYS = 256u,
+	RT_MAT_FLAG_UNSHADED = 512u,
+	RT_MAT_FLAG_TRANSPARENT = 1024u,
+	RT_MAT_FLAG_ALPHA_SCISSOR = 2048u,
 };
 
 // Index format for RT geometry (matches GLSL fetch_indices).
@@ -177,6 +191,13 @@ enum {
 	RT_GEOM_FLAG_PROCEDURAL = 2u,
 	// Set when the BLAS uses a per-frame-deformed vertex buffer.
 	RT_GEOM_FLAG_DEFORMED = 4u,
+};
+
+// Unified TLAS instance mask layout: bit 0 = opaque camera lane, bit 1 =
+// transparent camera lane, bits 2-7 = shadow-caster groups.
+enum : uint8_t {
+	RT_VIS_BIT = 0x01,
+	RT_MASK_TRANSPARENT = 0x02,
 };
 
 /// Per-instance state for procedural RT geometry. Heap-allocated, only exists for procedural instances.
@@ -296,15 +317,17 @@ struct RTMaterialCacheEntry {
 
 /// Lookup key for per-viewport raytracing state.
 ///
-/// Shared viewports can trace different worlds (environments) into the same
-/// render buffers; each pair needs its own TLAS / SSBO state. Hash is used for
-/// the map bucket, then `operator==` compares the actual values.
+/// Shared viewports can trace different worlds into the same render buffers.
+/// The viewport RID keeps their TLAS / SSBO state separate.
 struct RTViewportStateKey {
 	RenderSceneBuffersRD *render_buffers = nullptr;
+	RID viewport;
 	RID environment;
 
 	bool operator==(const RTViewportStateKey &p_other) const {
-		return render_buffers == p_other.render_buffers && environment == p_other.environment;
+		return render_buffers == p_other.render_buffers &&
+				viewport == p_other.viewport &&
+				environment == p_other.environment;
 	}
 
 	bool operator!=(const RTViewportStateKey &p_other) const {
@@ -313,13 +336,85 @@ struct RTViewportStateKey {
 
 	uint32_t hash() const {
 		uint32_t h = hash_murmur3_one_64((uint64_t)(uintptr_t)render_buffers);
+		h = hash_murmur3_one_64(viewport.get_id(), h);
 		h = hash_murmur3_one_64(environment.get_id(), h);
 		return hash_fmix32(h);
 	}
 
 	RTViewportStateKey() {}
-	RTViewportStateKey(RenderSceneBuffersRD *p_render_buffers, RID p_environment) :
-			render_buffers(p_render_buffers), environment(p_environment) {}
+	RTViewportStateKey(RenderSceneBuffersRD *p_render_buffers, RID p_viewport, RID p_environment) :
+			render_buffers(p_render_buffers), viewport(p_viewport), environment(p_environment) {}
+};
+
+/// Per-frame table compressing 20-bit render layers into the six
+/// shadow-caster group bits of the 8-bit TLAS instance mask. Two layer masks share a group iff they intersect the same
+/// subset of this frame's light shadow_caster_masks.
+struct RTShadowGroupTable {
+	LocalVector<uint32_t> caster_masks; // Distinct light shadow_caster_masks this frame.
+	LocalVector<uint32_t> group_signatures; // Per group: which caster_masks it intersects.
+	HashMap<uint32_t, uint32_t> signature_to_group;
+
+	void reset() {
+		caster_masks.clear();
+		group_signatures.clear();
+		signature_to_group.clear();
+	}
+
+	void register_caster_mask(uint32_t p_caster_mask) {
+		if (caster_masks.find(p_caster_mask) != -1) {
+			return;
+		}
+		if (caster_masks.size() >= 31) {
+			WARN_PRINT_ONCE("Raytracing: more than 31 distinct light shadow caster masks in a frame; extra lights will hit every shadow-caster group.");
+			return;
+		}
+		caster_masks.push_back(p_caster_mask);
+	}
+
+	uint32_t signature_for_layers(uint32_t p_layers) const {
+		uint32_t sig = 0;
+		for (uint32_t i = 0; i < caster_masks.size(); i++) {
+			if (p_layers & caster_masks[i]) {
+				sig |= 1u << i;
+			}
+		}
+		return sig;
+	}
+
+	// Lazily allocates a group per signature; past 6 groups, merges into the
+	// last one (conservative: shadows may over-cast, never go missing).
+	uint8_t group_bits_for_layers(uint32_t p_layers) {
+		uint32_t sig = signature_for_layers(p_layers);
+		const uint32_t *found = signature_to_group.getptr(sig);
+		uint32_t group;
+		if (found) {
+			group = *found;
+		} else if (group_signatures.size() < 6) {
+			group = group_signatures.size();
+			group_signatures.push_back(sig);
+			signature_to_group.insert(sig, group);
+		} else {
+			WARN_PRINT_ONCE("Raytracing: more than 6 shadow-caster layer groups in a frame; merging (shadows may over-cast).");
+			group = 5;
+			group_signatures[5] |= sig;
+			signature_to_group.insert(sig, group);
+		}
+		return uint8_t(1u << (2u + group));
+	}
+
+	uint8_t ray_mask_for_caster_mask(uint32_t p_caster_mask) const {
+		int64_t idx = caster_masks.find(p_caster_mask);
+		if (idx < 0) {
+			return 0xFC; // Unregistered (overflow): hit every group.
+		}
+		uint8_t mask = 0;
+		for (uint32_t g = 0; g < group_signatures.size(); g++) {
+			if (group_signatures[g] & (1u << (uint32_t)idx)) {
+				mask |= uint8_t(1u << (2u + g));
+			}
+		}
+		return mask;
+	}
 };
 
 /// Per-viewport raytracing state.
@@ -337,6 +432,12 @@ struct RTViewportState {
 	RenderSceneBuffersRD *render_buffers = nullptr;
 	RID tlas;
 	uint32_t tlas_max_instances = 0;
+
+	// Owned per state: the raster path's recycled scene UBO slots can race a
+	// later pass's buffer_update against this state's in-flight RT dispatch.
+	RID scene_ubo;
+	uint32_t transparent_instance_count = 0;
+	RTShadowGroupTable shadow_groups;
 
 	RID geometry_buffer;
 	uint32_t geometry_buffer_capacity = 0;
@@ -410,19 +511,33 @@ class RenderRaytracing {
 	uint32_t cache_hits = 0;
 	uint32_t cache_misses = 0;
 
-	// Per-frame scratch arrays.
+	// Per-frame scratch arrays. Each unified-TLAS instance records its index
+	// into geometry_data/material_data via gl_InstanceCustomIndexEXT.
 	LocalVector<RT_GeometryData> geometry_data;
 	LocalVector<RT_MaterialData> material_data;
 	LocalVector<int32_t> motion_indices; ///< Per-instance: index into motion_transforms[], or -1.
 	LocalVector<RT_InstanceMotionData> motion_transforms; ///< Compact: only moving instances.
-	LocalVector<RID> blass;
-	LocalVector<Transform3D> blas_transforms;
-	LocalVector<uint32_t> instance_flags;
-	LocalVector<uint8_t> instance_masks; // Per-instance ray mask (0x00 = invisible to rays, 0xFF = normal)
-	LocalVector<uint32_t> sbt_offsets; // 0 = default material hit group
 
-	// Keyed by (render buffers, environment): shared viewports trace different
-	// worlds into the same render buffers, each needing its own TLAS state.
+	struct RTInstanceArrays {
+		LocalVector<RID> blass;
+		LocalVector<Transform3D> transforms;
+		LocalVector<uint32_t> flags;
+		LocalVector<uint8_t> masks;
+		LocalVector<uint32_t> sbt_offsets; // 0 = default material hit group
+		LocalVector<uint32_t> custom_indices;
+
+		void clear() {
+			blass.clear();
+			transforms.clear();
+			flags.clear();
+			masks.clear();
+			sbt_offsets.clear();
+			custom_indices.clear();
+		}
+	};
+	RTInstanceArrays tlas_instances;
+
+	// Shared render buffers still get one state per viewport/world.
 	HashMap<RTViewportStateKey, RTViewportState *> viewport_states;
 
 	RTViewportState *_get_or_create_viewport_state(const RenderDataRD *p_render_data);
@@ -485,6 +600,7 @@ class RenderRaytracing {
 			LocalVector<RID> &r_dirty_blas_update_list,
 			RTSurfaceData *r_surf_data);
 	void update_procedural_blas(RTProceduralState *p_state, LocalVector<RID> &r_dirty_blas_list);
+	void _build_one_tlas(RID &r_tlas, uint32_t &r_max_instances, const RTInstanceArrays &p_instances, const String &p_name);
 	void build_acceleration_structures(RTViewportState *p_state, const LocalVector<RID> &p_dirty_blas_list, const LocalVector<RID> &p_dirty_blas_update_list);
 	void finalize_buffers(RTViewportState *p_state);
 	void prepare_frame();
@@ -495,7 +611,8 @@ public:
 	void cleanup_caches();
 
 	RTViewportState *build_tlas(const RenderDataRD *p_render_data, uint32_t p_rt_flags);
-	uint32_t gather_lights(const RenderDataRD *p_render_data, RT_LightData *r_light_data, uint32_t p_max_lights);
+	uint32_t gather_lights(const RenderDataRD *p_render_data, const RTViewportState *p_state, RT_LightData *r_light_data, uint32_t p_max_lights);
+	void update_scene_ubo(RTViewportState *p_state, const RenderDataRD *p_render_data, const Size2i &p_screen_size, const Color &p_default_bg_color);
 	RID update_uniform_set(RTViewportState *p_state, const RenderDataRD *p_render_data, uint32_t p_rt_flags);
 
 	void copy_output_texture(const RenderDataRD *p_render_data);

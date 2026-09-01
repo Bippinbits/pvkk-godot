@@ -42,13 +42,17 @@
 
 using namespace RendererSceneRenderImplementation;
 
-static void _dump_failed_shader(const String &p_source, const String &p_label) {
+static void _dump_failed_shader(const String &p_source, const String &p_label, const String &p_error = String()) {
 	String tmp_dir = OS::get_singleton()->get_temp_path();
 	String path = tmp_dir.path_join("rt_shader_" + p_label + ".glsl");
 	Ref<FileAccess> f = FileAccess::open(path, FileAccess::WRITE);
 	if (f.is_valid()) {
 		f->store_string(p_source);
 		WARN_PRINT("Dumped failed shader to: " + path);
+	}
+	Ref<FileAccess> ef = FileAccess::open(path + ".err.txt", FileAccess::WRITE);
+	if (ef.is_valid()) {
+		ef->store_string(p_error.is_empty() ? String("(no error text reported)") : p_error);
 	}
 }
 
@@ -397,6 +401,7 @@ struct SceneShaderRaytracing::PipelineBuildTask {
 		RID existing_per_hg_shader;
 		bool needs_compile = false;
 		bool uses_alpha_clip = false;
+		bool has_custom_any_hit = false; // Module carries its own AH stage.
 		bool is_procedural = false;
 		String ch_src;
 		String ah_src;
@@ -579,6 +584,17 @@ bool SceneShaderRaytracing::_preprocess_shader(RID p_material, bool p_is_procedu
 	actions.usage_flag_pointers["ALPHA_SCISSOR_THRESHOLD"] = &detected_alpha_clip;
 	actions.usage_flag_pointers["ALPHA_HASH_SCALE"] = &detected_alpha_clip;
 
+	// Blend transparents need the per-HG any-hit for exact peel/accumulation.
+	bool detected_alpha = false;
+	actions.usage_flag_pointers["ALPHA"] = &detected_alpha;
+	int blend_modei = RendererRD::MaterialStorage::ShaderData::BLEND_MODE_MIX;
+	actions.render_mode_values["blend_add"] = Pair<int *, int>(&blend_modei, RendererRD::MaterialStorage::ShaderData::BLEND_MODE_ADD);
+	actions.render_mode_values["blend_mix"] = Pair<int *, int>(&blend_modei, RendererRD::MaterialStorage::ShaderData::BLEND_MODE_MIX);
+	actions.render_mode_values["blend_sub"] = Pair<int *, int>(&blend_modei, RendererRD::MaterialStorage::ShaderData::BLEND_MODE_SUB);
+	actions.render_mode_values["blend_mul"] = Pair<int *, int>(&blend_modei, RendererRD::MaterialStorage::ShaderData::BLEND_MODE_MUL);
+	actions.render_mode_values["blend_premul_alpha"] = Pair<int *, int>(&blend_modei, RendererRD::MaterialStorage::ShaderData::BLEND_MODE_PREMULTIPLIED_ALPHA);
+	actions.render_mode_values["blend_oit"] = Pair<int *, int>(&blend_modei, RendererRD::MaterialStorage::ShaderData::BLEND_MODE_OIT);
+
 	HashMap<StringName, ShaderLanguage::ShaderNode::Uniform> uniform_sink;
 	actions.uniforms = &uniform_sink;
 
@@ -592,6 +608,7 @@ bool SceneShaderRaytracing::_preprocess_shader(RID p_material, bool p_is_procedu
 
 	r_entry.is_procedural = p_is_procedural;
 	r_entry.uses_alpha_clip = detected_alpha_clip;
+	r_entry.needs_full_any_hit = detected_alpha || blend_modei != RendererRD::MaterialStorage::ShaderData::BLEND_MODE_MIX;
 	r_entry.vertex_code = gen_code.code.has("vertex") ? gen_code.code["vertex"] : String();
 	r_entry.fragment_code = gen_code.code.has("fragment") ? gen_code.code["fragment"] : String();
 	r_entry.fragment_globals = gen_code.stage_globals[ShaderCompiler::STAGE_FRAGMENT];
@@ -950,6 +967,8 @@ SceneShaderRaytracing::PipelineBuildTask *SceneShaderRaytracing::_make_pipeline_
 
 		si.uses_alpha_clip = slot.entry.uses_alpha_clip;
 		si.is_procedural = slot.entry.is_procedural;
+		si.has_custom_any_hit = slot.entry.uses_alpha_clip ||
+				(slot.entry.needs_full_any_hit && !slot.entry.is_procedural && !slot.entry.fragment_code.is_empty());
 
 		if (slot.state != HGState::Ready) {
 			si.needs_compile = false;
@@ -1016,7 +1035,9 @@ SceneShaderRaytracing::PipelineBuildTask *SceneShaderRaytracing::_make_pipeline_
 			s = s.replace("/* RT_CUSTOM_VERTEX_CALL */", vertex_call);
 			si.ch_src = s;
 		}
-		if (entry.uses_alpha_clip) {
+		// Per-HG any-hit: alpha-clip materials need it for scissor, blend
+		// transparents need it for exact peel/accumulation evaluation.
+		if (si.has_custom_any_hit) {
 			String s = ctx.ah_template;
 			s = s.replace("/* RT_CUSTOM_FRAGMENT_GLOBALS */", entry.fragment_globals);
 			s = s.replace("/* RT_CUSTOM_FRAGMENT_CODE */", fragment_code);
@@ -1111,7 +1132,7 @@ void SceneShaderRaytracing::_build_pipeline_worker(PipelineBuildTask *p_task) {
 					RD::SHADER_STAGE_CLOSEST_HIT, si.ch_src, RD::SHADER_LANGUAGE_GLSL, &error);
 		}
 		if (ch_spirv.is_empty()) {
-			_dump_failed_shader(si.ch_src, vformat("hg%d_v%x_closest_hit", i, p_task->rt_flags));
+			_dump_failed_shader(si.ch_src, vformat("hg%d_v%x_closest_hit", i, p_task->rt_flags), error);
 			p_task->new_per_hg_shaders[i] = RID();
 			p_task->new_ready_mask[i] = false;
 			continue;
@@ -1123,7 +1144,7 @@ void SceneShaderRaytracing::_build_pipeline_worker(PipelineBuildTask *p_task) {
 			custom_stages.push_back(sd);
 		}
 
-		if (si.uses_alpha_clip) {
+		if (!si.ah_src.is_empty()) {
 			Vector<uint8_t> ah_spirv;
 			{
 				MutexLock lock(spirv_compile_mutex);
@@ -1131,7 +1152,7 @@ void SceneShaderRaytracing::_build_pipeline_worker(PipelineBuildTask *p_task) {
 						RD::SHADER_STAGE_ANY_HIT, si.ah_src, RD::SHADER_LANGUAGE_GLSL, &error);
 			}
 			if (ah_spirv.is_empty()) {
-				_dump_failed_shader(si.ah_src, vformat("hg%d_v%x_any_hit", i, p_task->rt_flags));
+				_dump_failed_shader(si.ah_src, vformat("hg%d_v%x_any_hit", i, p_task->rt_flags), error);
 				p_task->new_per_hg_shaders[i] = RID();
 				p_task->new_ready_mask[i] = false;
 				continue;
@@ -1152,7 +1173,7 @@ void SceneShaderRaytracing::_build_pipeline_worker(PipelineBuildTask *p_task) {
 						RD::SHADER_STAGE_INTERSECTION, si.is_src, RD::SHADER_LANGUAGE_GLSL, &error);
 			}
 			if (is_spirv.is_empty()) {
-				_dump_failed_shader(si.is_src, vformat("hg%d_v%x_intersection", i, p_task->rt_flags));
+				_dump_failed_shader(si.is_src, vformat("hg%d_v%x_intersection", i, p_task->rt_flags), error);
 				p_task->new_per_hg_shaders[i] = RID();
 				p_task->new_ready_mask[i] = false;
 				continue;
@@ -1214,7 +1235,7 @@ void SceneShaderRaytracing::_build_pipeline_worker(PipelineBuildTask *p_task) {
 		RD::PipelineShader custom_ps = { p_task->new_per_hg_shaders[i], p_task->spec_constants };
 		RD::HitGroup hg;
 		hg.closest_hit_shader = custom_ps;
-		hg.any_hit_shader = p_task->slots[i].uses_alpha_clip ? custom_ps : base_ps;
+		hg.any_hit_shader = p_task->slots[i].has_custom_any_hit ? custom_ps : base_ps;
 		if (p_task->slots[i].is_procedural) {
 			hg.intersection_shader = custom_ps;
 		}
@@ -1477,8 +1498,8 @@ void SceneShaderRaytracing::init(const String p_defines) {
 		actions.renames["INV_VIEW_MATRIX"] = "inv_view_matrix";
 		actions.renames["PROJECTION_MATRIX"] = "projection_matrix";
 		actions.renames["INV_PROJECTION_MATRIX"] = "inv_projection_matrix";
-		actions.renames["MODELVIEW_MATRIX"] = "(read_view_matrix * read_model_matrix)";
-		actions.renames["MODELVIEW_NORMAL_MATRIX"] = "mat3(read_view_matrix * read_model_matrix)";
+		actions.renames["MODELVIEW_MATRIX"] = "rt_modelview_matrix";
+		actions.renames["MODELVIEW_NORMAL_MATRIX"] = "rt_modelview_normal_matrix";
 		actions.renames["MAIN_CAM_INV_VIEW_MATRIX"] = "inv_view_matrix";
 
 		actions.renames["VERTEX"] = "vertex";
@@ -1659,7 +1680,10 @@ void SceneShaderRaytracing::init(const String p_defines) {
 		actions.default_filter = ShaderLanguage::FILTER_LINEAR_MIPMAP;
 		actions.default_repeat = ShaderLanguage::REPEAT_ENABLE;
 		actions.global_buffer_array_variable = "global_shader_uniforms.data";
-		actions.instance_uniform_index_variable = "instances.data[instance_index_interp].instance_uniforms_ofs";
+		// No raster instance SSBO in RT stages; the offset rides GeometryData.
+		actions.instance_uniform_index_variable = "geometries[gl_InstanceCustomIndexEXT].instance_uniforms_ofs";
+		// No volumetric fog froxels in RT; reads resolve to the zero stub.
+		actions.renames["VOLUMETRIC_FOG"] = "volumetric_fog_rt";
 
 		actions.check_multiview_samplers = RendererCompositorRD::get_singleton()->is_xr_enabled(); // Make sure we check sampling multiview textures.
 

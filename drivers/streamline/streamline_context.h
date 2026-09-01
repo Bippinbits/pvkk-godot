@@ -74,6 +74,14 @@ public:
 	char dlss_default_preset = '?';
 	char dlss_rr_default_preset = '?';
 
+	// DLSS only accepts render sizes within the ranges its quality modes report, and those ranges
+	// have gaps between them, so a size derived from an arbitrary resolution scale often matches no
+	// mode at all and makes DLSS drop upscaling entirely. Rounds r_render_* down to the exact size
+	// of the nearest mode that is not larger than requested, and returns true if it changed them.
+	// Sizes a mode already accepts are left untouched. Queries the Super Resolution table, matching
+	// DLSSEffect::create_context.
+	bool dlss_clamp_render_size(int p_target_width, int p_target_height, int &r_render_width, int &r_render_height);
+
 	// DLSS Ray Reconstruction (DLSS-D / DLSS-RR)
 	PFun_slDLSSDGetOptimalSettings *slDLSSDGetOptimalSettings = nullptr;
 	PFun_slDLSSDGetState *slDLSSDGetState = nullptr;

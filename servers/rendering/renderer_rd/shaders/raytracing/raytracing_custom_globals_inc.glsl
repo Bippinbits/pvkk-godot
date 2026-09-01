@@ -20,6 +20,9 @@ vec4 color_interp = vec4(1.0);
 vec3 view = vec3(0.0, 0.0, -1.0);
 mat4 read_model_matrix = mat4(1.0);
 mat3 model_normal_matrix = mat3(1.0);
+// Writable so vertex code can override them (billboard shaders).
+mat4 rt_modelview_matrix = mat4(1.0);
+mat3 rt_modelview_normal_matrix = mat3(1.0);
 mat4 read_view_matrix = mat4(1.0);
 mat4 inv_view_matrix = mat4(1.0);
 mat4 projection_matrix = mat4(1.0);
@@ -31,6 +34,28 @@ vec2 rt_screen_uv = vec2(0.0);
 vec4 rt_frag_coord = vec4(0.0);
 float alpha_antialiasing_edge = 0.0;
 vec2 alpha_texture_coordinate = vec2(0.0);
+// Vertex-stage built-ins with no RT equivalent; writes are discarded.
+vec4 position = vec4(0.0);
+vec4 instance_custom = vec4(0.0);
+float rt_point_size = 1.0;
+int rt_instance_id = 0;
+int rt_vertex_id = 0;
+float roughness = 0.5;
+uvec4 bone_attrib = uvec4(0);
+vec4 weight_attrib = vec4(0.0);
+vec4 custom0_attrib = vec4(0.0);
+vec4 custom1_attrib = vec4(0.0);
+vec4 custom2_attrib = vec4(0.0);
+vec4 custom3_attrib = vec4(0.0);
+vec3 eye_offset = vec3(0.0);
+float global_prev_time = 0.0;
+
+#ifndef ViewIndex
+#define ViewIndex 0
+#endif
+#ifndef SHADER_SPACE_FAR
+#define SHADER_SPACE_FAR 0.0
+#endif
 
 // Screen/depth textures are unavailable in RT -- alias to bindless slot 0
 // so shaders that reference them still compile (reads return dummy values).

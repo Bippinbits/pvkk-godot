@@ -94,17 +94,23 @@ vec3 apply_normal_map(HitData h, vec3 tangent_space_normal, float normal_map_dep
 // DEPTH WRITE (primary ray only)
 // ============================================================================
 
+void rt_store_ndc_depth(vec3 hit_pos) {
+	mat4 view_mat = transpose(mat4(scene_data_block.data.view_matrix[0],
+			scene_data_block.data.view_matrix[1],
+			scene_data_block.data.view_matrix[2],
+			vec4(0.0, 0.0, 0.0, 1.0)));
+	vec3 view_pos = (view_mat * vec4(hit_pos, 1.0)).xyz;
+	vec4 clip_pos = scene_data_block.data.projection_matrix * vec4(view_pos, 1.0);
+	float ndc_depth = clip_pos.z / clip_pos.w;
+	imageStore(rt_depth_image, ivec2(gl_LaunchIDEXT.xy), vec4(ndc_depth));
+}
+
 /// Write NDC depth for primary ray hits (bounce 0, sample 0 only).
+/// Peel rays defer to the dominant-layer logic in shade_and_bounce.
 void write_primary_hit_depth(vec3 hit_pos) {
-	if (get_total_bounces(payload.packed_bounces_flags) == 0u && is_sample_zero(payload.packed_bounces_flags)) {
-		mat4 view_mat = transpose(mat4(scene_data_block.data.view_matrix[0],
-				scene_data_block.data.view_matrix[1],
-				scene_data_block.data.view_matrix[2],
-				vec4(0.0, 0.0, 0.0, 1.0)));
-		vec3 view_pos = (view_mat * vec4(hit_pos, 1.0)).xyz;
-		vec4 clip_pos = scene_data_block.data.projection_matrix * vec4(view_pos, 1.0);
-		float ndc_depth = clip_pos.z / clip_pos.w;
-		imageStore(rt_depth_image, ivec2(gl_LaunchIDEXT.xy), vec4(ndc_depth));
+	if (get_total_bounces(payload.packed_bounces_flags) == 0u && is_sample_zero(payload.packed_bounces_flags) &&
+			(payload.packed_bounces_flags & PEEL_RAY_FLAG) == 0u) {
+		rt_store_ndc_depth(hit_pos);
 	}
 }
 
@@ -133,13 +139,8 @@ mat4 decode_prev_object_to_world(int motion_idx) {
 			vec4(0.0, 0.0, 0.0, 1.0)));
 }
 
-/// Write motion vectors for primary ray hits (bounce 0, sample 0 only).
 /// Uses unjittered VP matrices matching the raster motion_vectors_store convention.
-void write_primary_hit_velocity(vec3 hit_pos) {
-	if (get_total_bounces(payload.packed_bounces_flags) != 0u || !is_sample_zero(payload.packed_bounces_flags)) {
-		return;
-	}
-
+void rt_store_velocity(vec3 hit_pos) {
 	uint geom_idx = gl_InstanceCustomIndexEXT;
 	int mi = motion_indices[geom_idx];
 
@@ -186,6 +187,16 @@ void write_primary_hit_velocity(vec3 hit_pos) {
 	vec2 prev_uv = project_uv(prev_world_pos, prev_vp_unjittered);
 
 	imageStore(rt_velocity_image, ivec2(gl_LaunchIDEXT.xy), vec4(prev_uv - curr_uv, 0.0, 0.0));
+}
+
+/// Write motion vectors for primary ray hits (bounce 0, sample 0 only).
+/// Peel rays defer to the dominant-layer logic in shade_and_bounce.
+void write_primary_hit_velocity(vec3 hit_pos) {
+	if (get_total_bounces(payload.packed_bounces_flags) != 0u || !is_sample_zero(payload.packed_bounces_flags) ||
+			(payload.packed_bounces_flags & PEEL_RAY_FLAG) != 0u) {
+		return;
+	}
+	rt_store_velocity(hit_pos);
 }
 
 // ============================================================================
@@ -421,6 +432,94 @@ void debug_visualize(
 // SHADE AND BOUNCE
 // ============================================================================
 
+bool surface_is_unshaded(uint geometry_idx) {
+#ifdef MODE_UNSHADED
+	return true;
+#else
+	return (materials[geometry_idx].flags & RT_MAT_FLAG_UNSHADED) != 0u;
+#endif
+}
+
+MaterialProperties material_properties_from_result(MaterialResult m) {
+	MaterialProperties material;
+	material.baseColor = m.albedo;
+	material.metalness = m.metalness;
+	material.roughness = m.roughness;
+	material.dielectricF0 = specular_to_f0(m.specular);
+	material.emissive = m.emissive;
+	material.transmissivness = 0.0;
+	material.opacity = 1.0;
+	return material;
+}
+
+vec3 shade_local_surface(HitData h, MaterialResult m, vec3 N, vec3 V, bool p_is_indirect, inout uint rng_state) {
+	if (surface_is_unshaded(h.geometry_idx)) {
+		return m.albedo + m.emissive;
+	}
+	vec3 lit = m.emissive;
+	uint light_count = uint(get_rt_param(RT_PARAM_LIGHT_COUNT));
+	if (light_count > 0u) {
+		MaterialProperties material = material_properties_from_result(m);
+		vec3 hit_pos_offset = offset_ray_origin(h.hit_pos, h.geometry_normal);
+		lit += lights_evaluate_direct_lighting(hit_pos_offset, N, V, material,
+				rng_state, p_is_indirect, light_count, geometries[h.geometry_idx].layers);
+	}
+	return lit;
+}
+
+bool sample_surface_continuation(HitData h, MaterialResult m, vec3 N, vec3 V, inout PathState ps) {
+	if (surface_is_unshaded(h.geometry_idx)) {
+		return false;
+	}
+	uint total_bounces = get_total_bounces(ps.packed_bounces_flags);
+	uint diffuse_bounces = get_diffuse_bounces(ps.packed_bounces_flags);
+	if (total_bounces >= RT_GET_MAX_BOUNCES() || diffuse_bounces >= MAX_DIFFUSE_BOUNCES) {
+		return false;
+	}
+
+	MaterialProperties material = material_properties_from_result(m);
+	vec3 specular_f0 = baseColorToSpecularF0(material.baseColor, material.metalness, material.dielectricF0);
+	vec3 diffuse_reflectance = baseColorToDiffuseReflectance(material.baseColor, material.metalness);
+	float specular_lum = luminance(specular_f0);
+	float diffuse_lum = luminance(diffuse_reflectance);
+
+	int brdf_type;
+	if (diffuse_lum < 0.0001) {
+		brdf_type = SPECULAR_TYPE;
+	} else if (specular_lum < 0.0001) {
+		brdf_type = DIFFUSE_TYPE;
+	} else {
+		float brdf_probability = clamp(specular_lum / (specular_lum + diffuse_lum), 0.01, 0.99);
+		if (rand(ps.rng_state) < brdf_probability) {
+			brdf_type = SPECULAR_TYPE;
+			ps.throughput /= brdf_probability;
+		} else {
+			brdf_type = DIFFUSE_TYPE;
+			ps.throughput /= (1.0 - brdf_probability);
+		}
+	}
+
+	vec3 next_dir;
+	vec3 brdf_weight;
+	if (!evalIndirectCombinedBRDF(rand2(ps.rng_state), N, h.geometry_normal, V, material, brdf_type, next_dir, brdf_weight, vec4(0.0))) {
+		vec3 recovered_dir;
+		if (luminance(brdf_weight) == 0.0 ||
+				!recoverBelowHemisphereSample(next_dir, h.geometry_normal, recovered_dir)) {
+			return false;
+		}
+		next_dir = recovered_dir;
+	}
+
+	ps.throughput *= brdf_weight;
+	ps.packed_bounces_flags = (brdf_type == DIFFUSE_TYPE)
+			? inc_diffuse_bounce(ps.packed_bounces_flags)
+			: inc_total_bounce(ps.packed_bounces_flags);
+	ps.hit_t = gl_HitTEXT;
+	ps.offset_normal = h.geometry_normal;
+	ps.next_ray_dir = next_dir;
+	return true;
+}
+
 /// Production shading: emissive + NEE direct lighting + BRDF importance sampling + next bounce.
 /// Also handles DLSS-RR G-buffer output on primary ray.
 void shade_and_bounce(HitData h, MaterialResult m) {
@@ -432,34 +531,117 @@ void shade_and_bounce(HitData h, MaterialResult m) {
 	vec3 N = clampShadingNormal(m.normal, h.geometry_normal, V, RT_SHADING_NORMAL_CLAMP_THRESHOLD);
 	float NdotV = max(dot(N, V), 0.0001);
 
+	if ((ps.packed_bounces_flags & PEEL_RAY_FLAG) != 0u) {
+		// Peel layer: shade like an opaque hit, apply its blend operation, no bounce.
+		// Raygen pre-scales throughput by the running transmittance and owns
+		// path continuation; this only reports (t, alpha) and its own light.
+		uint mat_flags = materials[h.geometry_idx].flags;
+		uint bclass = (mat_flags & RT_MAT_BLEND_CLASS_MASK) >> RT_MAT_BLEND_CLASS_SHIFT;
+		bool depth_barrier = (mat_flags & RT_MAT_FLAG_DEPTH_DRAW_ALWAYS) != 0u;
+		float material_alpha = clamp(m.alpha, 0.0, 1.0);
+		float peel_alpha;
+		float continuation_alpha = 0.0;
+		vec3 fogged_throughput = ps.throughput;
+		vec3 branch_fog = vec3(0.0);
+		apply_segment_fog(gl_HitTEXT, branch_fog, fogged_throughput);
+		if (bclass == RT_BLEND_CLASS_MUL) {
+			// Mul contributes no light; its color folds into the scalar T.
+			peel_alpha = clamp(1.0 - luminance(m.albedo), 0.0, 1.0);
+		} else {
+			// Add/Sub scale their source by alpha but do not attenuate the
+			// destination. Premultiplied alpha already includes alpha in RGB.
+			peel_alpha = (bclass == RT_BLEND_CLASS_ADD || bclass == RT_BLEND_CLASS_SUB) ? 0.0 : material_alpha;
+			ps.throughput = fogged_throughput;
+			path_pack(payload, ps);
+			vec3 lit = shade_local_surface(h, m, N, V,
+					get_diffuse_bounces(ps.packed_bounces_flags) > 0u, ps.rng_state);
+			float source_alpha = (bclass == RT_BLEND_CLASS_PREMULT) ? 1.0 : material_alpha;
+			vec3 contribution = ps.throughput * source_alpha * lit;
+			if (bclass == RT_BLEND_CLASS_SUB) {
+				ps.radiance -= contribution;
+			} else {
+				ps.radiance += contribution;
+			}
+			if (bclass != RT_BLEND_CLASS_ADD && bclass != RT_BLEND_CLASS_SUB) {
+				continuation_alpha = material_alpha;
+				ps.radiance += branch_fog * continuation_alpha;
+			}
+
+			// Dominant surface: the first peel layer on the primary segment
+			// with alpha >= 0.5 owns depth/velocity and blends into RR guides.
+			// depth_draw_always owns depth regardless of its alpha.
+			if (get_total_bounces(ps.packed_bounces_flags) == 0u && is_sample_zero(ps.packed_bounces_flags) &&
+					(ps.packed_bounces_flags & PEEL_FIRST_LAYER_FLAG) != 0u && (depth_barrier || peel_alpha >= 0.5)) {
+				rt_store_ndc_depth(h.hit_pos);
+				rt_store_velocity(h.hit_pos);
+#ifdef DLSS_RR_ENABLED
+				ivec2 peel_pixel = ivec2(gl_LaunchIDEXT.xy);
+				float guide_alpha = depth_barrier ? material_alpha : peel_alpha;
+				vec3 layer_diffuse = DLSSRR_encodeDiffuseAlbedo(DLSSRR_computeDiffuseAlbedo(m.albedo, m.metalness));
+				vec4 prev_diffuse = imageLoad(dlss_rr_diffuse_albedo, peel_pixel);
+				imageStore(dlss_rr_diffuse_albedo, peel_pixel, vec4(mix(prev_diffuse.rgb, layer_diffuse, guide_alpha), 1.0));
+				vec4 prev_nr = imageLoad(dlss_rr_normal_roughness, peel_pixel);
+				vec3 blended_n = normalize(mix(prev_nr.xyz, N, guide_alpha));
+				imageStore(dlss_rr_normal_roughness, peel_pixel, vec4(blended_n, mix(prev_nr.w, m.roughness, guide_alpha)));
+				vec3 layer_specular = DLSSRR_computeSpecularAlbedo(
+						m.albedo, m.metalness, specular_to_f0(m.specular), m.roughness, NdotV);
+				vec4 prev_specular = imageLoad(dlss_rr_specular_albedo, peel_pixel);
+				imageStore(dlss_rr_specular_albedo, peel_pixel,
+						vec4(mix(prev_specular.rgb, clamp(layer_specular, vec3(0.04), vec3(1.0)), guide_alpha), 1.0));
+
+				if (m.roughness < MAX_DENOISER_SPECULAR_HIT_THRESHOLD) {
+					vec3 spec_dir = reflect(-V, N);
+					vec3 spec_origin = offset_ray_origin(h.hit_pos, spec_dir);
+					rayQueryEXT spec_rq;
+					rayQueryInitializeEXT(spec_rq, tlas, RT_RAY_FLAGS | gl_RayFlagsTerminateOnFirstHitEXT,
+							RT_VIS_MASK | RT_TMASK_TRANSPARENT, spec_origin, 0.001, spec_dir, 10000.0);
+					while (rayQueryProceedEXT(spec_rq)) {
+						if (rayQueryGetIntersectionTypeEXT(spec_rq, false) == gl_RayQueryCandidateIntersectionTriangleEXT &&
+								ray_query_alpha_test(
+										rayQueryGetIntersectionInstanceCustomIndexEXT(spec_rq, false),
+										rayQueryGetIntersectionPrimitiveIndexEXT(spec_rq, false),
+										rayQueryGetIntersectionBarycentricsEXT(spec_rq, false))) {
+							rayQueryConfirmIntersectionEXT(spec_rq);
+						}
+					}
+					if (rayQueryGetIntersectionTypeEXT(spec_rq, true) != gl_RayQueryCommittedIntersectionNoneEXT) {
+						float layer_spec_hit_dist = rayQueryGetIntersectionTEXT(spec_rq, true);
+						vec4 prev_spec_hit_dist = imageLoad(dlss_rr_specular_hit_dist, peel_pixel);
+						imageStore(dlss_rr_specular_hit_dist, peel_pixel,
+								vec4(mix(prev_spec_hit_dist.x, layer_spec_hit_dist, guide_alpha)));
+					}
+				}
+#endif
+			}
+		}
+		ps.packed_bounces_flags = set_peel_alpha(ps.packed_bounces_flags, peel_alpha);
+		if (depth_barrier) {
+			ps.packed_bounces_flags |= PEEL_DEPTH_BARRIER_HIT_FLAG;
+		}
+		ps.packed_bounces_flags &= ~PEEL_HAS_CONTINUATION_FLAG;
+		if (continuation_alpha > 0.0) {
+			ps.throughput *= continuation_alpha;
+			if (sample_surface_continuation(h, m, N, V, ps)) {
+				ps.packed_bounces_flags |= PEEL_HAS_CONTINUATION_FLAG;
+			}
+		}
+		ps.hit_t = gl_HitTEXT;
+		path_pack(payload, ps);
+		return;
+	}
+
 	uint total_bounces = get_total_bounces(ps.packed_bounces_flags);
 	uint diffuse_bounces = get_diffuse_bounces(ps.packed_bounces_flags);
 
 	// Environment fog for this ray segment (before surface contribution).
 	apply_segment_fog(gl_HitTEXT, ps.radiance, ps.throughput);
 
-	// Emissive contribution.
-	ps.radiance += ps.throughput * m.emissive;
-
-	// Bounce limit check.
-	if (total_bounces >= RT_GET_MAX_BOUNCES() || diffuse_bounces >= MAX_DIFFUSE_BOUNCES) {
-		ps.packed_bounces_flags = set_path_terminated(ps.packed_bounces_flags);
-		path_pack(payload, ps);
-		return;
-	}
+	path_pack(payload, ps);
+	ps.radiance += ps.throughput * shade_local_surface(
+			h, m, N, V, diffuse_bounces > 0u, ps.rng_state);
 
 	// BRDF material setup.
-	MaterialProperties brdf_mat;
-	brdf_mat.baseColor = m.albedo;
-	brdf_mat.metalness = m.metalness;
-	brdf_mat.roughness = m.roughness;
-	brdf_mat.dielectricF0 = specular_to_f0(m.specular);
-	brdf_mat.emissive = m.emissive;
-	brdf_mat.transmissivness = 0.0;
-	brdf_mat.opacity = 1.0;
-
-	vec3 specularF0 = baseColorToSpecularF0(brdf_mat.baseColor, brdf_mat.metalness, brdf_mat.dielectricF0);
-	vec3 diffuseReflectance = baseColorToDiffuseReflectance(brdf_mat.baseColor, brdf_mat.metalness);
+	MaterialProperties brdf_mat = material_properties_from_result(m);
 
 	// =================================================================
 	// DLSS Ray Reconstruction output (primary ray, sample 0 only)
@@ -484,7 +666,7 @@ void shade_and_bounce(HitData h, MaterialResult m) {
 
 			rayQueryEXT spec_rq;
 			rayQueryInitializeEXT(spec_rq, tlas, RT_RAY_FLAGS | gl_RayFlagsTerminateOnFirstHitEXT,
-					0xFF, spec_origin, 0.001, spec_dir, 10000.0);
+					RT_VIS_MASK, spec_origin, 0.001, spec_dir, 10000.0);
 			while (rayQueryProceedEXT(spec_rq)) {
 				if (rayQueryGetIntersectionTypeEXT(spec_rq, false) == gl_RayQueryCandidateIntersectionTriangleEXT) {
 					if (ray_query_alpha_test(
@@ -503,74 +685,8 @@ void shade_and_bounce(HitData h, MaterialResult m) {
 	}
 #endif
 
-	// =================================================================
-	// NEE: Next Event Estimation (direct light sampling)
-	// =================================================================
-	path_pack(payload, ps);
-
-	uint rt_light_count = uint(get_rt_param(RT_PARAM_LIGHT_COUNT));
-	if (rt_light_count > 0u) {
-		vec3 hit_pos_offset = offset_ray_origin(h.hit_pos, h.geometry_normal);
-		bool is_indirect = (diffuse_bounces > 0u);
-		vec3 direct_light = lights_evaluate_direct_lighting(
-				hit_pos_offset, N, V, brdf_mat, ps.rng_state, is_indirect, rt_light_count);
-		ps.radiance += ps.throughput * direct_light;
+	if (!sample_surface_continuation(h, m, N, V, ps)) {
+		ps.packed_bounces_flags = set_path_terminated(ps.packed_bounces_flags);
 	}
-
-	// =================================================================
-	// BRDF importance sampling for next bounce
-	// =================================================================
-	float specularLum = luminance(specularF0);
-	float diffuseLum = luminance(diffuseReflectance);
-
-	int brdfType;
-	if (diffuseLum < 0.0001) {
-		brdfType = SPECULAR_TYPE;
-	} else if (specularLum < 0.0001) {
-		brdfType = DIFFUSE_TYPE;
-	} else {
-		float brdfProbability = clamp(specularLum / (specularLum + diffuseLum), 0.01, 0.99);
-		if (rand(ps.rng_state) < brdfProbability) {
-			brdfType = SPECULAR_TYPE;
-			ps.throughput /= brdfProbability;
-		} else {
-			brdfType = DIFFUSE_TYPE;
-			ps.throughput /= (1.0 - brdfProbability);
-		}
-	}
-
-	vec2 u = rand2(ps.rng_state);
-	vec3 next_dir;
-	vec3 brdf_weight;
-	if (!evalIndirectCombinedBRDF(u, N, h.geometry_normal, V, brdf_mat, brdfType, next_dir, brdf_weight, vec4(0.0))) {
-		// Two failure modes:
-		//   1) Sample weight is zero (no contribution). Terminate.
-		//   2) Sampled direction is below the geometry plane. Recover by
-		//      mirroring across the geometry plane (see brdf_inc.glsl). The
-		//      mirror is gated by RT_BELOW_HEMISPHERE_RECOVERY_ENABLED; when
-		//      disabled, recovery returns false and we terminate the path.
-		vec3 recovered_dir;
-		if (luminance(brdf_weight) == 0.0 ||
-				!recoverBelowHemisphereSample(next_dir, h.geometry_normal, recovered_dir)) {
-			ps.packed_bounces_flags = set_path_terminated(ps.packed_bounces_flags);
-			path_pack(payload, ps);
-			return;
-		}
-		next_dir = recovered_dir;
-	}
-
-	ps.throughput *= brdf_weight;
-
-	if (brdfType == DIFFUSE_TYPE) {
-		ps.packed_bounces_flags = inc_diffuse_bounce(ps.packed_bounces_flags);
-	} else {
-		ps.packed_bounces_flags = inc_total_bounce(ps.packed_bounces_flags);
-	}
-
-	// Hand the next ray back to raygen. PATH_TERMINATED_FLAG stays clear so
-	// the raygen loop continues with the reconstructed origin and next_ray_dir.
-	ps.hit_t = gl_HitTEXT;
-	ps.offset_normal = h.geometry_normal;
-	ps.next_ray_dir = next_dir;
 	path_pack(payload, ps);
 }

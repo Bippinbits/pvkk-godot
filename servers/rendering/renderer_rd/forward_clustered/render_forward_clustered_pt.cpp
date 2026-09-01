@@ -30,6 +30,7 @@
 
 #include "render_forward_clustered_pt.h"
 
+#include "core/config/project_settings.h"
 #include "servers/rendering/renderer_rd/environment/fog.h"
 #include "servers/rendering/renderer_rd/forward_clustered/scene_shader_raytracing.h"
 #include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
@@ -147,14 +148,27 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 
 	RENDER_TIMESTAMP("Fill Render Lists");
 
-	// TLAS is built from rt_instances and the path tracer writes velocity itself,
-	// so this collapses to populating the ALPHA (transparent) list only.
-	_fill_render_list(RENDER_LIST_OPAQUE, p_render_data, PASS_MODE_COLOR, false, false, false, false, true);
+	// With a nonzero transparency layer budget, blend surfaces are path-traced
+	// through the unified TLAS and the raster alpha overlay is skipped.
+	// A zero budget restores the legacy raster overlay.
+	const bool pt_transparency = rb_data.is_valid() && raytracing && raytracing->get_shader() &&
+			(int)GLOBAL_GET("rendering/pathtracing/max_transparency_layers") > 0;
 
-	int *render_info = p_render_data->render_info ? p_render_data->render_info->info[RSE::VIEWPORT_RENDER_INFO_TYPE_VISIBLE] : (int *)nullptr;
+	if (pt_transparency) {
+		// _fill_render_list is skipped, but the TLAS build still needs fresh
+		// surface caches.
+		_update_dirty_geometry_instances();
+		render_list[RENDER_LIST_ALPHA].clear();
+	} else {
+		// TLAS is built from rt_instances and the path tracer writes velocity itself,
+		// so this collapses to populating the ALPHA (transparent) list only.
+		_fill_render_list(RENDER_LIST_OPAQUE, p_render_data, PASS_MODE_COLOR, false, false, false, false, true);
 
-	render_list[RENDER_LIST_ALPHA].sort_by_reverse_depth_and_priority();
-	_fill_instance_data(RENDER_LIST_ALPHA, render_info);
+		int *render_info = p_render_data->render_info ? p_render_data->render_info->info[RSE::VIEWPORT_RENDER_INFO_TYPE_VISIBLE] : (int *)nullptr;
+
+		render_list[RENDER_LIST_ALPHA].sort_by_reverse_depth_and_priority();
+		_fill_instance_data(RENDER_LIST_ALPHA, render_info);
+	}
 
 	// RT pipeline flags (packed with sample count / max bounces). Computed once
 	// here and reused at trace-dispatch time below so the uniform set and the
@@ -194,6 +208,7 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 
 		RTViewportState *rt_state = raytracing->build_tlas(p_render_data, rt_flags);
 		if (rt_state) {
+			raytracing->update_scene_ubo(rt_state, p_render_data, screen_size, p_default_bg_color);
 			rt_uniform_set = raytracing->update_uniform_set(rt_state, p_render_data, rt_flags);
 		}
 	} else if (rb_data.is_valid() && raytracing && !p_render_data->skip_post_and_tonemap && raytracing->dlss_rr_has_buffers(rb.ptr())) {
@@ -322,9 +337,8 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 		_process_compositor_effects(RSE::COMPOSITOR_EFFECT_CALLBACK_TYPE_PRE_OPAQUE, p_render_data);
 	}
 
-	// The path tracer produces the opaque color, but transparents are still
-	// rasterized on top, which needs the reflection-probe / light / decal buffers
-	// and the cluster grid to be valid for the current frame.
+	// Sky (sun disk) and the remaining raster passes still read the light
+	// UBOs and cluster grid, so this runs even with pathtraced transparency.
 	{
 		uint32_t pt_directional_light_count = 0;
 		uint32_t pt_positional_light_count = 0;
@@ -442,7 +456,7 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 		_process_compositor_effects(RSE::COMPOSITOR_EFFECT_CALLBACK_TYPE_PRE_TRANSPARENT, p_render_data);
 	}
 
-	{
+	if (!pt_transparency) {
 		RENDER_TIMESTAMP("Render 3D Transparent Pass");
 
 		RD::get_singleton()->draw_command_begin_label("Render 3D Transparent Pass");

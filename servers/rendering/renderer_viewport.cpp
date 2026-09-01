@@ -264,6 +264,22 @@ void RendererViewport::_configure_3d_render_buffers(Viewport *p_viewport) {
 					break;
 			}
 
+#ifdef STREAMLINE_ENABLED
+			if (scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_DLSS) {
+				// DLSS only supports the render sizes its quality modes report, so an arbitrary
+				// resolution scale has to be snapped to one of them or DLSS bails out and drops
+				// upscaling entirely. The size has to come from Streamline rather than from the
+				// scale factor: ratios like Ultra Performance's 1/3 are not representable in
+				// floating point, so a derived size can miss the expected one by a pixel.
+				if (StreamlineContext::get().dlss_clamp_render_size(target_width, target_height, render_width, render_height)) {
+					WARN_PRINT_ONCE(vformat("DLSS does not support the requested 3D resolution scale. Clamping the internal resolution to %dx%d.", render_width, render_height));
+					// Keep the values derived from the scale below (jitter phase count, texture
+					// mipmap bias) consistent with the resolution actually being rendered.
+					scaling_3d_scale = (float)render_width / (float)target_width;
+				}
+			}
+#endif
+
 			uint32_t jitter_phase_count = 0;
 			if (scaling_type == RS::VIEWPORT_SCALING_3D_TYPE_TEMPORAL) {
 				// Implementation has been copied from ffxFsr2GetJitterPhaseCount.

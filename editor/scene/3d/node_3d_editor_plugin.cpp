@@ -735,9 +735,17 @@ void Node3DEditorViewport::cancel_transform() {
 }
 
 void Node3DEditorViewport::_update_shrink() {
-	const float scaling_3d_scale = GLOBAL_GET("rendering/scaling_3d/scale");
-	const float shrink_factor = view_display_menu->get_popup()->is_item_checked(view_display_menu->get_popup()->get_item_index(VIEW_HALF_RESOLUTION)) ? 0.5 : 1.0;
-	viewport->set_scaling_3d_scale(MAX(0.25, scaling_3d_scale * shrink_factor));
+	const bool shrink = view_display_menu->get_popup()->is_item_checked(view_display_menu->get_popup()->get_item_index(VIEW_HALF_RESOLUTION));
+
+	// Halve the SubViewport's size rather than the 3D scaling factor. Temporal upscalers
+	// (DLSS especially) only accept a limited set of internal-to-target resolution ratios,
+	// and halving `rendering/scaling_3d/scale` easily lands outside of them, which makes
+	// them bail out entirely. Shrinking the viewport keeps the ratio untouched and just
+	// lowers both the internal and the target resolution.
+	subviewport_container->set_stretch_shrink(shrink ? 2 : 1);
+	subviewport_container->set_texture_filter(shrink ? TEXTURE_FILTER_NEAREST : TEXTURE_FILTER_PARENT_NODE);
+
+	viewport->set_scaling_3d_scale(GLOBAL_GET("rendering/scaling_3d/scale"));
 }
 
 float Node3DEditorViewport::get_znear() const {

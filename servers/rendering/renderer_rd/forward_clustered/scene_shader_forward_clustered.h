@@ -47,6 +47,9 @@ public:
 		SHADER_GROUP_ADVANCED,
 		SHADER_GROUP_MULTIVIEW,
 		SHADER_GROUP_ADVANCED_MULTIVIEW,
+		SHADER_GROUP_OIT, // Compiled on first blend_oit material.
+		SHADER_GROUP_OIT_MULTIVIEW,
+		SHADER_GROUP_OIT_UNUSED, // OIT combos that are never requested; never enabled.
 	};
 
 	// Not an enum because these values are constants that are processed as numbers
@@ -70,7 +73,8 @@ public:
 		SHADER_COLOR_PASS_FLAG_LIGHTMAP = 1 << 2,
 		SHADER_COLOR_PASS_FLAG_MULTIVIEW = 1 << 3,
 		SHADER_COLOR_PASS_FLAG_MOTION_VECTORS = 1 << 4,
-		SHADER_COLOR_PASS_FLAG_COUNT = 1 << 5
+		SHADER_COLOR_PASS_FLAG_OIT = 1 << 5,
+		SHADER_COLOR_PASS_FLAG_COUNT = 1 << 6
 	};
 
 	enum PipelineVersion {
@@ -93,7 +97,8 @@ public:
 		PIPELINE_COLOR_PASS_FLAG_LIGHTMAP = 1 << 2,
 		PIPELINE_COLOR_PASS_FLAG_MULTIVIEW = 1 << 3,
 		PIPELINE_COLOR_PASS_FLAG_MOTION_VECTORS = 1 << 4,
-		PIPELINE_COLOR_PASS_FLAG_OPTIONS = 5,
+		PIPELINE_COLOR_PASS_FLAG_OIT = 1 << 5, // Only combines with TRANSPARENT (+ LIGHTMAP/MULTIVIEW).
+		PIPELINE_COLOR_PASS_FLAG_OPTIONS = 6,
 		PIPELINE_COLOR_PASS_FLAG_COMBINATIONS = 1 << PIPELINE_COLOR_PASS_FLAG_OPTIONS,
 	};
 
@@ -292,8 +297,18 @@ public:
 			bool uses_screen_texture = false;
 			bool uses_depth_texture = false;
 			bool uses_normal_texture = false;
+			bool force_opaque = false; // render_mode rt_force_opaque
+			bool force_transparent = false; // render_mode rt_force_transparent
 		};
 		RTClassification *rt = nullptr;
+
+		// Which transparency lane a surface takes in the pathtracer.
+		enum RTBlendClass {
+			RT_BLEND_OPAQUE, // Opaque camera lane (TLAS mask bit 0).
+			RT_BLEND_MIX, // Mix, Mul, premult, depth-prepass
+			RT_BLEND_ACCUM, // Add, Sub
+			RT_BLEND_OIT, // Raster WBOIT; peeled like Mix in PT.
+		};
 
 		_FORCE_INLINE_ bool uses_alpha_pass() const {
 			bool has_read_screen_alpha = uses_screen_texture || uses_depth_texture || uses_normal_texture;
@@ -316,13 +331,46 @@ public:
 			if (!rt) {
 				return uses_alpha_pass();
 			}
-			bool has_read_screen_alpha = rt->uses_screen_texture || rt->uses_depth_texture || rt->uses_normal_texture;
-			bool has_base_alpha = (rt->uses_alpha && (!rt->uses_alpha_clip || rt->uses_alpha_antialiasing)) || has_read_screen_alpha;
+			if (rt->force_opaque) {
+				return false;
+			}
+			if (rt->force_transparent) {
+				return true;
+			}
+			// Screen/depth reads are shimmed in RT; they do not force transparency.
+			bool has_base_alpha = rt->uses_alpha && (!rt->uses_alpha_clip || rt->uses_alpha_antialiasing);
 			bool has_blend_alpha = rt->uses_blend_alpha;
 			bool has_alpha = has_base_alpha || has_blend_alpha;
 			bool no_depth_draw = rt->depth_draw == DEPTH_DRAW_DISABLED;
 			bool no_depth_test = rt->depth_test != DEPTH_TEST_ENABLED;
-			return has_alpha || has_read_screen_alpha || no_depth_draw || no_depth_test;
+			return has_alpha || no_depth_draw || no_depth_test;
+		}
+
+		_FORCE_INLINE_ RTBlendClass rt_blend_class() const {
+			if (!rt_uses_alpha_pass()) {
+				return RT_BLEND_OPAQUE;
+			}
+			const int bm = rt ? rt->blend_mode : blend_mode;
+			const DepthDraw rt_depth_draw = rt ? rt->depth_draw : depth_draw;
+			// Depth-writing transparency must be visited in deterministic
+			// front-to-back order so its nearest hit can stop traversal.
+			if (rt_depth_draw == DEPTH_DRAW_ALWAYS) {
+				return RT_BLEND_MIX;
+			}
+			switch (bm) {
+				case BLEND_MODE_ADD:
+				case BLEND_MODE_SUB:
+					return RT_BLEND_ACCUM;
+				case BLEND_MODE_OIT:
+					return RT_BLEND_OIT;
+				case BLEND_MODE_MUL: // Orders against Mix; peels as tinted transmittance.
+				default: // MIX / PREMULT / A2C / depth-prepass.
+					return RT_BLEND_MIX;
+			}
+		}
+
+		_FORCE_INLINE_ bool rt_depth_draw_always() const {
+			return (rt ? rt->depth_draw : depth_draw) == DEPTH_DRAW_ALWAYS;
 		}
 
 		_FORCE_INLINE_ bool rt_uses_depth_in_alpha_pass() const {
@@ -426,6 +474,7 @@ public:
 	void set_default_specialization(const ShaderSpecialization &p_specialization);
 	void enable_multiview_shader_group();
 	void enable_advanced_shader_group(bool p_needs_multiview = false);
+	void enable_oit_shader_group(bool p_needs_multiview = false);
 	bool is_multiview_shader_group_enabled() const;
 	bool is_advanced_shader_group_enabled(bool p_multiview) const;
 	uint32_t get_pipeline_compilations(RS::PipelineSource p_source);

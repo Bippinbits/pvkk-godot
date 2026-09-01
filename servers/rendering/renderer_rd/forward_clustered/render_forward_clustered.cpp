@@ -82,6 +82,49 @@ void RenderForwardClustered::RenderBufferDataForwardClustered::ensure_voxelgi() 
 	}
 }
 
+void RenderForwardClustered::RenderBufferDataForwardClustered::ensure_oit() {
+	ERR_FAIL_NULL(render_buffers);
+
+	if (!render_buffers->has_texture(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_OIT_ACCUM)) {
+		// WBOIT targets are only used without MSAA (MSAA keeps the premul fallback).
+		const uint32_t usage = RD::TEXTURE_USAGE_COLOR_ATTACHMENT_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT;
+		render_buffers->create_texture(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_OIT_ACCUM, RD::DATA_FORMAT_R16G16B16A16_SFLOAT, usage);
+		render_buffers->create_texture(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_OIT_REVEAL, RD::DATA_FORMAT_R8_UNORM, usage);
+	}
+}
+
+RID RenderForwardClustered::RenderBufferDataForwardClustered::get_oit_fb() {
+	ERR_FAIL_NULL_V(render_buffers, RID());
+	ensure_oit();
+
+	RID accum = render_buffers->get_texture(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_OIT_ACCUM);
+	RID reveal = render_buffers->get_texture(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_OIT_REVEAL);
+	RID depth = render_buffers->get_depth_texture();
+
+	return FramebufferCacheRD::get_singleton()->get_cache_multiview(1, accum, reveal, depth);
+}
+
+void RenderForwardClustered::_composite_oit(Ref<RenderBufferDataForwardClustered> p_rb_data) {
+	RID accum = p_rb_data->get_oit_accum();
+	RID reveal = p_rb_data->get_oit_reveal();
+	RID dest_fb = p_rb_data->get_color_only_fb();
+
+	RID default_sampler = RendererRD::MaterialStorage::get_singleton()->sampler_rd_get_default(RS::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RS::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+
+	RD::Uniform u_accum(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ default_sampler, accum }));
+	RD::Uniform u_reveal(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 1, Vector<RID>({ default_sampler, reveal }));
+
+	RID shader = oit_resolve.shader.version_get_shader(oit_resolve.shader_version, 0);
+	ERR_FAIL_COND(shader.is_null());
+	RID uniform_set = UniformSetCacheRD::get_singleton()->get_cache(shader, 0, u_accum, u_reveal);
+
+	RD::DrawListID draw_list = RD::get_singleton()->draw_list_begin(dest_fb, RD::DRAW_DEFAULT_ALL);
+	RD::get_singleton()->draw_list_bind_render_pipeline(draw_list, oit_resolve.pipeline.get_render_pipeline(RD::INVALID_FORMAT_ID, RD::get_singleton()->framebuffer_get_format(dest_fb)));
+	RD::get_singleton()->draw_list_bind_uniform_set(draw_list, uniform_set, 0);
+	RD::get_singleton()->draw_list_draw(draw_list, false, 1, 3);
+	RD::get_singleton()->draw_list_end();
+}
+
 void RenderForwardClustered::RenderBufferDataForwardClustered::ensure_fsr2(RendererRD::FSR2Effect *effect) {
 	if (fsr2_context == nullptr) {
 		fsr2_context = effect->create_context(render_buffers->get_internal_size(), render_buffers->get_target_size());
@@ -466,6 +509,10 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 					pipeline_key.color_pass_flags |= SceneShaderForwardClustered::PIPELINE_COLOR_PASS_FLAG_TRANSPARENT;
 				}
 
+				if constexpr ((p_color_pass_flags & COLOR_PASS_FLAG_OIT) != 0) {
+					pipeline_key.color_pass_flags |= SceneShaderForwardClustered::PIPELINE_COLOR_PASS_FLAG_OIT;
+				}
+
 				if constexpr ((p_color_pass_flags & COLOR_PASS_FLAG_MULTIVIEW) != 0) {
 					pipeline_key.color_pass_flags |= SceneShaderForwardClustered::PIPELINE_COLOR_PASS_FLAG_MULTIVIEW;
 				}
@@ -660,6 +707,7 @@ void RenderForwardClustered::_render_list(RenderingDevice::DrawListID p_draw_lis
 				VALID_FLAG_COMBINATION(COLOR_PASS_FLAG_MOTION_VECTORS);
 				VALID_FLAG_COMBINATION(COLOR_PASS_FLAG_SEPARATE_SPECULAR | COLOR_PASS_FLAG_MULTIVIEW | COLOR_PASS_FLAG_MOTION_VECTORS);
 				VALID_FLAG_COMBINATION(COLOR_PASS_FLAG_TRANSPARENT | COLOR_PASS_FLAG_MULTIVIEW | COLOR_PASS_FLAG_MOTION_VECTORS);
+				VALID_FLAG_COMBINATION(COLOR_PASS_FLAG_TRANSPARENT | COLOR_PASS_FLAG_OIT);
 				default: {
 					ERR_FAIL_MSG("Invalid color pass flag combination " + itos(p_params->color_pass_flags));
 				}
@@ -951,9 +999,10 @@ void RenderForwardClustered::_fill_render_list(RenderListType p_render_list, con
 	if (!p_append) {
 		rl->clear();
 		if (p_render_list == RENDER_LIST_OPAQUE) {
-			// Opaque fills motion and alpha lists.
+			// Opaque fills motion, alpha and OIT lists.
 			render_list[RENDER_LIST_MOTION].clear();
 			render_list[RENDER_LIST_ALPHA].clear();
+			render_list[RENDER_LIST_OIT].clear();
 		}
 	}
 
@@ -1179,8 +1228,14 @@ void RenderForwardClustered::_fill_render_list(RenderListType p_render_list, con
 				}
 
 				if (force_alpha || (pass_flags & GeometryInstanceSurfaceDataCache::FLAG_PASS_ALPHA)) {
-					surf->color_pass_inclusion_mask = COLOR_PASS_FLAG_TRANSPARENT;
-					render_list[RENDER_LIST_ALPHA].add_element(surf);
+					if (!force_alpha && !p_alpha_only && scene_state.oit_pass_available && (surf->flags & GeometryInstanceSurfaceDataCache::FLAG_USES_OIT)) {
+						// Weighted-blended OIT: unsorted MRT sub-pass instead of the sorted alpha pass.
+						surf->color_pass_inclusion_mask = COLOR_PASS_FLAG_OIT;
+						render_list[RENDER_LIST_OIT].add_element(surf);
+					} else {
+						surf->color_pass_inclusion_mask = COLOR_PASS_FLAG_TRANSPARENT;
+						render_list[RENDER_LIST_ALPHA].add_element(surf);
+					}
 					if (uses_gi) {
 						surf->sort.uses_forward_gi = 1;
 					}
@@ -2100,15 +2155,25 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	// May have changed due to the above (light buffer enlarged, as an example).
 	_update_render_base_uniform_set();
 
+	scene_state.oit_pass_available = rb_data.is_valid() && rb.is_valid() &&
+			rb->get_msaa_3d() == RS::VIEWPORT_MSAA_DISABLED &&
+			p_render_data->scene_data->view_count == 1;
+
 	_fill_render_list(RENDER_LIST_OPAQUE, p_render_data, PASS_MODE_COLOR, using_sdfgi, using_sdfgi || using_voxelgi, using_motion_pass);
 	render_list[RENDER_LIST_OPAQUE].sort_by_key();
 	render_list[RENDER_LIST_MOTION].sort_by_key();
 	render_list[RENDER_LIST_ALPHA].sort_by_reverse_depth_and_priority();
+	// The OIT list is deliberately unsorted (order-independent).
+
+	if (render_list[RENDER_LIST_OIT].elements.size() > 0) {
+		scene_shader.enable_oit_shader_group();
+	}
 
 	int *render_info = p_render_data->render_info ? p_render_data->render_info->info[RS::VIEWPORT_RENDER_INFO_TYPE_VISIBLE] : (int *)nullptr;
 	_fill_instance_data(RENDER_LIST_OPAQUE, render_info);
 	_fill_instance_data(RENDER_LIST_MOTION, render_info);
 	_fill_instance_data(RENDER_LIST_ALPHA, render_info);
+	_fill_instance_data(RENDER_LIST_OIT, render_info);
 
 	RD::get_singleton()->draw_command_end_label();
 
@@ -2617,6 +2682,26 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	}
 
 	RD::get_singleton()->draw_command_end_label();
+
+	if (scene_state.oit_pass_available && rb_data.is_valid() && render_list[RENDER_LIST_OIT].elements.size() > 0) {
+		RENDER_TIMESTAMP("Render OIT Pass");
+		RD::get_singleton()->draw_command_begin_label("Render OIT Pass");
+
+		RID oit_rp_uniform_set = _setup_render_pass_uniform_set(RENDER_LIST_OIT, p_render_data, radiance_texture, samplers, transparent_pass_uniform_buffer_index, true);
+		uint32_t oit_color_pass_flags = COLOR_PASS_FLAG_TRANSPARENT | COLOR_PASS_FLAG_OIT;
+		RID oit_framebuffer = rb_data->get_oit_fb();
+		RenderListParameters oit_list_params(render_list[RENDER_LIST_OIT].elements.ptr(), render_list[RENDER_LIST_OIT].element_info.ptr(), render_list[RENDER_LIST_OIT].elements.size(), reverse_cull, PASS_MODE_COLOR, oit_color_pass_flags, false, p_render_data->directional_light_soft_shadows, oit_rp_uniform_set, get_debug_draw_mode() == RS::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, 1, 0, base_specialization);
+
+		// accum clears to 0, revealage to 1.
+		Vector<Color> oit_clear;
+		oit_clear.push_back(Color(0, 0, 0, 0));
+		oit_clear.push_back(Color(1, 1, 1, 1));
+		_render_list_with_draw_list(&oit_list_params, oit_framebuffer, RD::DrawFlags(RD::DRAW_CLEAR_COLOR_0 | RD::DRAW_CLEAR_COLOR_1), oit_clear, 0.0f, 0u, p_render_data->render_region);
+
+		_composite_oit(rb_data);
+
+		RD::get_singleton()->draw_command_end_label();
+	}
 
 	if (p_render_data->skip_post_and_tonemap) {
 		return;
@@ -4229,6 +4314,10 @@ void RenderForwardClustered::_geometry_instance_add_surface_with_material(Geomet
 		flags |= GeometryInstanceSurfaceDataCache::FLAG_USES_STENCIL;
 	}
 
+	if (p_material->shader_data->blend_mode == SceneShaderForwardClustered::ShaderData::BLEND_MODE_OIT) {
+		flags |= GeometryInstanceSurfaceDataCache::FLAG_USES_OIT;
+	}
+
 	// Raster-side pass classification.
 	if (p_material->shader_data->uses_alpha_pass()) {
 		flags |= GeometryInstanceSurfaceDataCache::FLAG_PASS_ALPHA;
@@ -5272,6 +5361,28 @@ RenderForwardClustered::RenderForwardClustered() {
 		shadow_sampler = RD::get_singleton()->sampler_create(sampler);
 	}
 
+	/* OIT resolve */
+	{
+		Vector<String> modes;
+		modes.push_back("\n");
+		oit_resolve.shader.initialize(modes);
+		oit_resolve.shader_version = oit_resolve.shader.version_create();
+
+		// Composite is a premultiplied blend onto the color buffer.
+		RD::PipelineColorBlendState::Attachment ba;
+		ba.enable_blend = true;
+		ba.color_blend_op = RD::BLEND_OP_ADD;
+		ba.alpha_blend_op = RD::BLEND_OP_ADD;
+		ba.src_color_blend_factor = RD::BLEND_FACTOR_ONE;
+		ba.dst_color_blend_factor = RD::BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+		ba.src_alpha_blend_factor = RD::BLEND_FACTOR_ZERO;
+		ba.dst_alpha_blend_factor = RD::BLEND_FACTOR_ONE;
+		RD::PipelineColorBlendState blend_state;
+		blend_state.attachments.push_back(ba);
+
+		oit_resolve.pipeline.setup(oit_resolve.shader.version_get_shader(oit_resolve.shader_version, 0), RD::RENDER_PRIMITIVE_TRIANGLES, RD::PipelineRasterizationState(), RD::PipelineMultisampleState(), RD::PipelineDepthStencilState(), blend_state, 0);
+	}
+
 	{
 		Vector<String> modes;
 		modes.push_back("\n");
@@ -5400,6 +5511,7 @@ RenderForwardClustered::~RenderForwardClustered() {
 	RD::get_singleton()->free_rid(best_fit_normal.pipeline);
 	RD::get_singleton()->free_rid(best_fit_normal.texture);
 	best_fit_normal.shader.version_free(best_fit_normal.shader_version);
+	oit_resolve.shader.version_free(oit_resolve.shader_version);
 
 	RD::get_singleton()->free_rid(dfg_lut.pipeline);
 	RD::get_singleton()->free_rid(dfg_lut.texture);
