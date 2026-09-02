@@ -89,6 +89,7 @@ void SceneShaderForwardMobile::ShaderData::set_code(const String &p_code) {
 	int stencil_write_depth_faili = 0;
 	int stencil_comparei = STENCIL_COMPARE_ALWAYS;
 	int stencil_referencei = -1;
+	bool uses_scene_depth = false;
 
 	ShaderCompiler::IdentifierActions actions;
 	actions.entry_point_stages["vertex"] = ShaderCompiler::STAGE_VERTEX;
@@ -132,6 +133,7 @@ void SceneShaderForwardMobile::ShaderData::set_code(const String &p_code) {
 	actions.usage_flag_pointers["SSS_TRANSMITTANCE_DEPTH"] = &uses_transmittance;
 
 	actions.usage_flag_pointers["DISCARD"] = &uses_discard;
+	actions.usage_flag_pointers["SCENE_DEPTH"] = &uses_scene_depth;
 	actions.usage_flag_pointers["TIME"] = &uses_time;
 	actions.usage_flag_pointers["ROUGHNESS"] = &uses_roughness;
 	actions.usage_flag_pointers["NORMAL"] = &uses_normal;
@@ -193,7 +195,7 @@ void SceneShaderForwardMobile::ShaderData::set_code(const String &p_code) {
 	uses_fragment_time = gen_code.uses_fragment_time;
 	uses_screen_texture_mipmaps = gen_code.uses_screen_texture_mipmaps;
 	uses_screen_texture = gen_code.uses_screen_texture;
-	uses_depth_texture = gen_code.uses_depth_texture;
+	uses_depth_texture = gen_code.uses_depth_texture || uses_scene_depth;
 	uses_normal_texture = gen_code.uses_normal_roughness_texture;
 	uses_normal |= uses_normal_map;
 	uses_normal |= uses_bent_normal_map;
@@ -702,6 +704,7 @@ void SceneShaderForwardMobile::init(const String p_defines) {
 		actions.renames["POINT_COORD"] = "point_coord";
 		actions.renames["INSTANCE_CUSTOM"] = "instance_custom";
 		actions.renames["SCREEN_UV"] = "screen_uv";
+		actions.renames["SCENE_DEPTH"] = "scene_depth_fetch()";
 		actions.renames["DEPTH"] = "gl_FragDepth";
 		actions.renames["FOG"] = "fog_highp";
 		actions.renames["RADIANCE"] = "custom_radiance_highp";

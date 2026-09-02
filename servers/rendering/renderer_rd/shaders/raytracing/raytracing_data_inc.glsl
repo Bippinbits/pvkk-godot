@@ -105,6 +105,8 @@ struct InstanceMotionData {
 #define RT_MAT_FLAG_UNSHADED 512u
 #define RT_MAT_FLAG_TRANSPARENT 1024u
 #define RT_MAT_FLAG_ALPHA_SCISSOR 2048u
+#define RT_MAT_FLAG_PROXIMITY_FADE 4096u
+#define RT_MAT_FLAG_DISTANCE_FADE 8192u
 
 struct MaterialData {
 	uint albedo_texture_idx;
@@ -128,5 +130,9 @@ struct MaterialData {
 
 	uint64_t uniform_address; // BDA for custom shader uniform buffer (0 = none)
 	float uv1_blend_sharpness; // Triplanar per-axis blend exponent (default 1.0)
-	float _pad;
+	float proximity_fade_distance;
+	float distance_fade_min;
+	float distance_fade_max;
+	float _pad0;
+	float _pad1;
 };

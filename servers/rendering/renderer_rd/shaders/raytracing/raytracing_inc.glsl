@@ -45,6 +45,7 @@ struct PathPayload {
 	float hit_t; //  4 bytes - ray distance, used by raygen to rebuild origin
 	uint oct_offset_nrm; //  4 bytes - packUnorm2x16(vec3_to_oct(offset normal))
 	uint oct_next_dir; //  4 bytes - packUnorm2x16(vec3_to_oct(next direction))
+	float scene_depth; //  4 bytes - peel-ray input: NDC depth of the segment's opaque hit; 0.0 = far.
 };
 
 const uint PEEL_RAY_FLAG = (1u << 28);

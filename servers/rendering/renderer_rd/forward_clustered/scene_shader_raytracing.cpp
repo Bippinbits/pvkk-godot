@@ -587,6 +587,9 @@ bool SceneShaderRaytracing::_preprocess_shader(RID p_material, bool p_is_procedu
 	// Blend transparents need the per-HG any-hit for exact peel/accumulation.
 	bool detected_alpha = false;
 	actions.usage_flag_pointers["ALPHA"] = &detected_alpha;
+
+	bool uses_scene_depth = false;
+	actions.usage_flag_pointers["SCENE_DEPTH"] = &uses_scene_depth;
 	int blend_modei = RendererRD::MaterialStorage::ShaderData::BLEND_MODE_MIX;
 	actions.render_mode_values["blend_add"] = Pair<int *, int>(&blend_modei, RendererRD::MaterialStorage::ShaderData::BLEND_MODE_ADD);
 	actions.render_mode_values["blend_mix"] = Pair<int *, int>(&blend_modei, RendererRD::MaterialStorage::ShaderData::BLEND_MODE_MIX);
@@ -609,6 +612,7 @@ bool SceneShaderRaytracing::_preprocess_shader(RID p_material, bool p_is_procedu
 	r_entry.is_procedural = p_is_procedural;
 	r_entry.uses_alpha_clip = detected_alpha_clip;
 	r_entry.needs_full_any_hit = detected_alpha || blend_modei != RendererRD::MaterialStorage::ShaderData::BLEND_MODE_MIX;
+	r_entry.uses_scene_depth = uses_scene_depth;
 	r_entry.vertex_code = gen_code.code.has("vertex") ? gen_code.code["vertex"] : String();
 	r_entry.fragment_code = gen_code.code.has("fragment") ? gen_code.code["fragment"] : String();
 	r_entry.fragment_globals = gen_code.stage_globals[ShaderCompiler::STAGE_FRAGMENT];
@@ -996,6 +1000,9 @@ SceneShaderRaytracing::PipelineBuildTask *SceneShaderRaytracing::_make_pipeline_
 			tex_defines += "#define m_" + tui.name + " bindless_textures[nonuniformEXT(material.m_" + tui.name + ")]\n";
 		}
 		String uniform_members = entry.uniform_members.is_empty() ? String("float _rt_pad;") : entry.uniform_members;
+		if (entry.uses_scene_depth) {
+			tex_defines += "#define RT_USES_SCENE_DEPTH\n";
+		}
 
 		String vertex_function;
 		String vertex_call;
@@ -1516,6 +1523,7 @@ void SceneShaderRaytracing::init(const String p_defines) {
 
 		actions.renames["ALPHA_SCISSOR_THRESHOLD"] = "alpha_scissor_threshold";
 		actions.renames["ALPHA_HASH_SCALE"] = "alpha_hash_scale";
+		actions.renames["SCENE_DEPTH"] = "rt_scene_depth";
 		actions.renames["ALPHA_ANTIALIASING_EDGE"] = "alpha_antialiasing_edge";
 		actions.renames["ALPHA_TEXTURE_COORDINATE"] = "alpha_texture_coordinate";
 

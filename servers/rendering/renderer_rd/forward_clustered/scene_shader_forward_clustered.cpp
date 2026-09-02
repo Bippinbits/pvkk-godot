@@ -89,6 +89,7 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	int stencil_write_depth_faili = 0;
 	int stencil_comparei = STENCIL_COMPARE_ALWAYS;
 	int stencil_referencei = -1;
+	bool uses_scene_depth = false;
 
 	ShaderCompiler::IdentifierActions actions;
 	actions.entry_point_stages["vertex"] = ShaderCompiler::STAGE_VERTEX;
@@ -132,6 +133,7 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	actions.usage_flag_pointers["SSS_TRANSMITTANCE_DEPTH"] = &uses_transmittance;
 
 	actions.usage_flag_pointers["DISCARD"] = &uses_discard;
+	actions.usage_flag_pointers["SCENE_DEPTH"] = &uses_scene_depth;
 	actions.usage_flag_pointers["TIME"] = &uses_time;
 	actions.usage_flag_pointers["ROUGHNESS"] = &uses_roughness;
 	actions.usage_flag_pointers["NORMAL"] = &uses_normal;
@@ -197,7 +199,7 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	cull_mode = RS::CullMode(cull_modei);
 	uses_screen_texture_mipmaps = gen_code.uses_screen_texture_mipmaps;
 	uses_screen_texture = gen_code.uses_screen_texture;
-	uses_depth_texture = gen_code.uses_depth_texture;
+	uses_depth_texture = gen_code.uses_depth_texture || uses_scene_depth;
 	uses_normal_texture = gen_code.uses_normal_roughness_texture;
 	uses_vertex_time = gen_code.uses_vertex_time;
 	uses_fragment_time = gen_code.uses_fragment_time;
@@ -307,6 +309,9 @@ void SceneShaderForwardClustered::ShaderData::set_code_rt(const String &p_code_r
 	actions.usage_flag_pointers["ALPHA_ANTIALIASING_EDGE"] = &local_uses_alpha_antialiasing;
 	actions.usage_flag_pointers["ALPHA_TEXTURE_COORDINATE"] = &local_uses_alpha_antialiasing;
 
+	bool local_uses_scene_depth = false;
+	actions.usage_flag_pointers["SCENE_DEPTH"] = &local_uses_scene_depth;
+
 	HashMap<StringName, ShaderLanguage::ShaderNode::Uniform> rt_uniform_sink;
 	actions.uniforms = &rt_uniform_sink;
 
@@ -356,7 +361,7 @@ void SceneShaderForwardClustered::ShaderData::set_code_rt(const String &p_code_r
 	rt->force_transparent = local_rt_force_transparent;
 
 	rt->uses_screen_texture = rt_gen_code.uses_screen_texture;
-	rt->uses_depth_texture = rt_gen_code.uses_depth_texture;
+	rt->uses_depth_texture = rt_gen_code.uses_depth_texture || local_uses_scene_depth;
 	rt->uses_normal_texture = rt_gen_code.uses_normal_roughness_texture;
 }
 
@@ -924,6 +929,7 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 		actions.renames["POINT_COORD"] = "point_coord";
 		actions.renames["INSTANCE_CUSTOM"] = "instance_custom";
 		actions.renames["SCREEN_UV"] = "screen_uv";
+		actions.renames["SCENE_DEPTH"] = "scene_depth_fetch()";
 		actions.renames["DEPTH"] = "gl_FragDepth";
 		actions.renames["FOG"] = "fog";
 		actions.renames["VOLUMETRIC_FOG"] = "volumetric_fog";

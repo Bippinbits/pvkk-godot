@@ -1447,6 +1447,11 @@ ivec2 multiview_uv(ivec2 uv) {
 }
 #endif
 
+// SCENE_DEPTH: opaque scene depth at this fragment (pre-transparent depth copy).
+float scene_depth_fetch() {
+	return texelFetch(depth_buffer, multiview_uv(ivec2(gl_FragCoord.xy)), 0).r;
+}
+
 uniform mediump float opaque_prepass_threshold;
 #endif // !RENDER_MOTION_VECTORS
 

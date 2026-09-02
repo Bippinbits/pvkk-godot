@@ -69,6 +69,12 @@ normal = normalize(rt_modelview_normal_matrix * normal);
 tangent = normalize(rt_modelview_normal_matrix * tangent);
 binormal = normalize(rt_modelview_normal_matrix * binormal);
 
+#ifdef RT_USES_SCENE_DEPTH
+if ((payload.packed_bounces_flags & PEEL_RAY_FLAG) != 0u) {
+	rt_scene_depth = payload.scene_depth;
+}
+#endif
+
 // Fragment outputs with sensible defaults.
 vec3 albedo = vec3(1.0);
 float alpha = 1.0;

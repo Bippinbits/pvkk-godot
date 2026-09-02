@@ -1478,6 +1478,9 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 	mat.uv1_blend_sharpness = 1.0f;
 	mat.normal_map_depth = 1.0f;
 	mat.uniform_address = 0;
+	mat.proximity_fade_distance = 0.0f;
+	mat.distance_fade_min = 0.0f;
+	mat.distance_fade_max = 0.0f;
 
 	RendererRD::MaterialStorage *material_storage = RendererRD::MaterialStorage::get_singleton();
 	RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
@@ -1774,6 +1777,29 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 		Variant sharpness_var = material_storage->material_get_param(p_material_rid, "uv1_blend_sharpness");
 		if (sharpness_var.get_type() == Variant::FLOAT) {
 			mat.uv1_blend_sharpness = sharpness_var;
+		}
+	}
+
+	// Proximity/distance fade. BaseMaterial3D bakes these into its generated
+	// shader, which the fixed-function hit group never runs; the state is
+	// mirrored into params (see BaseMaterial3D::_update_shader).
+	Variant prox_fade_var = material_storage->material_get_param(p_material_rid, "rt_proximity_fade");
+	if (prox_fade_var.get_type() == Variant::BOOL && (bool)prox_fade_var) {
+		Variant prox_dist_var = material_storage->material_get_param(p_material_rid, "proximity_fade_distance");
+		if (prox_dist_var.get_type() == Variant::FLOAT) {
+			mat.flags |= RT_MAT_FLAG_PROXIMITY_FADE;
+			mat.proximity_fade_distance = prox_dist_var;
+		}
+	}
+	Variant dist_fade_var = material_storage->material_get_param(p_material_rid, "rt_distance_fade_mode");
+	if (dist_fade_var.get_type() == Variant::INT && (int)dist_fade_var != 0) {
+		Variant dist_min_var = material_storage->material_get_param(p_material_rid, "distance_fade_min");
+		Variant dist_max_var = material_storage->material_get_param(p_material_rid, "distance_fade_max");
+		if (dist_min_var.get_type() == Variant::FLOAT && dist_max_var.get_type() == Variant::FLOAT) {
+			// Dither modes are approximated as smooth alpha fade in RT.
+			mat.flags |= RT_MAT_FLAG_DISTANCE_FADE;
+			mat.distance_fade_min = dist_min_var;
+			mat.distance_fade_max = dist_max_var;
 		}
 	}
 

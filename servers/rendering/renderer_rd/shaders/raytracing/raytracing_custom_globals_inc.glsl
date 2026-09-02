@@ -59,9 +59,15 @@ float global_prev_time = 0.0;
 
 // Screen/depth textures are unavailable in RT -- alias to bindless slot 0
 // so shaders that reference them still compile (reads return dummy values).
+// Use SCENE_DEPTH instead of hint_depth_texture for correct RT behavior.
 #define depth_buffer bindless_textures[0]
 #define color_buffer bindless_textures[0]
 #define normal_roughness_buffer bindless_textures[0]
+
+// SCENE_DEPTH: primary-segment transparent peels get the opaque depth of the
+// segment from the ray payload (raster depth-prepass semantics); bounces and
+// opaque hits keep far (reverse-Z 0.0), a proximity-fade no-op.
+float rt_scene_depth = 0.0;
 
 /* RT_CUSTOM_TEXTURE_DEFINES */
 /* RT_CUSTOM_FRAGMENT_GLOBALS */

@@ -526,6 +526,8 @@ private:
 		// material analytically instead of running its shader (the pathtracer).
 		StringName rt_uv1_triplanar;
 		StringName rt_uv1_world_triplanar;
+		StringName rt_proximity_fade;
+		StringName rt_distance_fade_mode;
 	};
 
 	static Mutex material_mutex;

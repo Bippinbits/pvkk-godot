@@ -672,6 +672,8 @@ void BaseMaterial3D::init_shaders() {
 
 	shader_names->rt_uv1_triplanar = "rt_uv1_triplanar";
 	shader_names->rt_uv1_world_triplanar = "rt_uv1_world_triplanar";
+	shader_names->rt_proximity_fade = "rt_proximity_fade";
+	shader_names->rt_distance_fade_mode = "rt_distance_fade_mode";
 }
 
 HashMap<uint64_t, Ref<StandardMaterial3D>> BaseMaterial3D::materials_for_2d;
@@ -700,6 +702,10 @@ void BaseMaterial3D::_update_shader() {
 	// params so it can reproduce the mapping (see RenderRaytracing::process_material).
 	_material_set_param(shader_names->rt_uv1_triplanar, flags[FLAG_UV1_USE_TRIPLANAR]);
 	_material_set_param(shader_names->rt_uv1_world_triplanar, flags[FLAG_UV1_USE_WORLD_TRIPLANAR]);
+	// Same for proximity/distance fade: the fixed-function hit group applies
+	// them from MaterialData instead of the generated fragment code.
+	_material_set_param(shader_names->rt_proximity_fade, proximity_fade_enabled);
+	_material_set_param(shader_names->rt_distance_fade_mode, int(distance_fade));
 
 	{
 		MutexLock lock(shader_map_mutex);
@@ -1095,7 +1101,7 @@ uniform vec4 refraction_texture_channel;
 		code += "uniform sampler2D screen_texture : hint_screen_texture, repeat_disable, filter_linear_mipmap;\n";
 	}
 
-	if (features[FEATURE_REFRACTION] || proximity_fade_enabled) {
+	if (features[FEATURE_REFRACTION]) {
 		code += "uniform sampler2D depth_texture : hint_depth_texture, repeat_disable, filter_nearest;\n";
 	}
 
@@ -1861,7 +1867,7 @@ void fragment() {)";
 	if (proximity_fade_enabled) {
 		code += R"(
 	// Proximity Fade: Enabled
-	float proximity_depth_tex = textureLod(depth_texture, SCREEN_UV, 0.0).r;
+	float proximity_depth_tex = SCENE_DEPTH;
 	vec4 ndc = OUTPUT_IS_SRGB ? vec4(vec3(SCREEN_UV, proximity_depth_tex) * 2.0 - 1.0, 1.0) : vec4(SCREEN_UV * 2.0 - 1.0, proximity_depth_tex, 1.0);
 	vec4 proximity_view_pos = INV_PROJECTION_MATRIX * ndc;
 	proximity_view_pos.xyz /= proximity_view_pos.w;

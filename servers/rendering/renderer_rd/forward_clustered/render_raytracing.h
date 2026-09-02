@@ -96,7 +96,7 @@ struct RT_InstanceMotionData {
 };
 static_assert(sizeof(RT_InstanceMotionData) == 48, "RT_InstanceMotionData must be 48 bytes");
 
-// Must match GLSL MaterialData (std430, 112 bytes).
+// Must match GLSL MaterialData (std430, 128 bytes).
 struct alignas(16) RT_MaterialData {
 	uint32_t albedo_texture_idx;
 	uint32_t normal_texture_idx;
@@ -115,9 +115,13 @@ struct alignas(16) RT_MaterialData {
 	uint32_t flags;
 	uint64_t uniform_address; // BDA for custom shader uniform buffer (0 = none).
 	float uv1_blend_sharpness; // Triplanar per-axis blend exponent, default 1.0.
+	float proximity_fade_distance;
+	float distance_fade_min;
+	float distance_fade_max;
 	float _pad0;
+	float _pad1;
 };
-static_assert(sizeof(RT_MaterialData) == 112, "RT_MaterialData must be 112 bytes for std430");
+static_assert(sizeof(RT_MaterialData) == 128, "RT_MaterialData must be 128 bytes for std430");
 
 // Light types for raytracing (matches GLSL RT_LIGHT_TYPE_* defines).
 enum RTLightType : uint32_t {
@@ -177,6 +181,8 @@ enum {
 	RT_MAT_FLAG_UNSHADED = 512u,
 	RT_MAT_FLAG_TRANSPARENT = 1024u,
 	RT_MAT_FLAG_ALPHA_SCISSOR = 2048u,
+	RT_MAT_FLAG_PROXIMITY_FADE = 4096u,
+	RT_MAT_FLAG_DISTANCE_FADE = 8192u,
 };
 
 // Index format for RT geometry (matches GLSL fetch_indices).
