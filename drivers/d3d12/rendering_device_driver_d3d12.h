@@ -164,9 +164,9 @@ class RenderingDeviceDriverD3D12 : public RenderingDeviceDriver {
 
 		Microsoft::WRL::ComPtr<D3D12MA::VirtualBlock> virtual_block;
 
-		Error initialize(ID3D12Device *p_device, D3D12_DESCRIPTOR_HEAP_TYPE p_type, uint32_t p_num_descriptors, bool p_shader_visible);
+		Error initialize(RenderingDeviceDriverD3D12 *p_driver, D3D12_DESCRIPTOR_HEAP_TYPE p_type, uint32_t p_num_descriptors, bool p_shader_visible);
 
-		Error allocate(uint32_t p_descriptor_count, Allocation &r_allocation);
+		Error allocate(RenderingDeviceDriverD3D12 *p_driver, uint32_t p_descriptor_count, Allocation &r_allocation);
 		void free(const Allocation &p_allocation);
 	};
 
@@ -182,9 +182,9 @@ class RenderingDeviceDriverD3D12 : public RenderingDeviceDriver {
 		D3D12_DESCRIPTOR_HEAP_TYPE type = {};
 		uint32_t increment_size = 0;
 
-		void initialize(ID3D12Device *p_device, D3D12_DESCRIPTOR_HEAP_TYPE p_type);
+		void initialize(RenderingDeviceDriverD3D12 *p_driver, D3D12_DESCRIPTOR_HEAP_TYPE p_type);
 
-		Error allocate(uint32_t p_descriptor_count, ID3D12Device *p_device, Allocation &r_allocation);
+		Error allocate(RenderingDeviceDriverD3D12 *p_driver, uint32_t p_descriptor_count, Allocation &r_allocation);
 		void free(const Allocation &p_allocation);
 	};
 
@@ -203,11 +203,16 @@ class RenderingDeviceDriverD3D12 : public RenderingDeviceDriver {
 	} indirect_cmd_signatures;
 
 	static void STDMETHODCALLTYPE _debug_message_func(D3D12_MESSAGE_CATEGORY p_category, D3D12_MESSAGE_SEVERITY p_severity, D3D12_MESSAGE_ID p_id, LPCSTR p_description, void *p_context);
+
+	void _device_removed(HRESULT p_result);
+	bool _succeeded(HRESULT p_result);
+	bool _failed(HRESULT p_result);
 	void _set_object_name(ID3D12Object *p_object, String p_object_name);
 	Error _initialize_device();
 	Error _check_capabilities();
 	Error _get_device_limits();
 	Error _initialize_allocator();
+	Error _create_command_signature(D3D12_INDIRECT_ARGUMENT_TYPE p_type, uint32_t p_stride, Microsoft::WRL::ComPtr<ID3D12CommandSignature> *r_cmd_sig);
 	Error _initialize_frames(uint32_t p_frame_count);
 	Error _initialize_command_signatures();
 

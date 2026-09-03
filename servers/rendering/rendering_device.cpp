@@ -4988,6 +4988,7 @@ void RenderingDevice::draw_list_set_push_constant(DrawListID p_list, const void 
 	ERR_RENDER_THREAD_GUARD();
 
 	ERR_FAIL_COND(!draw_list.active);
+	ERR_FAIL_COND_MSG(draw_list.state.pipeline.is_null(), "No render pipeline was bound before setting push constants.");
 
 	// Not DEBUG_ENABLED-only: draw_list_bind_render_pipeline() leaves this unset when it
 	// rejects an invalid pipeline RID, and the backends dereference it raw, so recording
@@ -5521,8 +5522,7 @@ void RenderingDevice::compute_list_set_push_constant(ComputeListID p_list, const
 	ERR_FAIL_COND(p_list != ID_TYPE_COMPUTE_LIST);
 	ERR_FAIL_COND(!compute_list.active);
 	ERR_FAIL_COND_MSG(p_data_size > MAX_PUSH_CONSTANT_SIZE, "Push constants can't be bigger than 128 bytes to maintain compatibility.");
-	// See draw_list_set_push_constant().
-	ERR_FAIL_COND_MSG(!compute_list.state.pipeline_shader_driver_id, "No compute pipeline was bound before setting a push constant.");
+	ERR_FAIL_COND_MSG(compute_list.state.pipeline.is_null(), "No compute pipeline was bound before setting push constants.");
 
 #ifdef DEBUG_ENABLED
 	ERR_FAIL_COND_MSG(p_data_size != compute_list.validation.pipeline_push_constant_size,

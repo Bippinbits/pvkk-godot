@@ -361,20 +361,20 @@ static D3D12_GPU_DESCRIPTOR_HANDLE get_gpu_handle(D3D12_GPU_DESCRIPTOR_HANDLE p_
 	return p_handle;
 }
 
-Error RenderingDeviceDriverD3D12::DescriptorHeap::initialize(ID3D12Device *p_device, D3D12_DESCRIPTOR_HEAP_TYPE p_type, uint32_t p_num_descriptors, bool p_shader_visible) {
+Error RenderingDeviceDriverD3D12::DescriptorHeap::initialize(RenderingDeviceDriverD3D12 *p_driver, D3D12_DESCRIPTOR_HEAP_TYPE p_type, uint32_t p_num_descriptors, bool p_shader_visible) {
 	D3D12MA::VIRTUAL_BLOCK_DESC block_desc = {};
 	block_desc.Size = p_num_descriptors;
 
 	HRESULT hr = D3D12MA::CreateVirtualBlock(&block_desc, virtual_block.GetAddressOf());
-	ERR_FAIL_COND_V(FAILED(hr), ERR_CANT_CREATE);
+	ERR_FAIL_COND_V(p_driver->_failed(hr), ERR_CANT_CREATE);
 
 	D3D12_DESCRIPTOR_HEAP_DESC heap_desc = {};
 	heap_desc.Type = p_type;
 	heap_desc.NumDescriptors = p_num_descriptors;
 	heap_desc.Flags = p_shader_visible ? D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE : D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
 
-	hr = p_device->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(heap.GetAddressOf()));
-	ERR_FAIL_COND_V_MSG(FAILED(hr), ERR_CANT_CREATE, "CreateDescriptorHeap failed with error " + vformat("0x%08ux", (uint64_t)hr) + ".");
+	hr = p_driver->device->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(heap.GetAddressOf()));
+	ERR_FAIL_COND_V_MSG(p_driver->_failed(hr), ERR_CANT_CREATE, "CreateDescriptorHeap failed with error " + vformat("0x%08ux", (uint64_t)hr) + ".");
 
 #if defined(_MSC_VER) || !defined(_WIN32)
 	cpu_handle = heap->GetCPUDescriptorHandleForHeapStart();
@@ -388,12 +388,12 @@ Error RenderingDeviceDriverD3D12::DescriptorHeap::initialize(ID3D12Device *p_dev
 	}
 #endif
 
-	increment_size = p_device->GetDescriptorHandleIncrementSize(p_type);
+	increment_size = p_driver->device->GetDescriptorHandleIncrementSize(p_type);
 
 	return OK;
 }
 
-Error RenderingDeviceDriverD3D12::DescriptorHeap::allocate(uint32_t p_descriptor_count, Allocation &r_allocation) {
+Error RenderingDeviceDriverD3D12::DescriptorHeap::allocate(RenderingDeviceDriverD3D12 *p_driver, uint32_t p_descriptor_count, Allocation &r_allocation) {
 	D3D12MA::VIRTUAL_ALLOCATION_DESC desc = {};
 	desc.Size = p_descriptor_count;
 
@@ -406,7 +406,7 @@ Error RenderingDeviceDriverD3D12::DescriptorHeap::allocate(uint32_t p_descriptor
 		return ERR_OUT_OF_MEMORY;
 	}
 
-	ERR_FAIL_COND_V_MSG(FAILED(hr), ERR_CANT_CREATE, "Allocate failed with error " + vformat("0x%08ux", (uint64_t)hr) + ".");
+	ERR_FAIL_COND_V_MSG(p_driver->_failed(hr), ERR_CANT_CREATE, "Allocate failed with error " + vformat("0x%08ux", (uint64_t)hr) + ".");
 
 	r_allocation.virtual_alloc_handle = virtual_alloc.AllocHandle;
 	r_allocation.cpu_handle = get_cpu_handle(cpu_handle, offset, increment_size);
@@ -422,17 +422,17 @@ void RenderingDeviceDriverD3D12::DescriptorHeap::free(const Allocation &p_alloca
 	virtual_block->FreeAllocation(virtual_alloc);
 }
 
-void RenderingDeviceDriverD3D12::CPUDescriptorHeapPool::initialize(ID3D12Device *p_device, D3D12_DESCRIPTOR_HEAP_TYPE p_type) {
+void RenderingDeviceDriverD3D12::CPUDescriptorHeapPool::initialize(RenderingDeviceDriverD3D12 *p_driver, D3D12_DESCRIPTOR_HEAP_TYPE p_type) {
 	type = p_type;
-	increment_size = p_device->GetDescriptorHandleIncrementSize(p_type);
+	increment_size = p_driver->device->GetDescriptorHandleIncrementSize(p_type);
 }
 
-Error RenderingDeviceDriverD3D12::CPUDescriptorHeapPool::allocate(uint32_t p_descriptor_count, ID3D12Device *p_device, Allocation &r_allocation) {
+Error RenderingDeviceDriverD3D12::CPUDescriptorHeapPool::allocate(RenderingDeviceDriverD3D12 *p_driver, uint32_t p_descriptor_count, Allocation &r_allocation) {
 	MutexLock lock(mutex);
 
 	bool allocated = false;
 	for (uint32_t i = 0; i < heaps.size(); i++) {
-		Error err = heaps[i].allocate(p_descriptor_count, r_allocation);
+		Error err = heaps[i].allocate(p_driver, p_descriptor_count, r_allocation);
 
 		if (err == OK) {
 			r_allocation.heap_index = i;
@@ -449,12 +449,12 @@ Error RenderingDeviceDriverD3D12::CPUDescriptorHeapPool::allocate(uint32_t p_des
 		uint32_t heap_index = heaps.size();
 
 		DescriptorHeap heap;
-		Error err = heap.initialize(p_device, type, MAX(2048u, p_descriptor_count), false);
+		Error err = heap.initialize(p_driver, type, MAX(2048u, p_descriptor_count), false);
 		ERR_FAIL_COND_V(err != OK, err);
 
 		heaps.push_back(std::move(heap));
 
-		err = heaps[heap_index].allocate(p_descriptor_count, r_allocation);
+		err = heaps[heap_index].allocate(p_driver, p_descriptor_count, r_allocation);
 		ERR_FAIL_COND_V(err != OK, err);
 
 		r_allocation.heap_index = heap_index;
@@ -966,7 +966,7 @@ RDD::BufferID RenderingDeviceDriverD3D12::buffer_create(uint64_t p_size, BitFiel
 				IID_PPV_ARGS(buffer.GetAddressOf()));
 	}
 
-	ERR_FAIL_COND_V_MSG(!SUCCEEDED(res), BufferID(), "Can't create buffer of size: " + itos(p_size) + ", error " + vformat("0x%08ux", (uint64_t)res) + ".");
+	ERR_FAIL_COND_V_MSG(!_succeeded(res), BufferID(), "Can't create buffer of size: " + itos(p_size) + ", error " + vformat("0x%08ux", (uint64_t)res) + ".");
 
 	// Bookkeep.
 
@@ -974,7 +974,7 @@ RDD::BufferID RenderingDeviceDriverD3D12::buffer_create(uint64_t p_size, BitFiel
 	if (p_usage.has_flag(BUFFER_USAGE_DYNAMIC_PERSISTENT_BIT)) {
 		void *persistent_ptr = nullptr;
 		res = buffer->Map(0, &VOID_RANGE, &persistent_ptr);
-		ERR_FAIL_COND_V_MSG(!SUCCEEDED(res), BufferID(), "Map failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
+		ERR_FAIL_COND_V_MSG(!_succeeded(res), BufferID(), "Map failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
 
 		BufferDynamicInfo *dyn_buffer = VersatileResource::allocate<BufferDynamicInfo>(resources_allocator);
 		buf_info = dyn_buffer;
@@ -1023,7 +1023,7 @@ uint8_t *RenderingDeviceDriverD3D12::buffer_map(BufferID p_buffer) {
 	const BufferInfo *buf_info = (const BufferInfo *)p_buffer.id;
 	void *data_ptr = nullptr;
 	HRESULT res = buf_info->resource->Map(0, &VOID_RANGE, &data_ptr);
-	ERR_FAIL_COND_V_MSG(!SUCCEEDED(res), nullptr, "Map failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
+	ERR_FAIL_COND_V_MSG(!_succeeded(res), nullptr, "Map failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
 	return (uint8_t *)data_ptr;
 }
 
@@ -1114,7 +1114,7 @@ uint32_t RenderingDeviceDriverD3D12::_find_max_common_supported_sample_count(Vec
 			for (int samples = 1 << (TEXTURE_SAMPLES_MAX - 1); samples >= 1; samples /= 2) {
 				msql.SampleCount = (UINT)samples;
 				HRESULT res = device->CheckFeatureSupport(D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS, &msql, sizeof(msql));
-				if (SUCCEEDED(res) && msql.NumQualityLevels) {
+				if (_succeeded(res) && msql.NumQualityLevels) {
 					int bit = get_shift_from_power_of_2((uint32_t)samples);
 					ERR_FAIL_COND_V(bit == -1, 1);
 					mask |= (uint32_t)(1 << bit);
@@ -1429,7 +1429,7 @@ RDD::TextureID RenderingDeviceDriverD3D12::texture_create(const TextureFormat &p
 					IID_PPV_ARGS(main_texture.GetAddressOf()));
 			initial_state = D3D12_RESOURCE_STATE_COPY_DEST;
 		}
-		ERR_FAIL_COND_V_MSG(!SUCCEEDED(res), TextureID(), "CreateResource failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
+		ERR_FAIL_COND_V_MSG(!_succeeded(res), TextureID(), "CreateResource failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
 		texture = main_texture.Get();
 	}
 
@@ -1822,7 +1822,7 @@ BitField<RDD::TextureUsageBits> RenderingDeviceDriverD3D12::texture_get_usages_s
 	srv_rtv_support.Format = RD_TO_D3D12_FORMAT[p_format].general_format;
 	if (srv_rtv_support.Format != DXGI_FORMAT_UNKNOWN) { // Some implementations (i.e., vkd3d-proton) error out instead of returning empty.
 		HRESULT res = device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &srv_rtv_support, sizeof(srv_rtv_support));
-		ERR_FAIL_COND_V_MSG(!SUCCEEDED(res), false, "CheckFeatureSupport failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
+		ERR_FAIL_COND_V_MSG(!_succeeded(res), false, "CheckFeatureSupport failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
 	}
 
 	D3D12_FEATURE_DATA_FORMAT_SUPPORT &uav_support = srv_rtv_support; // Fine for now.
@@ -1831,7 +1831,7 @@ BitField<RDD::TextureUsageBits> RenderingDeviceDriverD3D12::texture_get_usages_s
 	dsv_support.Format = RD_TO_D3D12_FORMAT[p_format].dsv_format;
 	if (dsv_support.Format != DXGI_FORMAT_UNKNOWN) { // See above.
 		HRESULT res = device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &dsv_support, sizeof(dsv_support));
-		ERR_FAIL_COND_V_MSG(!SUCCEEDED(res), false, "CheckFeatureSupport failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
+		ERR_FAIL_COND_V_MSG(!_succeeded(res), false, "CheckFeatureSupport failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
 	}
 
 	// Everything supported by default makes an all-or-nothing check easier for the caller.
@@ -1993,7 +1993,7 @@ bool RenderingDeviceDriverD3D12::sampler_is_format_supported_for_filter(DataForm
 	D3D12_FEATURE_DATA_FORMAT_SUPPORT srv_rtv_support = {};
 	srv_rtv_support.Format = RD_TO_D3D12_FORMAT[p_format].general_format;
 	HRESULT res = device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &srv_rtv_support, sizeof(srv_rtv_support));
-	ERR_FAIL_COND_V_MSG(!SUCCEEDED(res), false, "CheckFeatureSupport failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
+	ERR_FAIL_COND_V_MSG(!_succeeded(res), false, "CheckFeatureSupport failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
 	return (srv_rtv_support.Support1 & D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE);
 }
 
@@ -2314,7 +2314,7 @@ void RenderingDeviceDriverD3D12::command_pipeline_barrier(CommandBufferID p_cmd_
 	const CommandBufferInfo *cmd_buf_info = (const CommandBufferInfo *)(p_cmd_buffer.id);
 	ComPtr<ID3D12GraphicsCommandList7> cmd_list_7;
 	HRESULT res = cmd_buf_info->cmd_list->QueryInterface(cmd_list_7.GetAddressOf());
-	ERR_FAIL_COND(FAILED(res));
+	ERR_FAIL_COND(_failed(res));
 
 	// Convert the RDD barriers to D3D12 enhanced barriers.
 	thread_local LocalVector<D3D12_GLOBAL_BARRIER> global_barriers;
@@ -2416,7 +2416,7 @@ void RenderingDeviceDriverD3D12::command_pipeline_barrier(CommandBufferID p_cmd_
 RDD::FenceID RenderingDeviceDriverD3D12::fence_create() {
 	ComPtr<ID3D12Fence> d3d_fence;
 	HRESULT res = device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(d3d_fence.GetAddressOf()));
-	ERR_FAIL_COND_V(!SUCCEEDED(res), FenceID());
+	ERR_FAIL_COND_V(!_succeeded(res), FenceID());
 
 	HANDLE event_handle = CreateEvent(nullptr, FALSE, FALSE, nullptr);
 	ERR_FAIL_NULL_V(event_handle, FenceID());
@@ -2451,7 +2451,7 @@ void RenderingDeviceDriverD3D12::fence_free(FenceID p_fence) {
 RDD::SemaphoreID RenderingDeviceDriverD3D12::semaphore_create() {
 	ComPtr<ID3D12Fence> d3d_fence;
 	HRESULT res = device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(d3d_fence.GetAddressOf()));
-	ERR_FAIL_COND_V(!SUCCEEDED(res), SemaphoreID());
+	ERR_FAIL_COND_V(!_succeeded(res), SemaphoreID());
 
 	SemaphoreInfo *semaphore = memnew(SemaphoreInfo);
 	semaphore->d3d_fence = d3d_fence;
@@ -2490,7 +2490,7 @@ RDD::CommandQueueID RenderingDeviceDriverD3D12::command_queue_create(CommandQueu
 	D3D12_COMMAND_QUEUE_DESC queue_desc = {};
 	queue_desc.Type = (D3D12_COMMAND_LIST_TYPE)(p_cmd_queue_family.id - 1);
 	HRESULT res = device->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(d3d_queue.GetAddressOf()));
-	ERR_FAIL_COND_V(!SUCCEEDED(res), CommandQueueID());
+	ERR_FAIL_COND_V(!_succeeded(res), CommandQueueID());
 
 	if (p_identify_as_main_queue && D3D12Hooks::get_singleton() != nullptr) {
 		D3D12Hooks::get_singleton()->set_command_queue(d3d_queue.Get());
@@ -2536,7 +2536,7 @@ Error RenderingDeviceDriverD3D12::command_queue_execute_and_present(CommandQueue
 	for (uint32_t i = 0; i < p_swap_chains.size(); i++) {
 		SwapChain *swap_chain = (SwapChain *)(p_swap_chains[i].id);
 		res = swap_chain->d3d_swap_chain->Present(swap_chain->sync_interval, swap_chain->present_flags);
-		if (!SUCCEEDED(res)) {
+		if (!_succeeded(res)) {
 			print_verbose(vformat("D3D12: Presenting swapchain failed with error 0x%08ux.", (uint64_t)res));
 			any_present_failed = true;
 		}
@@ -2601,7 +2601,7 @@ RDD::CommandBufferID RenderingDeviceDriverD3D12::command_buffer_create(CommandPo
 	ComPtr<ID3D12CommandAllocator> cmd_allocator;
 	{
 		HRESULT res = device->CreateCommandAllocator(list_type, IID_PPV_ARGS(cmd_allocator.GetAddressOf()));
-		ERR_FAIL_COND_V_MSG(!SUCCEEDED(res), CommandBufferID(), "CreateCommandAllocator failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
+		ERR_FAIL_COND_V_MSG(!_succeeded(res), CommandBufferID(), "CreateCommandAllocator failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
 	}
 
 	ComPtr<ID3D12GraphicsCommandList> cmd_list;
@@ -2614,7 +2614,7 @@ RDD::CommandBufferID RenderingDeviceDriverD3D12::command_buffer_create(CommandPo
 		} else {
 			res = device->CreateCommandList(0, list_type, cmd_allocator.Get(), nullptr, IID_PPV_ARGS(cmd_list.GetAddressOf()));
 		}
-		ERR_FAIL_COND_V_MSG(!SUCCEEDED(res), CommandBufferID(), "CreateCommandList failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
+		ERR_FAIL_COND_V_MSG(!_succeeded(res), CommandBufferID(), "CreateCommandList failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
 		if (!device_4) {
 			cmd_list->Close();
 		}
@@ -2625,16 +2625,16 @@ RDD::CommandBufferID RenderingDeviceDriverD3D12::command_buffer_create(CommandPo
 	CPUDescriptorHeapPool::Allocation dsv_alloc;
 
 	if (list_type != D3D12_COMMAND_LIST_TYPE_COPY) {
-		Error err = resource_descriptor_heap_pool.allocate(1, device.Get(), uav_alloc);
+		Error err = resource_descriptor_heap_pool.allocate(this, 1, uav_alloc);
 		ERR_FAIL_COND_V(err != OK, CommandBufferID());
 
-		err = rtv_descriptor_heap_pool.allocate(1, device.Get(), rtv_alloc);
+		err = rtv_descriptor_heap_pool.allocate(this, 1, rtv_alloc);
 		if (unlikely(err != OK)) {
 			resource_descriptor_heap_pool.free(uav_alloc);
 			ERR_FAIL_V(CommandBufferID());
 		}
 
-		err = dsv_descriptor_heap_pool.allocate(1, device.Get(), dsv_alloc);
+		err = dsv_descriptor_heap_pool.allocate(this, 1, dsv_alloc);
 		if (unlikely(err != OK)) {
 			resource_descriptor_heap_pool.free(uav_alloc);
 			rtv_descriptor_heap_pool.free(rtv_alloc);
@@ -2661,18 +2661,18 @@ RDD::CommandBufferID RenderingDeviceDriverD3D12::command_buffer_create(CommandPo
 bool RenderingDeviceDriverD3D12::command_buffer_begin(CommandBufferID p_cmd_buffer) {
 	const CommandBufferInfo *cmd_buf_info = (const CommandBufferInfo *)p_cmd_buffer.id;
 	HRESULT res = cmd_buf_info->cmd_allocator->Reset();
-	ERR_FAIL_COND_V_MSG(!SUCCEEDED(res), false, "Reset failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
+	ERR_FAIL_COND_V_MSG(!_succeeded(res), false, "Reset failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
 	res = cmd_buf_info->cmd_list->Reset(cmd_buf_info->cmd_allocator.Get(), nullptr);
-	ERR_FAIL_COND_V_MSG(!SUCCEEDED(res), false, "Reset failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
+	ERR_FAIL_COND_V_MSG(!_succeeded(res), false, "Reset failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
 	return true;
 }
 
 bool RenderingDeviceDriverD3D12::command_buffer_begin_secondary(CommandBufferID p_cmd_buffer, RenderPassID p_render_pass, uint32_t p_subpass, FramebufferID p_framebuffer) {
 	const CommandBufferInfo *cmd_buf_info = (const CommandBufferInfo *)p_cmd_buffer.id;
 	HRESULT res = cmd_buf_info->cmd_allocator->Reset();
-	ERR_FAIL_COND_V_MSG(!SUCCEEDED(res), false, "Reset failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
+	ERR_FAIL_COND_V_MSG(!_succeeded(res), false, "Reset failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
 	res = cmd_buf_info->cmd_list->Reset(cmd_buf_info->cmd_allocator.Get(), nullptr);
-	ERR_FAIL_COND_V_MSG(!SUCCEEDED(res), false, "Reset failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
+	ERR_FAIL_COND_V_MSG(!_succeeded(res), false, "Reset failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
 	return true;
 }
 
@@ -2680,7 +2680,7 @@ void RenderingDeviceDriverD3D12::command_buffer_end(CommandBufferID p_cmd_buffer
 	CommandBufferInfo *cmd_buf_info = (CommandBufferInfo *)p_cmd_buffer.id;
 	HRESULT res = cmd_buf_info->cmd_list->Close();
 
-	ERR_FAIL_COND_MSG(!SUCCEEDED(res), "Close failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
+	ERR_FAIL_COND_MSG(!_succeeded(res), "Close failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
 	cmd_buf_info->graphics_pso = nullptr;
 	cmd_buf_info->graphics_root_signature_crc = 0;
 	cmd_buf_info->compute_pso = nullptr;
@@ -2802,7 +2802,7 @@ Error RenderingDeviceDriverD3D12::swap_chain_resize(CommandQueueID p_cmd_queue, 
 	if (swap_chain->d3d_swap_chain != nullptr) {
 		_swap_chain_release_buffers(swap_chain);
 		res = swap_chain->d3d_swap_chain->ResizeBuffers(p_desired_framebuffer_count, surface->width, surface->height, DXGI_FORMAT_UNKNOWN, creation_flags);
-		ERR_FAIL_COND_V(!SUCCEEDED(res), ERR_UNAVAILABLE);
+		ERR_FAIL_COND_V(!_succeeded(res), ERR_UNAVAILABLE);
 	} else {
 		swap_chain_desc.BufferCount = p_desired_framebuffer_count;
 		swap_chain_desc.Format = RD_TO_D3D12_FORMAT[swap_chain->data_format].general_format;
@@ -2824,7 +2824,7 @@ Error RenderingDeviceDriverD3D12::swap_chain_resize(CommandQueueID p_cmd_queue, 
 		ComPtr<IDXGISwapChain1> swap_chain_1;
 		if (create_for_composition) {
 			res = context_driver->dxgi_factory_get()->CreateSwapChainForComposition(command_queue->d3d_queue.Get(), &swap_chain_desc, nullptr, swap_chain_1.GetAddressOf());
-			if (!SUCCEEDED(res)) {
+			if (!_succeeded(res)) {
 				WARN_PRINT_ONCE("Window transparency is not supported without DirectComposition on D3D12.");
 				swap_chain_desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
 				has_comp_alpha[(uint64_t)p_cmd_queue.id] = false;
@@ -2836,13 +2836,13 @@ Error RenderingDeviceDriverD3D12::swap_chain_resize(CommandQueueID p_cmd_queue, 
 			res = context_driver->dxgi_factory_get()->CreateSwapChainForHwnd(command_queue->d3d_queue.Get(), surface->hwnd, &swap_chain_desc, nullptr, nullptr, swap_chain_1.GetAddressOf());
 		}
 
-		ERR_FAIL_COND_V(!SUCCEEDED(res), ERR_CANT_CREATE);
+		ERR_FAIL_COND_V(!_succeeded(res), ERR_CANT_CREATE);
 
 		swap_chain_1.As(&swap_chain->d3d_swap_chain);
 		ERR_FAIL_NULL_V(swap_chain->d3d_swap_chain, ERR_CANT_CREATE);
 
 		res = context_driver->dxgi_factory_get()->MakeWindowAssociation(surface->hwnd, DXGI_MWA_NO_ALT_ENTER | DXGI_MWA_NO_WINDOW_CHANGES);
-		ERR_FAIL_COND_V(!SUCCEEDED(res), ERR_CANT_CREATE);
+		ERR_FAIL_COND_V(!_succeeded(res), ERR_CANT_CREATE);
 	}
 
 #ifdef DCOMP_ENABLED
@@ -2853,34 +2853,34 @@ Error RenderingDeviceDriverD3D12::swap_chain_resize(CommandQueueID p_cmd_queue, 
 			ERR_FAIL_NULL_V(pfn_DCompositionCreateDevice, ERR_CANT_CREATE);
 
 			res = pfn_DCompositionCreateDevice(nullptr, IID_PPV_ARGS(surface->composition_device.GetAddressOf()));
-			ERR_FAIL_COND_V(!SUCCEEDED(res), ERR_CANT_CREATE);
+			ERR_FAIL_COND_V(!_succeeded(res), ERR_CANT_CREATE);
 
 			res = surface->composition_device->CreateTargetForHwnd(surface->hwnd, TRUE, surface->composition_target.GetAddressOf());
-			ERR_FAIL_COND_V(!SUCCEEDED(res), ERR_CANT_CREATE);
+			ERR_FAIL_COND_V(!_succeeded(res), ERR_CANT_CREATE);
 
 			res = surface->composition_device->CreateVisual(surface->composition_visual.GetAddressOf());
-			ERR_FAIL_COND_V(!SUCCEEDED(res), ERR_CANT_CREATE);
+			ERR_FAIL_COND_V(!_succeeded(res), ERR_CANT_CREATE);
 
 			res = surface->composition_visual->SetContent(swap_chain->d3d_swap_chain.Get());
-			ERR_FAIL_COND_V(!SUCCEEDED(res), ERR_CANT_CREATE);
+			ERR_FAIL_COND_V(!_succeeded(res), ERR_CANT_CREATE);
 
 			res = surface->composition_target->SetRoot(surface->composition_visual.Get());
-			ERR_FAIL_COND_V(!SUCCEEDED(res), ERR_CANT_CREATE);
+			ERR_FAIL_COND_V(!_succeeded(res), ERR_CANT_CREATE);
 
 			res = surface->composition_device->Commit();
-			ERR_FAIL_COND_V(!SUCCEEDED(res), ERR_CANT_CREATE);
+			ERR_FAIL_COND_V(!_succeeded(res), ERR_CANT_CREATE);
 		} else {
 			res = surface->composition_visual->SetContent(swap_chain->d3d_swap_chain.Get());
-			ERR_FAIL_COND_V(!SUCCEEDED(res), ERR_CANT_CREATE);
+			ERR_FAIL_COND_V(!_succeeded(res), ERR_CANT_CREATE);
 
 			res = surface->composition_device->Commit();
-			ERR_FAIL_COND_V(!SUCCEEDED(res), ERR_CANT_CREATE);
+			ERR_FAIL_COND_V(!_succeeded(res), ERR_CANT_CREATE);
 		}
 	}
 #endif
 
 	res = swap_chain->d3d_swap_chain->GetDesc1(&swap_chain_desc);
-	ERR_FAIL_COND_V(!SUCCEEDED(res), ERR_CANT_CREATE);
+	ERR_FAIL_COND_V(!_succeeded(res), ERR_CANT_CREATE);
 	ERR_FAIL_COND_V(swap_chain_desc.BufferCount == 0, ERR_CANT_CREATE);
 
 	surface->width = swap_chain_desc.Width;
@@ -2901,7 +2901,7 @@ Error RenderingDeviceDriverD3D12::swap_chain_resize(CommandQueueID p_cmd_queue, 
 		// Retrieve the resource corresponding to the swap chain's buffer.
 		ID3D12Resource *render_target = nullptr;
 		res = swap_chain->d3d_swap_chain->GetBuffer(i, IID_PPV_ARGS(&render_target));
-		ERR_FAIL_COND_V(!SUCCEEDED(res), ERR_CANT_CREATE);
+		ERR_FAIL_COND_V(!_succeeded(res), ERR_CANT_CREATE);
 		swap_chain->render_targets.push_back(render_target);
 
 		// Create texture information for the framebuffer to reference the resource. Since the states pointer must
@@ -3136,13 +3136,13 @@ RDD::FramebufferID RenderingDeviceDriverD3D12::_framebuffer_create(RenderPassID 
 
 	CPUDescriptorHeapPool::Allocation rtv_alloc;
 	if (num_color) {
-		Error err = rtv_descriptor_heap_pool.allocate(num_color, device.Get(), rtv_alloc);
+		Error err = rtv_descriptor_heap_pool.allocate(this, num_color, rtv_alloc);
 		ERR_FAIL_COND_V(err != OK, FramebufferID());
 	}
 
 	CPUDescriptorHeapPool::Allocation dsv_alloc;
 	if (num_depth_stencil) {
-		Error err = dsv_descriptor_heap_pool.allocate(num_depth_stencil, device.Get(), dsv_alloc);
+		Error err = dsv_descriptor_heap_pool.allocate(this, num_depth_stencil, dsv_alloc);
 		if (unlikely(err != OK)) {
 			rtv_descriptor_heap_pool.free(rtv_alloc);
 			ERR_FAIL_V(FramebufferID());
@@ -3318,11 +3318,11 @@ RDD::ShaderID RenderingDeviceDriverD3D12::shader_create_from_container(const Ref
 	ERR_FAIL_NULL_V(d3d_D3D12CreateRootSignatureDeserializer, ShaderID());
 
 	HRESULT res = d3d_D3D12CreateRootSignatureDeserializer(shader_refl_d3d12.root_signature_bytes.ptr(), shader_refl_d3d12.root_signature_bytes.size(), IID_PPV_ARGS(shader_info_in.root_signature_deserializer.GetAddressOf()));
-	ERR_FAIL_COND_V_MSG(!SUCCEEDED(res), ShaderID(), "D3D12CreateRootSignatureDeserializer failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
+	ERR_FAIL_COND_V_MSG(!_succeeded(res), ShaderID(), "D3D12CreateRootSignatureDeserializer failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
 
 	ComPtr<ID3D12RootSignature> root_signature;
 	res = device->CreateRootSignature(0, shader_refl_d3d12.root_signature_bytes.ptr(), shader_refl_d3d12.root_signature_bytes.size(), IID_PPV_ARGS(shader_info_in.root_signature.GetAddressOf()));
-	ERR_FAIL_COND_V_MSG(!SUCCEEDED(res), ShaderID(), "CreateRootSignature failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
+	ERR_FAIL_COND_V_MSG(!_succeeded(res), ShaderID(), "CreateRootSignature failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
 
 	shader_info_in.root_signature_desc = shader_info_in.root_signature_deserializer->GetRootSignatureDesc();
 	shader_info_in.root_signature_crc = shader_refl_d3d12.root_signature_crc;
@@ -3366,7 +3366,7 @@ RDD::UniformSetID RenderingDeviceDriverD3D12::uniform_set_create(VectorView<Boun
 
 	// Allocate range for resource descriptors.
 	if (uniform_set.resource_descriptor_count > 0) {
-		Error err = resource_descriptor_heap.allocate(uniform_set.resource_descriptor_count, uniform_set_info->resource_descriptor_heap_alloc);
+		Error err = resource_descriptor_heap.allocate(this, uniform_set.resource_descriptor_count, uniform_set_info->resource_descriptor_heap_alloc);
 		if (unlikely(err != OK)) {
 			VersatileResource::free(resources_allocator, uniform_set_info);
 
@@ -3409,7 +3409,7 @@ RDD::UniformSetID RenderingDeviceDriverD3D12::uniform_set_create(VectorView<Boun
 			uniform_set_info->sampler_descriptor_heap_alloc = &sampler_descriptor_heap_allocations.insert(sampler_key, SamplerDescriptorHeapAllocation())->get();
 			uniform_set_info->sampler_descriptor_heap_alloc->key = sampler_key;
 
-			Error err = sampler_descriptor_heap.allocate(uniform_set.sampler_descriptor_count, *uniform_set_info->sampler_descriptor_heap_alloc);
+			Error err = sampler_descriptor_heap.allocate(this, uniform_set.sampler_descriptor_count, *uniform_set_info->sampler_descriptor_heap_alloc);
 			if (unlikely(err != OK)) {
 				resource_descriptor_heap.free(uniform_set_info->resource_descriptor_heap_alloc);
 				VersatileResource::free(resources_allocator, uniform_set_info);
@@ -3792,7 +3792,7 @@ RenderingDeviceDriverD3D12::DescriptorHeap::Allocation RenderingDeviceDriverD3D1
 	} else {
 		DescriptorHeap::Allocation descriptor_allocation = {};
 
-		Error err = resource_descriptor_heap.allocate(1, descriptor_allocation);
+		Error err = resource_descriptor_heap.allocate(this, 1, descriptor_allocation);
 		ERR_FAIL_COND_V_MSG(err == ERR_OUT_OF_MEMORY, DescriptorHeap::Allocation(), "Cannot allocate per frame descriptor because there's not enough room in the RESOURCES descriptor heap.\n"
 																					"Please increase the value of the rendering/rendering_device/d3d12/max_resource_descriptors project setting.");
 
@@ -5333,7 +5333,7 @@ RDD::PipelineID RenderingDeviceDriverD3D12::render_pipeline_create(
 		D3D12_GRAPHICS_PIPELINE_STATE_DESC desc = pipeline_desc.GraphicsDescV0();
 		res = device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(pso.GetAddressOf()));
 	}
-	ERR_FAIL_COND_V_MSG(!SUCCEEDED(res), PipelineID(), "Create(Graphics)PipelineState failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
+	ERR_FAIL_COND_V_MSG(!_succeeded(res), PipelineID(), "Create(Graphics)PipelineState failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
 
 	PipelineInfo *pipeline_info = memnew(PipelineInfo);
 	pipeline_info->pso = pso;
@@ -5463,7 +5463,7 @@ RDD::PipelineID RenderingDeviceDriverD3D12::compute_pipeline_create(ShaderID p_s
 		D3D12_COMPUTE_PIPELINE_STATE_DESC desc = pipeline_desc.ComputeDescV0();
 		res = device->CreateComputePipelineState(&desc, IID_PPV_ARGS(pso.GetAddressOf()));
 	}
-	ERR_FAIL_COND_V_MSG(!SUCCEEDED(res), PipelineID(), "Create(Compute)PipelineState failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
+	ERR_FAIL_COND_V_MSG(!_succeeded(res), PipelineID(), "Create(Compute)PipelineState failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
 
 	PipelineInfo *pipeline_info = memnew(PipelineInfo);
 	pipeline_info->pso = pso;
@@ -5486,7 +5486,7 @@ RDD::QueryPoolID RenderingDeviceDriverD3D12::timestamp_query_pool_create(uint32_
 		qh_desc.Count = p_query_count;
 		qh_desc.NodeMask = 0;
 		HRESULT res = device->CreateQueryHeap(&qh_desc, IID_PPV_ARGS(query_heap.GetAddressOf()));
-		ERR_FAIL_COND_V_MSG(!SUCCEEDED(res), QueryPoolID(), "CreateQueryHeap failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
+		ERR_FAIL_COND_V_MSG(!_succeeded(res), QueryPoolID(), "CreateQueryHeap failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
 	}
 
 	ComPtr<D3D12MA::Allocation> results_buffer_allocation;
@@ -5504,7 +5504,7 @@ RDD::QueryPoolID RenderingDeviceDriverD3D12::timestamp_query_pool_create(uint32_
 				nullptr,
 				results_buffer_allocation.GetAddressOf(),
 				IID_PPV_ARGS(results_buffer.GetAddressOf()));
-		ERR_FAIL_COND_V_MSG(!SUCCEEDED(res), QueryPoolID(), "D3D12MA::CreateResource failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
+		ERR_FAIL_COND_V_MSG(!_succeeded(res), QueryPoolID(), "D3D12MA::CreateResource failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
 	}
 
 	// Bookkeep.
@@ -5921,7 +5921,7 @@ Error RenderingDeviceDriverD3D12::_initialize_device() {
 
 		res = d3d_D3D12CreateDevice(adapter.Get(), requested_feature_level, IID_PPV_ARGS(device.GetAddressOf()));
 	}
-	ERR_FAIL_COND_V_MSG(!SUCCEEDED(res), ERR_CANT_CREATE, "D3D12CreateDevice failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
+	ERR_FAIL_COND_V_MSG(!_succeeded(res), ERR_CANT_CREATE, "D3D12CreateDevice failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
 
 	if (D3D12Hooks::get_singleton() != nullptr) {
 		D3D12Hooks::get_singleton()->set_device(device.Get());
@@ -5930,7 +5930,7 @@ Error RenderingDeviceDriverD3D12::_initialize_device() {
 	if (context_driver->use_validation_layers()) {
 		ComPtr<ID3D12InfoQueue> info_queue;
 		res = device.As(&info_queue);
-		ERR_FAIL_COND_V(!SUCCEEDED(res), ERR_CANT_CREATE);
+		ERR_FAIL_COND_V(!_succeeded(res), ERR_CANT_CREATE);
 
 #if CUSTOM_INFO_QUEUE_ENABLED
 		ComPtr<ID3D12InfoQueue1> info_queue_1;
@@ -5941,18 +5941,18 @@ Error RenderingDeviceDriverD3D12::_initialize_device() {
 			DWORD callback_cookie;
 			info_queue_1->SetMuteDebugOutput(TRUE);
 			res = info_queue_1->RegisterMessageCallback(&_debug_message_func, D3D12_MESSAGE_CALLBACK_IGNORE_FILTERS, nullptr, &callback_cookie);
-			ERR_FAIL_COND_V(!SUCCEEDED(res), ERR_CANT_CREATE);
+			ERR_FAIL_COND_V(!_succeeded(res), ERR_CANT_CREATE);
 		} else
 #endif
 		{
 			// Rely on D3D12's own debug printing.
 			if (Engine::get_singleton()->is_abort_on_gpu_errors_enabled()) {
 				res = info_queue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_WARNING, TRUE);
-				ERR_FAIL_COND_V(!SUCCEEDED(res), ERR_CANT_CREATE);
+				ERR_FAIL_COND_V(!_succeeded(res), ERR_CANT_CREATE);
 				res = info_queue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, TRUE);
-				ERR_FAIL_COND_V(!SUCCEEDED(res), ERR_CANT_CREATE);
+				ERR_FAIL_COND_V(!_succeeded(res), ERR_CANT_CREATE);
 				res = info_queue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_CORRUPTION, TRUE);
-				ERR_FAIL_COND_V(!SUCCEEDED(res), ERR_CANT_CREATE);
+				ERR_FAIL_COND_V(!_succeeded(res), ERR_CANT_CREATE);
 			}
 		}
 
@@ -5977,7 +5977,7 @@ Error RenderingDeviceDriverD3D12::_initialize_device() {
 		filter.DenyList.pIDList = messages_to_mute;
 
 		res = info_queue->PushStorageFilter(&filter);
-		ERR_FAIL_COND_V(!SUCCEEDED(res), ERR_CANT_CREATE);
+		ERR_FAIL_COND_V(!_succeeded(res), ERR_CANT_CREATE);
 	}
 
 	return OK;
@@ -5998,7 +5998,7 @@ Error RenderingDeviceDriverD3D12::_check_capabilities() {
 	feat_levels.pFeatureLevelsRequested = FEATURE_LEVELS;
 
 	HRESULT res = device->CheckFeatureSupport(D3D12_FEATURE_FEATURE_LEVELS, &feat_levels, sizeof(feat_levels));
-	ERR_FAIL_COND_V_MSG(!SUCCEEDED(res), ERR_UNAVAILABLE, "CheckFeatureSupport failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
+	ERR_FAIL_COND_V_MSG(!_succeeded(res), ERR_UNAVAILABLE, "CheckFeatureSupport failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
 
 	// Example: D3D_FEATURE_LEVEL_12_1 = 0xc100.
 	uint32_t feat_level_major = feat_levels.MaxSupportedFeatureLevel >> 12;
@@ -6038,14 +6038,14 @@ Error RenderingDeviceDriverD3D12::_check_capabilities() {
 		for (uint32_t i = 0; i < ARRAY_SIZE(SMS_TO_CHECK); i++) {
 			shader_model.HighestShaderModel = SMS_TO_CHECK[i];
 			res = device->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &shader_model, sizeof(shader_model));
-			if (SUCCEEDED(res)) {
+			if (_succeeded(res)) {
 				shader_capabilities.shader_model = shader_model.HighestShaderModel;
 				break;
 			}
 			if (res == E_INVALIDARG) {
 				continue; // Must assume the device doesn't know about the SM just checked.
 			}
-			ERR_FAIL_COND_V_MSG(!SUCCEEDED(res), ERR_CANT_CREATE, "CheckFeatureSupport failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
+			ERR_FAIL_COND_V_MSG(!_succeeded(res), ERR_CANT_CREATE, "CheckFeatureSupport failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
 		}
 
 #define D3D_SHADER_MODEL_TO_STRING(m_sm) vformat("%d.%d", (m_sm >> 4), (m_sm & 0xf))
@@ -6061,25 +6061,25 @@ Error RenderingDeviceDriverD3D12::_check_capabilities() {
 
 	D3D12_FEATURE_DATA_D3D12_OPTIONS options = {};
 	res = device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS, &options, sizeof(options));
-	ERR_FAIL_COND_V_MSG(!SUCCEEDED(res), ERR_UNAVAILABLE, "CheckFeatureSupport failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
+	ERR_FAIL_COND_V_MSG(!_succeeded(res), ERR_UNAVAILABLE, "CheckFeatureSupport failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
 	ERR_FAIL_COND_V_MSG(!options.TypedUAVLoadAdditionalFormats, ERR_UNAVAILABLE, "No support for Typed UAV Load Additional Formats has been found.");
 
 	D3D12_FEATURE_DATA_D3D12_OPTIONS1 options1 = {};
 	res = device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS1, &options1, sizeof(options1));
-	if (SUCCEEDED(res)) {
+	if (_succeeded(res)) {
 		subgroup_capabilities.size = options1.WaveLaneCountMin;
 		subgroup_capabilities.wave_ops_supported = options1.WaveOps;
 	}
 
 	D3D12_FEATURE_DATA_D3D12_OPTIONS2 options2 = {};
 	res = device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS2, &options2, sizeof(options2));
-	if (SUCCEEDED(res)) {
+	if (_succeeded(res)) {
 		misc_features_support.depth_bounds_supported = options2.DepthBoundsTestSupported;
 	}
 
 	D3D12_FEATURE_DATA_D3D12_OPTIONS3 options3 = {};
 	res = device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS3, &options3, sizeof(options3));
-	if (SUCCEEDED(res)) {
+	if (_succeeded(res)) {
 		// https://docs.microsoft.com/en-us/windows/win32/api/d3d12/ne-d3d12-d3d12_view_instancing_tier
 		// https://microsoft.github.io/DirectX-Specs/d3d/ViewInstancing.html#sv_viewid
 		if (options3.ViewInstancingTier >= D3D12_VIEW_INSTANCING_TIER_1) {
@@ -6093,13 +6093,13 @@ Error RenderingDeviceDriverD3D12::_check_capabilities() {
 
 	D3D12_FEATURE_DATA_D3D12_OPTIONS4 options4 = {};
 	res = device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS4, &options4, sizeof(options4));
-	if (SUCCEEDED(res)) {
+	if (_succeeded(res)) {
 		shader_capabilities.native_16bit_ops = options4.Native16BitShaderOpsSupported;
 	}
 
 	D3D12_FEATURE_DATA_D3D12_OPTIONS6 options6 = {};
 	res = device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS6, &options6, sizeof(options6));
-	if (SUCCEEDED(res)) {
+	if (_succeeded(res)) {
 		if (options6.VariableShadingRateTier >= D3D12_VARIABLE_SHADING_RATE_TIER_1) {
 			fsr_capabilities.pipeline_supported = true;
 			if (options6.VariableShadingRateTier >= D3D12_VARIABLE_SHADING_RATE_TIER_2) {
@@ -6113,14 +6113,14 @@ Error RenderingDeviceDriverD3D12::_check_capabilities() {
 
 	D3D12_FEATURE_DATA_D3D12_OPTIONS12 options12 = {};
 	res = device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS12, &options12, sizeof(options12));
-	if (SUCCEEDED(res)) {
+	if (_succeeded(res)) {
 		format_capabilities.relaxed_casting_supported = options12.RelaxedFormatCastingSupported;
 		barrier_capabilities.enhanced_barriers_supported = options12.EnhancedBarriersSupported;
 	}
 
 	D3D12_FEATURE_DATA_D3D12_OPTIONS19 options19 = {};
 	res = device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS19, &options19, sizeof(options19));
-	if (SUCCEEDED(res)) {
+	if (_succeeded(res)) {
 		sampler_capabilities.aniso_filter_with_point_mip_supported = options19.AnisoFilterWithPointMipSupported;
 	}
 
@@ -6175,7 +6175,7 @@ Error RenderingDeviceDriverD3D12::_check_capabilities() {
 Error RenderingDeviceDriverD3D12::_get_device_limits() {
 	D3D12_FEATURE_DATA_D3D12_OPTIONS options = {};
 	HRESULT res = device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS, &options, sizeof(options));
-	ERR_FAIL_COND_V_MSG(!SUCCEEDED(res), ERR_UNAVAILABLE, "CheckFeatureSupport failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
+	ERR_FAIL_COND_V_MSG(!_succeeded(res), ERR_UNAVAILABLE, "CheckFeatureSupport failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
 
 	// https://docs.microsoft.com/en-us/windows/win32/direct3d12/hardware-support
 	device_limits.max_srvs_per_shader_stage = options.ResourceBindingTier == D3D12_RESOURCE_BINDING_TIER_1 ? 128 : UINT64_MAX;
@@ -6194,10 +6194,10 @@ Error RenderingDeviceDriverD3D12::_get_device_limits() {
 	D3D12_COMMAND_QUEUE_DESC queue_desc = {};
 	queue_desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
 	res = device->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(unused_command_queue.GetAddressOf()));
-	ERR_FAIL_COND_V(!SUCCEEDED(res), ERR_CANT_CREATE);
+	ERR_FAIL_COND_V(!_succeeded(res), ERR_CANT_CREATE);
 
 	res = unused_command_queue->GetTimestampFrequency(&device_limits.timestamp_frequency);
-	if (!SUCCEEDED(res)) {
+	if (!_succeeded(res)) {
 		print_verbose("D3D12: GetTimestampFrequency failed with error " + vformat("0x%08ux", (uint64_t)res) + ". Timestamps will be inaccurate.");
 	}
 
@@ -6211,7 +6211,7 @@ Error RenderingDeviceDriverD3D12::_initialize_allocator() {
 	allocator_desc.Flags = D3D12MA::ALLOCATOR_FLAG_DEFAULT_POOLS_NOT_ZEROED | D3D12MA::ALLOCATOR_FLAG_DONT_PREFER_SMALL_BUFFERS_COMMITTED;
 
 	HRESULT res = D3D12MA::CreateAllocator(&allocator_desc, &allocator);
-	ERR_FAIL_COND_V_MSG(!SUCCEEDED(res), ERR_CANT_CREATE, "D3D12MA::CreateAllocator failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
+	ERR_FAIL_COND_V_MSG(!_succeeded(res), ERR_CANT_CREATE, "D3D12MA::CreateAllocator failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
 
 	if (allocator->IsGPUUploadHeapSupported()) {
 		dynamic_persistent_upload_heap = D3D12_HEAP_TYPE_GPU_UPLOAD;
@@ -6226,7 +6226,7 @@ Error RenderingDeviceDriverD3D12::_initialize_allocator() {
 	return OK;
 }
 
-static Error create_command_signature(ID3D12Device *device, D3D12_INDIRECT_ARGUMENT_TYPE p_type, uint32_t p_stride, ComPtr<ID3D12CommandSignature> *r_cmd_sig) {
+Error RenderingDeviceDriverD3D12::_create_command_signature(D3D12_INDIRECT_ARGUMENT_TYPE p_type, uint32_t p_stride, Microsoft::WRL::ComPtr<ID3D12CommandSignature> *r_cmd_sig) {
 	D3D12_INDIRECT_ARGUMENT_DESC iarg_desc = {};
 	iarg_desc.Type = p_type;
 	D3D12_COMMAND_SIGNATURE_DESC cs_desc = {};
@@ -6235,7 +6235,7 @@ static Error create_command_signature(ID3D12Device *device, D3D12_INDIRECT_ARGUM
 	cs_desc.pArgumentDescs = &iarg_desc;
 	cs_desc.NodeMask = 0;
 	HRESULT res = device->CreateCommandSignature(&cs_desc, nullptr, IID_PPV_ARGS(r_cmd_sig->GetAddressOf()));
-	ERR_FAIL_COND_V_MSG(!SUCCEEDED(res), ERR_CANT_CREATE, "CreateCommandSignature failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
+	ERR_FAIL_COND_V_MSG(!_succeeded(res), ERR_CANT_CREATE, "CreateCommandSignature failed with error " + vformat("0x%08ux", (uint64_t)res) + ".");
 	return OK;
 }
 
@@ -6243,17 +6243,17 @@ Error RenderingDeviceDriverD3D12::_initialize_frames(uint32_t p_frame_count) {
 	uint32_t num_resource_descriptors = GLOBAL_GET("rendering/rendering_device/d3d12/max_resource_descriptors");
 	uint32_t num_sampler_descriptors = GLOBAL_GET("rendering/rendering_device/d3d12/max_sampler_descriptors");
 
-	Error err = resource_descriptor_heap.initialize(device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, num_resource_descriptors, true);
+	Error err = resource_descriptor_heap.initialize(this, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, num_resource_descriptors, true);
 	ERR_FAIL_COND_V(err != OK, ERR_CANT_CREATE);
 
-	err = sampler_descriptor_heap.initialize(device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, num_sampler_descriptors, true);
+	err = sampler_descriptor_heap.initialize(this, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, num_sampler_descriptors, true);
 	ERR_FAIL_COND_V(err != OK, ERR_CANT_CREATE);
 
-	resource_descriptor_heap_pool.initialize(device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-	rtv_descriptor_heap_pool.initialize(device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
-	dsv_descriptor_heap_pool.initialize(device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
+	resource_descriptor_heap_pool.initialize(this, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+	rtv_descriptor_heap_pool.initialize(this, D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+	dsv_descriptor_heap_pool.initialize(this, D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
 
-	err = rtv_descriptor_heap_pool.allocate(1, device.Get(), null_rtv_alloc);
+	err = rtv_descriptor_heap_pool.allocate(this, 1, null_rtv_alloc);
 	ERR_FAIL_COND_V(err != OK, ERR_CANT_CREATE);
 
 	D3D12_RENDER_TARGET_VIEW_DESC rtv_desc_null = {};
@@ -6267,16 +6267,40 @@ Error RenderingDeviceDriverD3D12::_initialize_frames(uint32_t p_frame_count) {
 }
 
 Error RenderingDeviceDriverD3D12::_initialize_command_signatures() {
-	Error err = create_command_signature(device.Get(), D3D12_INDIRECT_ARGUMENT_TYPE_DRAW, sizeof(D3D12_DRAW_ARGUMENTS), &indirect_cmd_signatures.draw);
+	Error err = _create_command_signature(D3D12_INDIRECT_ARGUMENT_TYPE_DRAW, sizeof(D3D12_DRAW_ARGUMENTS), &indirect_cmd_signatures.draw);
 	ERR_FAIL_COND_V(err != OK, ERR_CANT_CREATE);
 
-	err = create_command_signature(device.Get(), D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED, sizeof(D3D12_DRAW_INDEXED_ARGUMENTS), &indirect_cmd_signatures.draw_indexed);
+	err = _create_command_signature(D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED, sizeof(D3D12_DRAW_INDEXED_ARGUMENTS), &indirect_cmd_signatures.draw_indexed);
 	ERR_FAIL_COND_V(err != OK, ERR_CANT_CREATE);
 
-	err = create_command_signature(device.Get(), D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH, sizeof(D3D12_DISPATCH_ARGUMENTS), &indirect_cmd_signatures.dispatch);
+	err = _create_command_signature(D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH, sizeof(D3D12_DISPATCH_ARGUMENTS), &indirect_cmd_signatures.dispatch);
 	ERR_FAIL_COND_V(err != OK, ERR_CANT_CREATE);
 
 	return OK;
+}
+
+void RenderingDeviceDriverD3D12::_device_removed(HRESULT p_result) {
+	if (p_result == DXGI_ERROR_DEVICE_REMOVED) {
+		String message = "The D3D12 device was removed. This could be due to a driver issue, a hardware issue, or the driver resetting itself because it was unresponsive for too long (TDR).";
+		if (device != nullptr) {
+			HRESULT reason = device->GetDeviceRemovedReason();
+			message += " Reason: " + vformat("0x%08ux", (uint64_t)(reason)) + ".";
+		} else {
+			message += " No device was available.";
+		}
+
+		CRASH_NOW_MSG(message);
+	}
+}
+
+bool RenderingDeviceDriverD3D12::_succeeded(HRESULT p_result) {
+	_device_removed(p_result);
+	return SUCCEEDED(p_result);
+}
+
+bool RenderingDeviceDriverD3D12::_failed(HRESULT p_result) {
+	_device_removed(p_result);
+	return FAILED(p_result);
 }
 
 Error RenderingDeviceDriverD3D12::initialize(uint32_t p_device_index, uint32_t p_frame_count) {
@@ -6288,7 +6312,7 @@ Error RenderingDeviceDriverD3D12::initialize(uint32_t p_device_index, uint32_t p
 
 	DXGI_ADAPTER_DESC adapter_desc;
 	HRESULT res = adapter->GetDesc(&adapter_desc);
-	ERR_FAIL_COND_V(!SUCCEEDED(res), ERR_CANT_CREATE);
+	ERR_FAIL_COND_V(!_succeeded(res), ERR_CANT_CREATE);
 
 	// Set the pipeline cache ID based on the adapter information.
 	pipeline_cache_id = String::hex_encode_buffer((uint8_t *)&adapter_desc.AdapterLuid, sizeof(LUID));
