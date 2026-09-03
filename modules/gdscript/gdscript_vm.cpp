@@ -733,10 +733,13 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 		profile.call_count.increment();
 		profile.frame_call_count.increment();
 	}
-	bool exit_ok = false;
 	int variant_address_limits[ADDR_TYPE_MAX] = { _stack_size, _constant_count, p_instance ? (int)p_instance->members.size() : 0 };
 #endif
 
+	// [pvkk] Release builds keep the freed-instance checks on the call opcodes and
+	// report them through the error handlers, so exit_ok and the error tail below are
+	// no longer debug-only.
+	bool exit_ok = false;
 	bool awaited = false;
 	Variant *variant_addresses[ADDR_TYPE_MAX] = { stack, _constants_ptr, p_instance ? p_instance->members.ptrw() : nullptr };
 
@@ -1923,6 +1926,18 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 				StringName base_class = base_obj ? base_obj->get_class_name() : StringName();
 #endif
 
+				// [pvkk] Kept in release: Variant::callp dereferences the object pointer
+				// without validating it, so a freed instance faults instead of erroring.
+				// A null instance is already handled there, only a dangling one is fatal.
+				if (base->get_type() == Variant::OBJECT) {
+					bool call_base_freed = false;
+					base->get_validated_object_with_check(call_base_freed);
+					if (unlikely(call_base_freed)) {
+						err_text = "Cannot call method '" + methodname->operator String() + "' on a previously freed instance.";
+						OPCODE_BREAK;
+					}
+				}
+
 				Variant temp_ret;
 				Callable::CallError err;
 				if (call_ret) {
@@ -2033,7 +2048,6 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 
 				GET_INSTRUCTION_ARG(base, argc);
 
-#ifdef DEBUG_ENABLED
 				bool freed = false;
 				Object *base_obj = base->get_validated_object_with_check(freed);
 				if (freed) {
@@ -2043,9 +2057,6 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 					err_text = METHOD_CALL_ON_NULL_VALUE_ERROR(method);
 					OPCODE_BREAK;
 				}
-#else
-				Object *base_obj = base->operator Object *();
-#endif
 				Variant **argptrs = instruction_args;
 
 #ifdef DEBUG_ENABLED
@@ -2276,7 +2287,6 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 
 				GET_INSTRUCTION_ARG(base, argc);
 
-#ifdef DEBUG_ENABLED
 				bool freed = false;
 				Object *base_obj = base->get_validated_object_with_check(freed);
 				if (freed) {
@@ -2286,9 +2296,6 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 					err_text = METHOD_CALL_ON_NULL_VALUE_ERROR(method);
 					OPCODE_BREAK;
 				}
-#else
-				Object *base_obj = *VariantInternal::get_object(base);
-#endif
 
 				Variant **argptrs = instruction_args;
 
@@ -2329,7 +2336,6 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 				GodotProfileZoneScriptSystemCall(method, source, name, method->get_name(), line);
 
 				GET_INSTRUCTION_ARG(base, argc);
-#ifdef DEBUG_ENABLED
 				bool freed = false;
 				Object *base_obj = base->get_validated_object_with_check(freed);
 				if (freed) {
@@ -2339,9 +2345,6 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 					err_text = METHOD_CALL_ON_NULL_VALUE_ERROR(method);
 					OPCODE_BREAK;
 				}
-#else
-				Object *base_obj = *VariantInternal::get_object(base);
-#endif
 				Variant **argptrs = instruction_args;
 #ifdef DEBUG_ENABLED
 				uint64_t call_time = 0;
@@ -2638,9 +2641,7 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 
 					awaited = true;
 
-#ifdef DEBUG_ENABLED
 					exit_ok = true;
-#endif
 					OPCODE_BREAK;
 				}
 			}
@@ -2793,9 +2794,7 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 				CHECK_SPACE(2);
 				GET_VARIANT_PTR(r, 0);
 				retvalue = *r;
-#ifdef DEBUG_ENABLED
 				exit_ok = true;
-#endif
 				OPCODE_BREAK;
 			}
 
@@ -2824,9 +2823,7 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 				} else {
 					retvalue = *r;
 				}
-#ifdef DEBUG_ENABLED
 				exit_ok = true;
-#endif // DEBUG_ENABLED
 				OPCODE_BREAK;
 			}
 
@@ -2860,9 +2857,7 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 
 				retvalue = *array;
 
-#ifdef DEBUG_ENABLED
 				exit_ok = true;
-#endif // DEBUG_ENABLED
 				OPCODE_BREAK;
 			}
 
@@ -2905,9 +2900,7 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 
 				retvalue = *dictionary;
 
-#ifdef DEBUG_ENABLED
 				exit_ok = true;
-#endif // DEBUG_ENABLED
 				OPCODE_BREAK;
 			}
 
@@ -2945,9 +2938,7 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 				}
 				retvalue = *r;
 
-#ifdef DEBUG_ENABLED
 				exit_ok = true;
-#endif // DEBUG_ENABLED
 				OPCODE_BREAK;
 			}
 
@@ -3010,9 +3001,7 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 				}
 				retvalue = *r;
 
-#ifdef DEBUG_ENABLED
 				exit_ok = true;
-#endif // DEBUG_ENABLED
 				OPCODE_BREAK;
 			}
 
@@ -3930,9 +3919,7 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 			DISPATCH_OPCODE;
 
 			OPCODE(OPCODE_END) {
-#ifdef DEBUG_ENABLED
 				exit_ok = true;
-#endif
 				OPCODE_BREAK;
 			}
 
@@ -3945,7 +3932,6 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 		}
 
 		OPCODES_END
-#ifdef DEBUG_ENABLED
 		if (exit_ok) {
 			OPCODE_OUT;
 		}
@@ -3967,15 +3953,20 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 		}
 		int err_line = line;
 		if (err_text.is_empty()) {
+#ifdef DEBUG_ENABLED
 			err_text = "Internal script error! Opcode: " + itos(last_opcode) + " (please report).";
+#else
+			err_text = "Internal script error! (please report).";
+#endif
 		}
 
 		_err_print_error(err_func.utf8().get_data(), err_file.utf8().get_data(), err_line, err_text.utf8().get_data(), false, ERR_HANDLER_SCRIPT);
+#ifdef DEBUG_ENABLED
 		GDScriptLanguage::get_singleton()->debug_break(err_text, false);
+#endif
 
 		// Get a default return type in case of failure
 		retvalue = _get_default_variant_for_data_type(return_type);
-#endif
 
 		OPCODE_OUT;
 	}
