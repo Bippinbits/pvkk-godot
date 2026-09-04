@@ -149,6 +149,10 @@ class RenderingDeviceDriverD3D12 : public RenderingDeviceDriver {
 	RenderingShaderContainerFormatD3D12 shader_container_format;
 	String pipeline_cache_id;
 	D3D12_HEAP_TYPE dynamic_persistent_upload_heap = D3D12_HEAP_TYPE_UPLOAD;
+	ID3D12Resource *breadcrumb_buffer = nullptr;
+	void *breadcrumb_buffer_data = nullptr;
+	uint32_t breadcrumb_offset = 0;
+	uint32_t breadcrumb_id = 0;
 
 	struct DescriptorHeap {
 		struct Allocation {
@@ -215,6 +219,7 @@ class RenderingDeviceDriverD3D12 : public RenderingDeviceDriver {
 	Error _create_command_signature(D3D12_INDIRECT_ARGUMENT_TYPE p_type, uint32_t p_stride, Microsoft::WRL::ComPtr<ID3D12CommandSignature> *r_cmd_sig);
 	Error _initialize_frames(uint32_t p_frame_count);
 	Error _initialize_command_signatures();
+	Error _initialize_breadcrumb_buffer();
 
 public:
 	Error initialize(uint32_t p_device_index, uint32_t p_frame_count) override final;

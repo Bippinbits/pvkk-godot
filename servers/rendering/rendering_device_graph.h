@@ -255,9 +255,7 @@ private:
 	};
 
 	struct ComputeInstructionList : InstructionList {
-#if defined(DEBUG_ENABLED) || defined(DEV_ENABLED)
-		uint32_t breadcrumb;
-#endif
+		uint32_t breadcrumb = 0;
 	};
 
 	struct DrawInstructionList : InstructionList {
@@ -267,10 +265,7 @@ private:
 		Rect2i region;
 		LocalVector<AttachmentOperation> attachment_operations;
 		LocalVector<RDD::RenderPassClearValue> attachment_clear_values;
-
-#if defined(DEBUG_ENABLED) || defined(DEV_ENABLED)
-		uint32_t breadcrumb;
-#endif
+		uint32_t breadcrumb = 0;
 		bool split_cmd_buffer = false;
 	};
 
@@ -368,10 +363,7 @@ private:
 		Rect2i region;
 		uint32_t clear_values_count = 0;
 		uint32_t trackers_count = 0;
-
-#if defined(DEBUG_ENABLED) || defined(DEV_ENABLED)
 		uint32_t breadcrumb = 0;
-#endif
 		bool split_cmd_buffer = false;
 
 		_FORCE_INLINE_ RDD::RenderPassClearValue *clear_values() {
@@ -735,6 +727,7 @@ private:
 	bool driver_honors_barriers : 1;
 	bool driver_clears_with_copy_engine : 1;
 	bool driver_buffers_require_transitions : 1;
+	bool insert_breadcrumbs : 1;
 	WorkaroundsState workarounds_state;
 	TightLocalVector<Frame> frames;
 	uint32_t frame = 0;
@@ -779,7 +772,7 @@ private:
 public:
 	RenderingDeviceGraph();
 	~RenderingDeviceGraph();
-	void initialize(RDD *p_driver, RenderingContextDriver::Device p_device, RenderPassCreationFunction p_render_pass_creation_function, uint32_t p_frame_count, RDD::CommandQueueFamilyID p_secondary_command_queue_family, uint32_t p_secondary_command_buffers_per_frame);
+	void initialize(RDD *p_driver, RenderingContextDriver::Device p_device, RenderPassCreationFunction p_render_pass_creation_function, uint32_t p_frame_count, RDD::CommandQueueFamilyID p_secondary_command_queue_family, uint32_t p_secondary_command_buffers_per_frame, bool p_insert_breadcrumbs);
 	void finalize();
 	void begin();
 	void add_buffer_clear(RDD::BufferID p_dst, ResourceTracker *p_dst_tracker, uint32_t p_offset, uint32_t p_size);
@@ -787,7 +780,7 @@ public:
 	void add_buffer_get_data(RDD::BufferID p_src, ResourceTracker *p_src_tracker, RDD::BufferID p_dst, RDD::BufferCopyRegion p_region);
 	void add_buffer_update(RDD::BufferID p_dst, ResourceTracker *p_dst_tracker, VectorView<RecordedBufferCopy> p_buffer_copies);
 	void add_driver_callback(RDD::DriverCallback p_callback, void *p_userdata, VectorView<ResourceTracker *> p_trackers, VectorView<ResourceUsage> p_usages);
-	void add_compute_list_begin(RDD::BreadcrumbMarker p_phase = RDD::BreadcrumbMarker::NONE, uint32_t p_breadcrumb_data = 0);
+	void add_compute_list_begin(uint32_t p_breadcrumb = 0);
 	void add_compute_list_bind_pipeline(RDD::PipelineID p_pipeline);
 	void add_compute_list_bind_uniform_set(RDD::ShaderID p_shader, RDD::UniformSetID p_uniform_set, uint32_t set_index);
 	void add_compute_list_bind_uniform_sets(RDD::ShaderID p_shader, VectorView<RDD::UniformSetID> p_uniform_set, uint32_t p_first_set_index, uint32_t p_set_count);

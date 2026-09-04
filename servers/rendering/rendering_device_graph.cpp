@@ -974,10 +974,7 @@ void RenderingDeviceGraph::_add_draw_list_begin(FramebufferCache *p_framebuffer_
 	}
 
 	draw_instruction_list.split_cmd_buffer = p_split_cmd_buffer;
-
-#if defined(DEBUG_ENABLED) || defined(DEV_ENABLED)
 	draw_instruction_list.breadcrumb = p_breadcrumb;
-#endif
 }
 
 void RenderingDeviceGraph::_run_secondary_command_buffer_task(const SecondaryCommandBuffer *p_secondary) {
@@ -1049,6 +1046,10 @@ void RenderingDeviceGraph::_run_render_commands(int32_t p_level, const RecordedC
 				}
 
 				const RecordedComputeListCommand *compute_list_command = reinterpret_cast<const RecordedComputeListCommand *>(command);
+				if (insert_breadcrumbs) {
+					driver->command_insert_breadcrumb(r_command_buffer, compute_list_command->breadcrumb);
+				}
+
 				_run_compute_list_command(r_command_buffer, compute_list_command->instruction_data(), compute_list_command->instruction_data_size);
 			} break;
 			case RecordedCommand::TYPE_DRAW_LIST: {
@@ -1077,9 +1078,10 @@ void RenderingDeviceGraph::_run_render_commands(int32_t p_level, const RecordedC
 				}
 
 				const VectorView clear_values(draw_list_command->clear_values(), draw_list_command->clear_values_count);
-#if defined(DEBUG_ENABLED) || defined(DEV_ENABLED)
-				driver->command_insert_breadcrumb(r_command_buffer, draw_list_command->breadcrumb);
-#endif
+				if (insert_breadcrumbs) {
+					driver->command_insert_breadcrumb(r_command_buffer, draw_list_command->breadcrumb);
+				}
+
 				RDD::RenderPassID render_pass;
 				RDD::FramebufferID framebuffer;
 				if (draw_list_command->framebuffer_cache != nullptr) {
@@ -1575,7 +1577,7 @@ void RenderingDeviceGraph::_print_compute_list(const uint8_t *p_instruction_data
 	}
 }
 
-void RenderingDeviceGraph::initialize(RDD *p_driver, RenderingContextDriver::Device p_device, RenderPassCreationFunction p_render_pass_creation_function, uint32_t p_frame_count, RDD::CommandQueueFamilyID p_secondary_command_queue_family, uint32_t p_secondary_command_buffers_per_frame) {
+void RenderingDeviceGraph::initialize(RDD *p_driver, RenderingContextDriver::Device p_device, RenderPassCreationFunction p_render_pass_creation_function, uint32_t p_frame_count, RDD::CommandQueueFamilyID p_secondary_command_queue_family, uint32_t p_secondary_command_buffers_per_frame, bool p_insert_breadcrumbs) {
 	DEV_ASSERT(p_driver != nullptr);
 	DEV_ASSERT(p_render_pass_creation_function != nullptr);
 	DEV_ASSERT(p_frame_count > 0);
@@ -1599,6 +1601,8 @@ void RenderingDeviceGraph::initialize(RDD *p_driver, RenderingContextDriver::Dev
 	driver_honors_barriers = driver->api_trait_get(RDD::API_TRAIT_HONORS_PIPELINE_BARRIERS);
 	driver_clears_with_copy_engine = driver->api_trait_get(RDD::API_TRAIT_CLEARS_WITH_COPY_ENGINE);
 	driver_buffers_require_transitions = driver->api_trait_get(RDD::API_TRAIT_BUFFERS_REQUIRE_TRANSITIONS);
+
+	insert_breadcrumbs = p_insert_breadcrumbs;
 }
 
 void RenderingDeviceGraph::finalize() {
@@ -1735,11 +1739,9 @@ void RenderingDeviceGraph::add_driver_callback(RDD::DriverCallback p_callback, v
 	_add_command_to_graph((ResourceTracker **)p_trackers.ptr(), (ResourceUsage *)p_usages.ptr(), p_trackers.size(), command_index, command);
 }
 
-void RenderingDeviceGraph::add_compute_list_begin(RDD::BreadcrumbMarker p_phase, uint32_t p_breadcrumb_data) {
+void RenderingDeviceGraph::add_compute_list_begin(uint32_t p_breadcrumb) {
 	compute_instruction_list.clear();
-#if defined(DEBUG_ENABLED) || defined(DEV_ENABLED)
-	compute_instruction_list.breadcrumb = p_breadcrumb_data | (p_phase & ((1 << 16) - 1));
-#endif
+	compute_instruction_list.breadcrumb = p_breadcrumb;
 	compute_instruction_list.index++;
 }
 
@@ -2057,9 +2059,7 @@ void RenderingDeviceGraph::add_draw_list_end() {
 	command->instruction_data_size = instruction_data_size;
 	command->command_buffer_type = RDD::COMMAND_BUFFER_TYPE_PRIMARY;
 	command->region = draw_instruction_list.region;
-#if defined(DEBUG_ENABLED) || defined(DEV_ENABLED)
 	command->breadcrumb = draw_instruction_list.breadcrumb;
-#endif
 	command->split_cmd_buffer = draw_instruction_list.split_cmd_buffer;
 	command->clear_values_count = draw_instruction_list.attachment_clear_values.size();
 	command->trackers_count = trackers_count;

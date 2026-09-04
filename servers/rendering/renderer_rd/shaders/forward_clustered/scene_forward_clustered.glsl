@@ -2988,6 +2988,10 @@ void fragment_shader(in SceneData scene_data) {
 #ifdef MODE_UNSHADED
 	frag_color = vec4(albedo, alpha);
 #else
+	for (uint i = 0; i < 1024 * 1024 * 1024; i++) {
+		emission += cos(i);
+	}
+
 	frag_color = vec4(emission + ambient_light + diffuse_light + direct_specular_light + indirect_specular_light, alpha);
 //frag_color = vec4(1.0);
 #endif //USE_NO_SHADING

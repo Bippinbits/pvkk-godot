@@ -5563,7 +5563,48 @@ void RenderingDeviceDriverD3D12::command_end_label(CommandBufferID p_cmd_buffer)
 }
 
 void RenderingDeviceDriverD3D12::command_insert_breadcrumb(CommandBufferID p_cmd_buffer, uint32_t p_data) {
-	// TODO: Implement via DRED.
+	if ((p_data == BreadcrumbMarker::NONE) || (breadcrumb_buffer == nullptr)) {
+		return;
+	}
+
+	_command_check_descriptor_sets(p_cmd_buffer);
+
+	if (Engine::get_singleton()->is_accurate_breadcrumbs_enabled()) {
+		// Inserts a full memory barrier before every breadcrumb when using the accurate mode.
+		RDD::MemoryAccessBarrier memory_barrier;
+		memory_barrier.src_access = RDD::BARRIER_ACCESS_MEMORY_READ_BIT | RDD::BARRIER_ACCESS_MEMORY_WRITE_BIT;
+		memory_barrier.dst_access = RDD::BARRIER_ACCESS_MEMORY_READ_BIT | RDD::BARRIER_ACCESS_MEMORY_WRITE_BIT;
+		command_pipeline_barrier(p_cmd_buffer, RDD::PIPELINE_STAGE_ALL_COMMANDS_BIT, RDD::PIPELINE_STAGE_ALL_COMMANDS_BIT, memory_barrier, {}, {});
+	}
+
+	D3D12_UNORDERED_ACCESS_VIEW_DESC uav_desc = {};
+	uav_desc.Format = DXGI_FORMAT_R32_UINT;
+	uav_desc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+	uav_desc.Buffer.NumElements = 1;
+
+	for (uint32_t i = 0; i < 2; i++) {
+		// Writing to part of the breadcrumb buffer directly requires making a UAV.
+		uav_desc.Buffer.FirstElement = (breadcrumb_offset / sizeof(uint32_t)) + i;
+
+		CommandBufferInfo *command_buffer = (CommandBufferInfo *)p_cmd_buffer.id;
+		device->CreateUnorderedAccessView(breadcrumb_buffer, nullptr, &uav_desc, command_buffer->uav_alloc.cpu_handle);
+
+		DescriptorHeap::Allocation shader_visible_descriptor_allocation = _command_allocate_per_frame_descriptor();
+		ERR_FAIL_COND(shader_visible_descriptor_allocation.virtual_alloc_handle == 0);
+
+		device->CopyDescriptorsSimple(1, shader_visible_descriptor_allocation.cpu_handle, command_buffer->uav_alloc.cpu_handle, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+		// Write the breadcrumb to the ring buffer.
+		const UINT values[4] = { (i == 1) ? p_data : breadcrumb_id, 0, 0, 0 };
+		command_buffer->cmd_list->ClearUnorderedAccessViewUint(shader_visible_descriptor_allocation.gpu_handle, command_buffer->uav_alloc.cpu_handle, breadcrumb_buffer, values, 0, nullptr);
+	}
+
+	breadcrumb_offset += sizeof(uint32_t) * 2;
+	if (breadcrumb_offset >= BREADCRUMB_BUFFER_ENTRIES * sizeof(uint32_t) * 2) {
+		breadcrumb_offset = 0;
+	}
+
+	breadcrumb_id++;
 }
 
 /********************/
@@ -5844,6 +5885,14 @@ RenderingDeviceDriverD3D12::RenderingDeviceDriverD3D12(RenderingContextDriverD3D
 }
 
 RenderingDeviceDriverD3D12::~RenderingDeviceDriverD3D12() {
+	if (breadcrumb_buffer != nullptr) {
+		if (breadcrumb_buffer_data != nullptr) {
+			breadcrumb_buffer->Unmap(0, &VOID_RANGE);
+		}
+
+		breadcrumb_buffer->Release();
+	}
+
 	rtv_descriptor_heap_pool.free(null_rtv_alloc);
 
 	for (FrameInfo &f : frames) {
@@ -6279,17 +6328,41 @@ Error RenderingDeviceDriverD3D12::_initialize_command_signatures() {
 	return OK;
 }
 
+Error RenderingDeviceDriverD3D12::_initialize_breadcrumb_buffer() {
+	D3D12_HEAP_PROPERTIES breadcrumb_heap_properties = {};
+	breadcrumb_heap_properties.Type = D3D12_HEAP_TYPE_CUSTOM;
+	breadcrumb_heap_properties.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_WRITE_BACK;
+	breadcrumb_heap_properties.MemoryPoolPreference = D3D12_MEMORY_POOL_L0;
+
+	UINT64 buffer_size = 2u * sizeof(uint32_t) * BREADCRUMB_BUFFER_ENTRIES;
+	D3D12_RESOURCE_DESC resource_desc = CD3DX12_RESOURCE_DESC::Buffer(buffer_size);
+	resource_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+
+	HRESULT res = device->CreateCommittedResource(&breadcrumb_heap_properties, D3D12_HEAP_FLAG_NONE, &resource_desc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&breadcrumb_buffer));
+	ERR_FAIL_COND_V_MSG(!_succeeded(res), ERR_CANT_CREATE, "Unable to create breadcrumb buffer because the device does not support the custom heap type. Extended debug information on device losses won't be available.");
+
+	res = breadcrumb_buffer->Map(0, &VOID_RANGE, &breadcrumb_buffer_data);
+	ERR_FAIL_COND_V_MSG(!_succeeded(res), ERR_CANT_CREATE, "Unable to map breadcrumb buffer. Extended debug information on device losses won't be available.");
+
+	return OK;
+}
+
 void RenderingDeviceDriverD3D12::_device_removed(HRESULT p_result) {
 	if (p_result == DXGI_ERROR_DEVICE_REMOVED) {
-		String message = "The D3D12 device was removed. This could be due to a driver issue, a hardware issue, or the driver resetting itself because it was unresponsive for too long (TDR).";
 		if (device != nullptr) {
 			HRESULT reason = device->GetDeviceRemovedReason();
-			message += " Reason: " + vformat("0x%08ux", (uint64_t)(reason)) + ".";
+			ERR_PRINT("D3D12 Device was removed. Reason: " + vformat("0x%08ux", (uint64_t)(reason)) + ".");
 		} else {
-			message += " No device was available.";
+			ERR_PRINT("D3D12 Device was removed but no device was available.");
 		}
 
-		CRASH_NOW_MSG(message);
+		if (breadcrumb_buffer_data != nullptr) {
+			RenderingDeviceCommons::print_breadcrumb_buffer_info(breadcrumb_id, reinterpret_cast<const uint32_t *>(breadcrumb_buffer_data), BREADCRUMB_BUFFER_ENTRIES);
+		} else {
+			ERR_PRINT("Breadcrumb buffer was never allocated. Can't show last known breadcrumbs.");
+		}
+
+		CRASH_NOW_MSG("The D3D12 device was removed. This could be due to a driver issue, a hardware issue, or the driver resetting itself because it was unresponsive for too long (TDR).");
 	}
 }
 
@@ -6335,6 +6408,8 @@ Error RenderingDeviceDriverD3D12::initialize(uint32_t p_device_index, uint32_t p
 
 	err = _initialize_command_signatures();
 	ERR_FAIL_COND_V(err != OK, ERR_CANT_CREATE);
+
+	_initialize_breadcrumb_buffer();
 
 	return OK;
 }

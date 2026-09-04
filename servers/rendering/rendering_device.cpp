@@ -7313,8 +7313,9 @@ Error RenderingDevice::initialize(RenderingContextDriver *p_context, DisplayServ
 	driver->begin_segment(frame, frames_drawn++);
 	driver->command_buffer_begin(frames[0].command_buffer);
 
-	// Create draw graph and start it initialized as well.
-	draw_graph.initialize(driver, device, &_render_pass_create_from_graph, frames.size(), main_queue_family, SECONDARY_COMMAND_BUFFERS_PER_FRAME);
+	// Create draw graph and start it initialized as well. Enable breadcrumbs if device lost information is extended.
+	bool device_lost_information_extended = GLOBAL_GET("rendering/rendering_device/device_lost_information/extended");
+	draw_graph.initialize(driver, device, &_render_pass_create_from_graph, frames.size(), main_queue_family, SECONDARY_COMMAND_BUFFERS_PER_FRAME, device_lost_information_extended);
 	draw_graph.begin();
 
 	for (uint32_t i = 0; i < frames.size(); i++) {
