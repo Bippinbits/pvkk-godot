@@ -1033,7 +1033,7 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 		light_instance->cull_mask = light->cull_mask;
 
 		// hook for subclass to do further processing.
-		RendererSceneRenderRD::get_singleton()->setup_added_light(type, light_transform, radius, spot_angle);
+		RendererSceneRenderRD::get_singleton()->setup_added_light(type, light_transform, radius, spot_angle, light->cull_mask);
 
 		r_positional_light_count++;
 	}
@@ -1832,7 +1832,7 @@ void LightStorage::update_reflection_probe_buffer(RenderDataRD *p_render_data, c
 		MaterialStorage::store_transform(proj, reflection_ubo.local_matrix);
 
 		// hook for subclass to do further processing.
-		RendererSceneRenderRD::get_singleton()->setup_added_reflection_probe(transform, extents);
+		RendererSceneRenderRD::get_singleton()->setup_added_reflection_probe(transform, extents, probe->reflection_mask);
 	}
 
 	if (reflection_count) {

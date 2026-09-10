@@ -552,8 +552,9 @@ void vertex_shader(vec3 vertex_input,
 	uint cluster_offset = (implementation_data.cluster_width * cluster_pos.y + cluster_pos.x) * (implementation_data.max_cluster_element_count_div_32 + 32);
 	uint cluster_z = uint(clamp((-vertex_interp.z / scene_data.z_far) * 32.0, 0.0, 31.0));
 
-	{ //omni lights
-
+	const uint layer_mask = instances.data[instance_index].layer_mask;
+	if (bool(layer_mask & implementation_data.cluster_type_masks[0])) {
+		// Omni lights.
 		uint cluster_omni_offset = cluster_offset;
 
 		uint item_min;
@@ -573,7 +574,7 @@ void vertex_shader(vec3 vertex_input,
 				merged_mask &= ~(1u << bit);
 				uint light_index = 32 * i + bit;
 
-				if (!bool(omni_lights.data[light_index].mask & instances.data[instance_index].layer_mask)) {
+				if (!bool(omni_lights.data[light_index].mask & layer_mask)) {
 					continue; //not masked
 				}
 
@@ -587,7 +588,8 @@ void vertex_shader(vec3 vertex_input,
 		}
 	}
 
-	{ //spot lights
+	if (bool(layer_mask & implementation_data.cluster_type_masks[1])) {
+		// Spot lights.
 		uint cluster_spot_offset = cluster_offset + implementation_data.cluster_type_size;
 
 		uint item_min;
@@ -608,7 +610,7 @@ void vertex_shader(vec3 vertex_input,
 
 				uint light_index = 32 * i + bit;
 
-				if (!bool(spot_lights.data[light_index].mask & instances.data[instance_index].layer_mask)) {
+				if (!bool(spot_lights.data[light_index].mask & layer_mask)) {
 					continue; //not masked
 				}
 
@@ -622,14 +624,14 @@ void vertex_shader(vec3 vertex_input,
 		}
 	}
 
-	{ // Directional light.
-
+	if (layer_mask != 0) {
+		// Directional lights.
 		// We process the first directional light separately as it may have shadows.
 		vec3 directional_diffuse = vec3(0.0);
 		vec3 directional_specular = vec3(0.0);
 
 		for (uint i = 0; i < scene_data.directional_light_count; i++) {
-			if (!bool(directional_lights.data[i].mask & instances.data[instance_index].layer_mask)) {
+			if (!bool(directional_lights.data[i].mask & layer_mask)) {
 				continue; // Not masked, skip.
 			}
 
@@ -1557,8 +1559,9 @@ void fragment_shader(in SceneData scene_data) {
 	vec3 vertex_ddx = dFdx(vertex);
 	vec3 vertex_ddy = dFdy(vertex);
 
-	{ // process decals
-
+	const uint layer_mask = instances.data[instance_index].layer_mask;
+	if (bool(layer_mask & implementation_data.cluster_type_masks[2])) {
+		// Process decals.
 		uint cluster_decal_offset = cluster_offset + implementation_data.cluster_type_size * 2;
 
 		uint item_min;
@@ -1586,7 +1589,7 @@ void fragment_shader(in SceneData scene_data) {
 
 				uint decal_index = 32 * i + bit;
 
-				if (!bool(decals.data[decal_index].mask & instances.data[instance_index].layer_mask)) {
+				if (!bool(decals.data[decal_index].mask & layer_mask)) {
 					continue; //not masked
 				}
 
@@ -2048,8 +2051,8 @@ void fragment_shader(in SceneData scene_data) {
 		ao_light_affect = mix(ao_light_affect, max(ao_light_affect, implementation_data.ssao_light_affect), implementation_data.ssao_ao_affect);
 	}
 
-	{ // process reflections
-
+	if (bool(layer_mask & implementation_data.cluster_type_masks[3])) {
+		// Process reflections.
 		vec4 reflection_accum = vec4(0.0, 0.0, 0.0, 0.0);
 		vec4 ambient_accum = vec4(0.0, 0.0, 0.0, 0.0);
 
@@ -2093,7 +2096,7 @@ void fragment_shader(in SceneData scene_data) {
 
 				uint reflection_index = 32 * i + bit;
 
-				if (!bool(reflections.data[reflection_index].mask & instances.data[instance_index].layer_mask)) {
+				if (!bool(reflections.data[reflection_index].mask & layer_mask)) {
 					continue; //not masked
 				}
 
@@ -2251,7 +2254,8 @@ void fragment_shader(in SceneData scene_data) {
 	direct_specular_light += specular_light_interp.rgb * f0;
 #endif
 
-	{ // Directional light.
+	if (layer_mask != 0) {
+		// Directional lights.
 
 		// Do shadow and lighting in two passes to reduce register pressure.
 #ifndef SHADOWS_DISABLED
@@ -2293,7 +2297,7 @@ void fragment_shader(in SceneData scene_data) {
 			}
 #endif
 
-				if (!bool(directional_lights.data[i].mask & instances.data[instance_index].layer_mask)) {
+				if (!bool(directional_lights.data[i].mask & layer_mask)) {
 					continue; //not masked
 				}
 
@@ -2535,7 +2539,7 @@ void fragment_shader(in SceneData scene_data) {
 				break;
 			}
 
-			if (!bool(directional_lights.data[i].mask & instances.data[instance_index].layer_mask)) {
+			if (!bool(directional_lights.data[i].mask & layer_mask)) {
 				continue; //not masked
 			}
 
@@ -2657,8 +2661,8 @@ void fragment_shader(in SceneData scene_data) {
 	}
 
 #ifndef USE_VERTEX_LIGHTING
-	{ //omni lights
-
+	if (bool(layer_mask & implementation_data.cluster_type_masks[0])) {
+		// Omni lights.
 		uint cluster_omni_offset = cluster_offset;
 
 		uint item_min;
@@ -2686,7 +2690,7 @@ void fragment_shader(in SceneData scene_data) {
 
 				uint light_index = 32 * i + bit;
 
-				if (!bool(omni_lights.data[light_index].mask & instances.data[instance_index].layer_mask)) {
+				if (!bool(omni_lights.data[light_index].mask & layer_mask)) {
 					continue; //not masked
 				}
 
@@ -2718,8 +2722,8 @@ void fragment_shader(in SceneData scene_data) {
 		}
 	}
 
-	{ //spot lights
-
+	if (bool(layer_mask & implementation_data.cluster_type_masks[1])) {
+		// Spot lights.
 		uint cluster_spot_offset = cluster_offset + implementation_data.cluster_type_size;
 
 		uint item_min;
@@ -2747,7 +2751,7 @@ void fragment_shader(in SceneData scene_data) {
 
 				uint light_index = 32 * i + bit;
 
-				if (!bool(spot_lights.data[light_index].mask & instances.data[instance_index].layer_mask)) {
+				if (!bool(spot_lights.data[light_index].mask & layer_mask)) {
 					continue; //not masked
 				}
 

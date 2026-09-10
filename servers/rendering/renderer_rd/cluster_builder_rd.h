@@ -173,6 +173,7 @@ private:
 	}; // Keep aligned to 32 bytes.
 
 	uint32_t cluster_count_by_type[ELEMENT_TYPE_MAX] = {};
+	uint32_t cluster_masks_by_type[ELEMENT_TYPE_MAX] = {};
 	uint32_t max_elements_by_type = 0;
 
 	RenderElementData *render_elements = nullptr;
@@ -242,7 +243,7 @@ public:
 
 	void begin(const Transform3D &p_view_transform, const Projection &p_cam_projection, bool p_flip_y);
 
-	_FORCE_INLINE_ void add_light(LightType p_type, const Transform3D &p_transform, float p_radius, float p_spot_aperture) {
+	_FORCE_INLINE_ void add_light(LightType p_type, const Transform3D &p_transform, float p_radius, float p_spot_aperture, uint32_t p_layer_mask) {
 		if (p_type == LIGHT_TYPE_OMNI && cluster_count_by_type[ELEMENT_TYPE_OMNI_LIGHT] == max_elements_by_type) {
 			return; // Max number elements reached.
 		}
@@ -285,11 +286,13 @@ public:
 				e.type = ELEMENT_TYPE_OMNI_LIGHT;
 				e.original_index = cluster_count_by_type[ELEMENT_TYPE_OMNI_LIGHT];
 				cluster_count_by_type[ELEMENT_TYPE_OMNI_LIGHT]++;
+				cluster_masks_by_type[ELEMENT_TYPE_OMNI_LIGHT] |= p_layer_mask;
 			} else { // LIGHT_TYPE_SPOT with wide angle.
 				e.type = ELEMENT_TYPE_SPOT_LIGHT;
 				e.has_wide_spot_angle = true;
 				e.original_index = cluster_count_by_type[ELEMENT_TYPE_SPOT_LIGHT];
 				cluster_count_by_type[ELEMENT_TYPE_SPOT_LIGHT]++;
+				cluster_masks_by_type[ELEMENT_TYPE_SPOT_LIGHT] |= p_layer_mask;
 			}
 
 			RendererRD::MaterialStorage::store_transform_transposed_3x4(xform, e.transform_inv);
@@ -338,12 +341,13 @@ public:
 			RendererRD::MaterialStorage::store_transform_transposed_3x4(xform, e.transform_inv);
 
 			cluster_count_by_type[ELEMENT_TYPE_SPOT_LIGHT]++;
+			cluster_masks_by_type[ELEMENT_TYPE_SPOT_LIGHT] |= p_layer_mask;
 		}
 
 		render_element_count++;
 	}
 
-	_FORCE_INLINE_ void add_box(BoxType p_box_type, const Transform3D &p_transform, const Vector3 &p_half_size) {
+	_FORCE_INLINE_ void add_box(BoxType p_box_type, const Transform3D &p_transform, const Vector3 &p_half_size, uint32_t p_layer_mask) {
 		if (p_box_type == BOX_TYPE_DECAL && cluster_count_by_type[ELEMENT_TYPE_DECAL] == max_elements_by_type) {
 			return; // Max number elements reached.
 		}
@@ -385,6 +389,7 @@ public:
 		RendererRD::MaterialStorage::store_transform_transposed_3x4(xform, e.transform_inv);
 
 		cluster_count_by_type[e.type]++;
+		cluster_masks_by_type[e.type] |= p_layer_mask;
 		render_element_count++;
 	}
 
@@ -394,6 +399,7 @@ public:
 	RID get_cluster_buffer() const;
 	uint32_t get_cluster_size() const;
 	uint32_t get_max_cluster_elements() const;
+	uint32_t get_cluster_type_mask(uint32_t p_type) const;
 
 	void set_shared(ClusterBuilderSharedDataRD *p_shared);
 

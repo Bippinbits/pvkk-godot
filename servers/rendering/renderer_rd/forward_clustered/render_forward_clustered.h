@@ -293,6 +293,8 @@ private:
 			uint32_t cluster_type_size;
 			uint32_t max_cluster_element_count_div_32;
 
+			uint32_t cluster_type_masks[4];
+
 			uint32_t ss_effects_flags;
 			float ssao_light_affect;
 			float ssao_ao_affect;
@@ -805,9 +807,9 @@ public:
 	RendererRD::SSEffects *get_ss_effects() { return ss_effects; }
 
 	/* callback from updating our lighting UBOs, used to populate cluster builder */
-	virtual void setup_added_reflection_probe(const Transform3D &p_transform, const Vector3 &p_half_size) override;
-	virtual void setup_added_light(const RS::LightType p_type, const Transform3D &p_transform, float p_radius, float p_spot_aperture) override;
-	virtual void setup_added_decal(const Transform3D &p_transform, const Vector3 &p_half_size) override;
+	virtual void setup_added_reflection_probe(const Transform3D &p_transform, const Vector3 &p_half_size, uint32_t p_layer_mask) override;
+	virtual void setup_added_light(const RS::LightType p_type, const Transform3D &p_transform, float p_radius, float p_spot_aperture, uint32_t p_layer_mask) override;
+	virtual void setup_added_decal(const Transform3D &p_transform, const Vector3 &p_half_size, uint32_t p_layer_mask) override;
 
 	virtual void base_uniforms_changed() override;
 
