@@ -3411,6 +3411,7 @@ RDD::UniformSetID RenderingDeviceDriverD3D12::uniform_set_create(VectorView<Boun
 
 			Error err = sampler_descriptor_heap.allocate(this, uniform_set.sampler_descriptor_count, *uniform_set_info->sampler_descriptor_heap_alloc);
 			if (unlikely(err != OK)) {
+				sampler_descriptor_heap_allocations.erase(sampler_key);
 				resource_descriptor_heap.free(uniform_set_info->resource_descriptor_heap_alloc);
 				VersatileResource::free(resources_allocator, uniform_set_info);
 
@@ -6347,7 +6348,18 @@ Error RenderingDeviceDriverD3D12::_initialize_breadcrumb_buffer() {
 	return OK;
 }
 
-void RenderingDeviceDriverD3D12::_device_removed(HRESULT p_result) {
+void RenderingDeviceDriverD3D12::_check_fatal_result(HRESULT p_result) {
+	if (p_result == E_OUTOFMEMORY) {
+		String allocator_state;
+		if (allocator != nullptr) {
+			D3D12MA::TotalStatistics stats;
+			allocator->CalculateStatistics(&stats);
+			allocator_state = vformat(" Allocator held %d MiB in %d allocations.",
+					stats.Total.Stats.BlockBytes / (1024 * 1024), stats.Total.Stats.AllocationCount);
+		}
+		CRASH_NOW_MSG("Out of GPU memory: a Direct3D 12 allocation failed with E_OUTOFMEMORY." + allocator_state);
+	}
+
 	if (p_result == DXGI_ERROR_DEVICE_REMOVED) {
 		if (device != nullptr) {
 			HRESULT reason = device->GetDeviceRemovedReason();
@@ -6367,12 +6379,12 @@ void RenderingDeviceDriverD3D12::_device_removed(HRESULT p_result) {
 }
 
 bool RenderingDeviceDriverD3D12::_succeeded(HRESULT p_result) {
-	_device_removed(p_result);
+	_check_fatal_result(p_result);
 	return SUCCEEDED(p_result);
 }
 
 bool RenderingDeviceDriverD3D12::_failed(HRESULT p_result) {
-	_device_removed(p_result);
+	_check_fatal_result(p_result);
 	return FAILED(p_result);
 }
 

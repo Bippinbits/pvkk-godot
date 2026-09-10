@@ -1791,11 +1791,14 @@ RDD::BufferID RenderingDeviceDriverVulkan::buffer_create(uint64_t p_size, BitFie
 		alloc_create_info.preferredFlags &= ~vma_flags_to_remove;
 		alloc_create_info.usage = vma_usage;
 		VkResult err = vmaCreateBuffer(allocator, &create_info, &alloc_create_info, &vk_buffer, &allocation, &alloc_info);
+		_check_fatal_result(err);
 		ERR_FAIL_COND_V_MSG(err, BufferID(), "Can't create buffer of size: " + itos(p_size) + ", error " + itos(err) + ".");
 	} else {
 		VkResult err = vkCreateBuffer(vk_device, &create_info, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_BUFFER), &vk_buffer);
+		_check_fatal_result(err);
 		ERR_FAIL_COND_V_MSG(err, BufferID(), "Can't create buffer of size: " + itos(p_size) + ", error " + itos(err) + ".");
 		err = vmaAllocateMemoryForBuffer(allocator, vk_buffer, &alloc_create_info, &allocation, &alloc_info);
+		_check_fatal_result(err);
 		ERR_FAIL_COND_V_MSG(err, BufferID(), "Can't allocate memory for buffer of size: " + itos(p_size) + ", error " + itos(err) + ".");
 		err = vmaBindBufferMemory2(allocator, allocation, 0, vk_buffer, nullptr);
 		ERR_FAIL_COND_V_MSG(err, BufferID(), "Can't bind memory to buffer of size: " + itos(p_size) + ", error " + itos(err) + ".");
@@ -2138,11 +2141,14 @@ RDD::TextureID RenderingDeviceDriverVulkan::texture_create(const TextureFormat &
 	if (!Engine::get_singleton()->is_extra_gpu_memory_tracking_enabled()) {
 		alloc_create_info.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
 		VkResult err = vmaCreateImage(allocator, &create_info, &alloc_create_info, &vk_image, &allocation, &alloc_info);
+		_check_fatal_result(err);
 		ERR_FAIL_COND_V_MSG(err, TextureID(), "vmaCreateImage failed with error " + itos(err) + ".");
 	} else {
 		VkResult err = vkCreateImage(vk_device, &create_info, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_IMAGE), &vk_image);
+		_check_fatal_result(err);
 		ERR_FAIL_COND_V_MSG(err, TextureID(), "vkCreateImage failed with error " + itos(err) + ".");
 		err = vmaAllocateMemoryForImage(allocator, vk_image, &alloc_create_info, &allocation, &alloc_info);
+		_check_fatal_result(err);
 		ERR_FAIL_COND_V_MSG(err, TextureID(), "Can't allocate memory for image, error: " + itos(err) + ".");
 		err = vmaBindImageMemory2(allocator, allocation, 0, vk_image, nullptr);
 		ERR_FAIL_COND_V_MSG(err, TextureID(), "Can't bind memory to image, error: " + itos(err) + ".");
@@ -2751,15 +2757,15 @@ RDD::FenceID RenderingDeviceDriverVulkan::fence_create() {
 Error RenderingDeviceDriverVulkan::fence_wait(FenceID p_fence) {
 	Fence *fence = (Fence *)(p_fence.id);
 	VkResult fence_status = vkGetFenceStatus(vk_device, fence->vk_fence);
-	_check_device_lost(fence_status);
+	_check_fatal_result(fence_status);
 	if (fence_status == VK_NOT_READY) {
 		VkResult err = vkWaitForFences(vk_device, 1, &fence->vk_fence, VK_TRUE, UINT64_MAX);
-		_check_device_lost(err);
+		_check_fatal_result(err);
 		ERR_FAIL_COND_V(err != VK_SUCCESS, FAILED);
 	}
 
 	VkResult err = vkResetFences(vk_device, 1, &fence->vk_fence);
-	_check_device_lost(err);
+	_check_fatal_result(err);
 	ERR_FAIL_COND_V(err != VK_SUCCESS, FAILED);
 
 	if (fence->queue_signaled_from != nullptr) {
@@ -2967,7 +2973,7 @@ Error RenderingDeviceDriverVulkan::command_queue_execute_and_present(CommandQueu
 		err = vkQueueSubmit(device_queue.queue, 1, &submit_info, vk_fence);
 		device_queue.submit_mutex.unlock();
 
-		_check_device_lost(err);
+		_check_fatal_result(err);
 		ERR_FAIL_COND_V(err != VK_SUCCESS, FAILED);
 
 		if (fence != nullptr && !command_queue->pending_semaphores_for_fence.is_empty()) {
@@ -4183,6 +4189,7 @@ VkDescriptorPool RenderingDeviceDriverVulkan::_descriptor_set_pool_create(const 
 	VkDescriptorPool vk_pool = VK_NULL_HANDLE;
 	VkResult res = vkCreateDescriptorPool(vk_device, &descriptor_set_pool_create_info, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_DESCRIPTOR_POOL), &vk_pool);
 	if (res) {
+		_check_fatal_result(res);
 		ERR_FAIL_COND_V_MSG(res, VK_NULL_HANDLE, "vkCreateDescriptorPool failed with error " + itos(res) + ".");
 	}
 
@@ -4462,6 +4469,7 @@ RDD::UniformSetID RenderingDeviceDriverVulkan::uniform_set_create(VectorView<Bou
 
 			// "Fragmented pool" and "out of memory pool" errors are handled by creating more pools. Any other error is unexpected.
 			if (res != VK_ERROR_FRAGMENTED_POOL && res != VK_ERROR_OUT_OF_POOL_MEMORY) {
+				_check_fatal_result(res);
 				ERR_FAIL_V_MSG(UniformSetID(), "Cannot allocate descriptor sets, error " + itos(res) + ".");
 			}
 		}
@@ -4475,6 +4483,7 @@ RDD::UniformSetID RenderingDeviceDriverVulkan::uniform_set_create(VectorView<Bou
 		// All errors are unexpected at this stage.
 		if (res) {
 			vkDestroyDescriptorPool(vk_device, descriptor_set_allocate_info.descriptorPool, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_DESCRIPTOR_POOL));
+			_check_fatal_result(res);
 			ERR_FAIL_V_MSG(UniformSetID(), "Cannot allocate descriptor sets, error " + itos(res) + ".");
 		}
 	}
@@ -6138,7 +6147,13 @@ void RenderingDeviceDriverVulkan::on_device_lost() const {
 	_err_print_error(FUNCTION_STR, __FILE__, __LINE__, context_driver->get_driver_and_device_memory_report());
 }
 
-void RenderingDeviceDriverVulkan::_check_device_lost(VkResult p_result) {
+void RenderingDeviceDriverVulkan::_check_fatal_result(VkResult p_result) {
+	if (p_result == VK_ERROR_OUT_OF_DEVICE_MEMORY || p_result == VK_ERROR_OUT_OF_HOST_MEMORY) {
+		CRASH_NOW_MSG(vformat("Out of GPU memory: a Vulkan allocation failed with %s. Allocator held %d MiB.",
+				p_result == VK_ERROR_OUT_OF_DEVICE_MEMORY ? "VK_ERROR_OUT_OF_DEVICE_MEMORY" : "VK_ERROR_OUT_OF_HOST_MEMORY",
+				get_total_memory_used() / (1024 * 1024)));
+	}
+
 	if (p_result != VK_ERROR_DEVICE_LOST) {
 		return;
 	}

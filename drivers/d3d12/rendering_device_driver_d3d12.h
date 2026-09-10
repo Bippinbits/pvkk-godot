@@ -208,7 +208,7 @@ class RenderingDeviceDriverD3D12 : public RenderingDeviceDriver {
 
 	static void STDMETHODCALLTYPE _debug_message_func(D3D12_MESSAGE_CATEGORY p_category, D3D12_MESSAGE_SEVERITY p_severity, D3D12_MESSAGE_ID p_id, LPCSTR p_description, void *p_context);
 
-	void _device_removed(HRESULT p_result);
+	void _check_fatal_result(HRESULT p_result);
 	bool _succeeded(HRESULT p_result);
 	bool _failed(HRESULT p_result);
 	void _set_object_name(ID3D12Object *p_object, String p_object_name);

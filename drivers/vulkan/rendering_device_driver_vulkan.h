@@ -685,7 +685,7 @@ public:
 	/****************/
 	virtual void command_insert_breadcrumb(CommandBufferID p_cmd_buffer, uint32_t p_data) override final;
 	void print_lost_device_info();
-	void _check_device_lost(VkResult p_result);
+	void _check_fatal_result(VkResult p_result);
 	void on_device_lost() const;
 	static String get_vulkan_result(VkResult err);
 
