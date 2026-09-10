@@ -484,6 +484,7 @@ void ClusterBuilderRD::begin(const Transform3D &p_view_transform, const Projecti
 	render_element_count = 0;
 	for (uint32_t i = 0; i < ELEMENT_TYPE_MAX; i++) {
 		cluster_count_by_type[i] = 0;
+		cluster_masks_by_type[i] = 0;
 	}
 }
 
@@ -628,6 +629,10 @@ uint32_t ClusterBuilderRD::get_cluster_size() const {
 
 uint32_t ClusterBuilderRD::get_max_cluster_elements() const {
 	return max_elements_by_type;
+}
+
+uint32_t ClusterBuilderRD::get_cluster_type_mask(uint32_t p_type) const {
+	return cluster_masks_by_type[p_type];
 }
 
 void ClusterBuilderRD::set_shared(ClusterBuilderSharedDataRD *p_shared) {

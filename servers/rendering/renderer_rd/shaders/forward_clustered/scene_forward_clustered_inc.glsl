@@ -309,6 +309,8 @@ struct ImplementationData {
 	uint cluster_type_size;
 	uint max_cluster_element_count_div_32;
 
+	uvec4 cluster_type_masks;
+
 	uint ss_effects_flags;
 	float ssao_light_affect;
 	float ssao_ao_affect;

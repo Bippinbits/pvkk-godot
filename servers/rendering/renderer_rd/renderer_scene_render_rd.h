@@ -175,9 +175,9 @@ public:
 
 	/* LIGHTING */
 
-	virtual void setup_added_reflection_probe(const Transform3D &p_transform, const Vector3 &p_half_size) {}
-	virtual void setup_added_light(const RS::LightType p_type, const Transform3D &p_transform, float p_radius, float p_spot_aperture) {}
-	virtual void setup_added_decal(const Transform3D &p_transform, const Vector3 &p_half_size) {}
+	virtual void setup_added_reflection_probe(const Transform3D &p_transform, const Vector3 &p_half_size, uint32_t p_layer_mask) {}
+	virtual void setup_added_light(const RS::LightType p_type, const Transform3D &p_transform, float p_radius, float p_spot_aperture, uint32_t p_layer_mask) {}
+	virtual void setup_added_decal(const Transform3D &p_transform, const Vector3 &p_half_size, uint32_t p_layer_mask) {}
 
 	/* GI */
 

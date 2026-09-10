@@ -3451,7 +3451,7 @@ void TextureStorage::update_decal_buffer(const PagedArray<RID> &p_decals, const 
 		dd.lower_fade = decal->lower_fade;
 
 		// hook for subclass to do further processing.
-		RendererSceneRenderRD::get_singleton()->setup_added_decal(xform, decal_extents);
+		RendererSceneRenderRD::get_singleton()->setup_added_decal(xform, decal_extents, decal->cull_mask);
 	}
 
 	if (decal_count > 0) {

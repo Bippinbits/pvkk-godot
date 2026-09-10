@@ -68,6 +68,7 @@ public:
 	RID cluster_buffer;
 	uint32_t cluster_size = 0;
 	uint32_t cluster_max_elements = 0;
+	uint32_t cluster_type_masks[4] = {};
 
 	uint32_t directional_light_count = 0;
 	bool directional_light_soft_shadows = false;
