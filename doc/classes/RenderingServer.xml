@@ -1670,6 +1670,13 @@
 				[/codeblock]
 			</description>
 		</method>
+		<method name="get_resource_usage_details" qualifiers="const">
+			<return type="Dictionary[]" />
+			<description>
+				Returns one dictionary per GPU resource currently allocated, with the keys [code]path[/code], [code]type[/code], [code]format[/code] and [code]vram[/code] (in bytes). This is the same listing the editor's [b]Video RAM[/b] debugger tab shows, but available to a running project including release builds.
+				[b]Note:[/b] This walks every allocated resource and synchronizes with the rendering thread, so it is expensive. Call it on demand, never per frame.
+			</description>
+		</method>
 		<method name="get_shader_parameter_list" qualifiers="const">
 			<return type="Dictionary[]" />
 			<param index="0" name="shader" type="RID" />

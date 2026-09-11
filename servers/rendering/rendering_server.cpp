@@ -32,6 +32,7 @@
 #include "rendering_server.compat.inc"
 
 #include "core/config/project_settings.h"
+#include "core/io/resource_loader.h"
 #include "core/variant/typed_array.h"
 #include "servers/rendering/shader_language.h"
 #include "servers/rendering/shader_warnings.h"
@@ -2300,6 +2301,38 @@ void RenderingServer::get_argument_options(const StringName &p_function, int p_i
 }
 #endif
 
+static String _resource_usage_type_from_path(const String &p_path) {
+	if (p_path.is_empty() || !ResourceLoader::exists(p_path)) {
+		return "";
+	}
+
+	if (ResourceCache::has(p_path)) {
+		Ref<Resource> resource = ResourceCache::get_ref(p_path);
+		return resource->get_class();
+	}
+
+	return ResourceLoader::get_resource_type(p_path);
+}
+
+TypedArray<Dictionary> RenderingServer::get_resource_usage_details() const {
+	List<ResourceInfo> infos;
+	resource_debug_usage(&infos);
+	infos.sort();
+
+	TypedArray<Dictionary> result;
+	for (const ResourceInfo &info : infos) {
+		String type = _resource_usage_type_from_path(info.path);
+
+		Dictionary entry;
+		entry["path"] = info.path;
+		entry["type"] = type.is_empty() ? info.type : type;
+		entry["format"] = info.format;
+		entry["vram"] = info.vram;
+		result.push_back(entry);
+	}
+	return result;
+}
+
 void RenderingServer::_bind_methods() {
 	BIND_CONSTANT(NO_INDEX_ARRAY);
 	BIND_CONSTANT(ARRAY_WEIGHTS_SIZE);
@@ -3532,6 +3565,7 @@ void RenderingServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("request_frame_drawn_callback", "callable"), &RenderingServer::request_frame_drawn_callback);
 	ClassDB::bind_method(D_METHOD("has_changed"), &RenderingServer::has_changed);
 	ClassDB::bind_method(D_METHOD("get_rendering_info", "info"), &RenderingServer::get_rendering_info);
+	ClassDB::bind_method(D_METHOD("get_resource_usage_details"), &RenderingServer::get_resource_usage_details);
 	ClassDB::bind_method(D_METHOD("get_video_adapter_name"), &RenderingServer::get_video_adapter_name);
 	ClassDB::bind_method(D_METHOD("get_video_adapter_vendor"), &RenderingServer::get_video_adapter_vendor);
 	ClassDB::bind_method(D_METHOD("get_video_adapter_type"), &RenderingServer::get_video_adapter_type);

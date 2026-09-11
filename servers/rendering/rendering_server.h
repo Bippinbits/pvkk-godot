@@ -465,6 +465,8 @@ public:
 
 	virtual void resource_debug_usage(List<ResourceInfo> *r_info) const = 0;
 
+	TypedArray<Dictionary> get_resource_usage_details() const;
+
 protected:
 #ifndef DISABLE_DEPRECATED
 	void _multimesh_allocate_data_bind_compat_99455(RID p_multimesh, int p_instances, MultimeshTransformFormat p_transform_format, bool p_use_colors, bool p_use_custom_data);
