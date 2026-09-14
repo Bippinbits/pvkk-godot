@@ -1469,6 +1469,18 @@ void RendererViewport::viewport_set_screen_space_aa(RID p_viewport, RS::Viewport
 	_configure_3d_render_buffers(viewport);
 }
 
+void RendererViewport::viewport_set_use_pathtracing(RID p_viewport, bool p_use_pathtracing) {
+	Viewport *viewport = viewport_owner.get_or_null(p_viewport);
+	ERR_FAIL_NULL(viewport);
+	viewport->use_pathtracing = p_use_pathtracing;
+}
+
+bool RendererViewport::viewport_get_use_pathtracing(RID p_viewport) const {
+	const Viewport *viewport = viewport_owner.get_or_null(p_viewport);
+	ERR_FAIL_NULL_V(viewport, true);
+	return viewport->use_pathtracing;
+}
+
 void RendererViewport::viewport_set_use_taa(RID p_viewport, bool p_use_taa) {
 	Viewport *viewport = viewport_owner.get_or_null(p_viewport);
 	ERR_FAIL_NULL(viewport);

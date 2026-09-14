@@ -749,6 +749,7 @@ public:
 	FUNC2(viewport_set_msaa_3d, RID, ViewportMSAA)
 	FUNC2(viewport_set_screen_space_aa, RID, ViewportScreenSpaceAA)
 	FUNC2(viewport_set_use_taa, RID, bool)
+	FUNC2(viewport_set_use_pathtracing, RID, bool)
 	FUNC2(viewport_set_use_debanding, RID, bool)
 	FUNC2(viewport_set_force_motion_vectors, RID, bool)
 	FUNC2(viewport_set_shared_viewport, RID, RID)
@@ -847,7 +848,7 @@ public:
 	FUNC1(environment_set_sdfgi_ray_count, EnvironmentSDFGIRayCount)
 	FUNC1(environment_set_sdfgi_frames_to_converge, EnvironmentSDFGIFramesToConverge)
 	FUNC1(environment_set_sdfgi_frames_to_update_light, EnvironmentSDFGIFramesToUpdateLight)
-	FUNC6(environment_set_pathtracing, RID, bool, int, int, int, RSE::PathtracingDenoiser)
+	FUNC7(environment_set_pathtracing, RID, bool, int, int, int, RSE::PathtracingDenoiser, bool)
 
 	FUNC3R(Ref<Image>, environment_bake_panorama, RID, bool, const Size2i &)
 

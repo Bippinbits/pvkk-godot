@@ -30,6 +30,7 @@
 
 #pragma once
 
+#include "core/os/rw_lock.h"
 #include "scene/3d/visual_instance_3d.h"
 #include "scene/resources/font.h"
 
@@ -75,10 +76,42 @@ private:
 		PackedColorArray mesh_colors;
 		PackedVector2Array mesh_uvs;
 		PackedInt32Array indices;
-		int offset = 0;
 		float z_shift = 0.0;
 		RID material;
 	};
+
+	// Glyph geometry tightly enclosing the visible ink instead of the padded
+	// atlas rect, so neighbouring glyphs don't produce coplanar overlapping
+	// triangles (which the pathtracer can only peel once). Font-pixel units,
+	// y-down, glyph origin at (0, 0).
+	struct GlyphHull {
+		Vector<Vector2> points;
+		Vector<int> indices;
+	};
+
+	struct GlyphHullKey {
+		uint64_t font_id = 0;
+		int32_t font_size = 0;
+		int32_t glyph_index = 0;
+		int32_t margin_q = 0;
+		int32_t pad = 0;
+
+		bool operator==(const GlyphHullKey &p_b) const {
+			return font_id == p_b.font_id && font_size == p_b.font_size && glyph_index == p_b.glyph_index && margin_q == p_b.margin_q;
+		}
+	};
+
+	struct GlyphHullKeyHasher {
+		_FORCE_INLINE_ static uint32_t hash(const GlyphHullKey &p_a) {
+			return hash_murmur3_buffer(&p_a, sizeof(GlyphHullKey));
+		}
+	};
+
+	static HashMap<GlyphHullKey, GlyphHull, GlyphHullKeyHasher> glyph_hull_cache;
+	static RWLock glyph_hull_cache_lock;
+
+	static float _glyph_hull_margin(const RID &p_font_rid, int p_font_size, int p_outline_size);
+	static bool _get_glyph_hull(const RID &p_font_rid, int p_font_size, int64_t p_glyph_index, float p_margin_px, GlyphHull &r_hull);
 
 	struct SurfaceKey {
 		uint64_t texture_id;

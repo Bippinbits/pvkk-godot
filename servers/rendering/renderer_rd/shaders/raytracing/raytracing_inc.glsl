@@ -22,12 +22,15 @@
 #define RT_PARAM_MAX_TRANSPARENCY_LAYERS 4 // rt_params[1].x - per-segment peel budget for all blend modes (0 = transparency off)
 #define RT_PARAM_TRANSPARENCY_MAX_BOUNCE 5 // rt_params[1].y - last bounce with transparency handling
 #define RT_PARAM_TRANSPARENT_COUNT 6 // rt_params[1].z - instances in the unified TLAS transparent camera lane
-// Indices 7-13 reserved for future use
+#define RT_PARAM_TRANSPARENCY_INDIRECT_RANGE 7 // rt_params[1].w - max peel distance on non-singular bounces (0 = unlimited)
+#define RT_PARAM_TRANSPARENCY_INDIRECT_FADE 8 // rt_params[2].x - fade-out length before that range (0 = hard cutoff)
+#define RT_PARAM_SKY_SCREEN_ENABLED 9 // rt_params[2].y - primary-ray misses read the screen-space sky instead of the octmap
+// Indices 10-13 reserved for future use
 #define RT_PARAM_LIGHT_COUNT 14 // rt_params[3].z - Number of active lights in light buffer
 #define RT_PARAM_FRAME_INDEX 15 // rt_params[3].w - Frame counter for temporal variation
 
 // ============================================================================
-// PATHTRACING PAYLOAD (32 bytes, fp16/unorm-packed)
+// PATHTRACING PAYLOAD (36 bytes, fp16/unorm-packed)
 // ============================================================================
 // Radiance (r) and throughput (T) interleaved as fp16 into 3 uints:
 //   [0]=rg, [1]=bR, [2]=GB  (packHalf2x16 pairs).
@@ -40,9 +43,9 @@
 
 struct PathPayload {
 	uint packed_rt[3]; // 12 bytes - radiance+throughput interleaved as fp16
-	uint packed_bounces_flags; //  4 bytes - [flags:8][peel_alpha:8][diffuse:8][total:8]
+	uint packed_bounces_flags; //  4 bytes - [flags:8][peel_alpha:8][non_singular:1][diffuse:7][total:8]
 	uint rng_state; //  4 bytes - RNG state for PCG
-	float hit_t; //  4 bytes - ray distance, used by raygen to rebuild origin
+	float hit_t; //  4 bytes - surface distance, even on termination; -1 on a scene miss
 	uint oct_offset_nrm; //  4 bytes - packUnorm2x16(vec3_to_oct(offset normal))
 	uint oct_next_dir; //  4 bytes - packUnorm2x16(vec3_to_oct(next direction))
 	float scene_depth; //  4 bytes - peel-ray input: NDC depth of the segment's opaque hit; 0.0 = far.
@@ -98,7 +101,14 @@ uint get_total_bounces(uint packed) {
 	return packed & 0xFFu;
 }
 uint get_diffuse_bounces(uint packed) {
-	return (packed >> 8u) & 0xFFu;
+	return (packed >> 8u) & 0x7Fu;
+}
+
+// Set once the path has scattered through anything but a (near-)singular lobe.
+const uint NON_SINGULAR_PATH_FLAG = (1u << 15);
+#define SINGULAR_ROUGHNESS_MAX 0.05
+bool is_singular_path(uint packed) {
+	return (packed & NON_SINGULAR_PATH_FLAG) == 0u;
 }
 uint pack_bounces(uint total, uint diffuse) {
 	return total | (diffuse << 8u);

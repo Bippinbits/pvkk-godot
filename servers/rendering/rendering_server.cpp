@@ -2914,6 +2914,7 @@ void RenderingServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("viewport_set_use_hdr_2d", "viewport", "enabled"), &RenderingServer::viewport_set_use_hdr_2d);
 	ClassDB::bind_method(D_METHOD("viewport_set_screen_space_aa", "viewport", "mode"), &RenderingServer::viewport_set_screen_space_aa);
 	ClassDB::bind_method(D_METHOD("viewport_set_use_taa", "viewport", "enable"), &RenderingServer::viewport_set_use_taa);
+	ClassDB::bind_method(D_METHOD("viewport_set_use_pathtracing", "viewport", "enable"), &RenderingServer::viewport_set_use_pathtracing);
 	ClassDB::bind_method(D_METHOD("viewport_set_use_debanding", "viewport", "enable"), &RenderingServer::viewport_set_use_debanding);
 	ClassDB::bind_method(D_METHOD("viewport_set_use_occlusion_culling", "viewport", "enable"), &RenderingServer::viewport_set_use_occlusion_culling);
 	ClassDB::bind_method(D_METHOD("viewport_set_occlusion_rays_per_thread", "rays_per_thread"), &RenderingServer::viewport_set_occlusion_rays_per_thread);
@@ -3106,7 +3107,7 @@ void RenderingServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("environment_set_fog", "env", "enable", "light_color", "light_energy", "sun_scatter", "density", "height", "height_density", "aerial_perspective", "sky_affect", "fog_mode"), &RenderingServer::environment_set_fog, DEFVAL(RS::ENV_FOG_MODE_EXPONENTIAL));
 	ClassDB::bind_method(D_METHOD("environment_set_fog_depth", "env", "curve", "begin", "end"), &RenderingServer::environment_set_fog_depth);
 	ClassDB::bind_method(D_METHOD("environment_set_sdfgi", "env", "enable", "cascades", "min_cell_size", "y_scale", "use_occlusion", "bounce_feedback", "read_sky", "energy", "normal_bias", "probe_bias"), &RenderingServer::environment_set_sdfgi);
-	ClassDB::bind_method(D_METHOD("environment_set_pathtracing", "env", "enable", "debug_mode", "samples_per_pixel", "max_bounces", "denoiser"), &RenderingServer::environment_set_pathtracing);
+	ClassDB::bind_method(D_METHOD("environment_set_pathtracing", "env", "enable", "debug_mode", "samples_per_pixel", "max_bounces", "denoiser", "sky_shader_enabled"), &RenderingServer::environment_set_pathtracing);
 	ClassDB::bind_method(D_METHOD("environment_set_volumetric_fog", "env", "enable", "density", "albedo", "emission", "emission_energy", "anisotropy", "length", "detail_spread", "gi_inject", "temporal_reprojection", "temporal_reprojection_amount", "ambient_inject", "sky_affect"), &RenderingServer::environment_set_volumetric_fog);
 
 	ClassDB::bind_method(D_METHOD("environment_glow_set_use_bicubic_upscale", "enable"), &RenderingServer::environment_glow_set_use_bicubic_upscale);
@@ -3839,9 +3840,13 @@ void RenderingServer::init() {
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/limits/cluster_builder/max_clustered_elements", PROPERTY_HINT_RANGE, "32,8192,1"), 512);
 	GLOBAL_DEF("rendering/pathtracing/use_shader_execution_reordering", true);
 	GLOBAL_DEF("rendering/pathtracing/async_shader_compilation", true);
+	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/pathtracing/debug_heatmap_max_ticks", PROPERTY_HINT_RANGE, "1,10000000,1,or_greater"), 100000.0);
+	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/pathtracing/debug_heatmap_opacity", PROPERTY_HINT_RANGE, "0,1,0.01"), 0.35);
 	// Transparency budgets are live UBO parameters.
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/pathtracing/max_transparency_layers", PROPERTY_HINT_RANGE, "0,64,1"), 4);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/pathtracing/transparency_max_bounce", PROPERTY_HINT_RANGE, "0,8,1"), 2);
+	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/pathtracing/transparency_indirect_range", PROPERTY_HINT_RANGE, "0,10000,0.1,or_greater,suffix:m"), 0.0);
+	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/pathtracing/transparency_indirect_fade", PROPERTY_HINT_RANGE, "0,1000,0.1,or_greater,suffix:m"), 0.0);
 	GLOBAL_DEF_RST("rendering/pathtracing/multimesh_cache_cpu_transforms", false);
 	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/pathtracing/deformed_mesh_cache_ttl_frames", PROPERTY_HINT_RANGE, "1,3600,1"), 60);
 	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/pathtracing/multimesh_blas_cache_ttl_frames", PROPERTY_HINT_RANGE, "1,18000,1"), 3600);

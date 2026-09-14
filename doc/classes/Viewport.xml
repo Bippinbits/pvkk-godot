@@ -478,6 +478,9 @@
 			[b]Note:[/b] Enabling occlusion culling has a cost on the CPU. Only enable occlusion culling if you actually plan to use it, and think whether your scene can actually benefit from occlusion culling. Large, open scenes with few or no objects blocking the view will generally not benefit much from occlusion culling. Large open scenes generally benefit more from mesh LOD and visibility ranges ([member GeometryInstance3D.visibility_range_begin] and [member GeometryInstance3D.visibility_range_end]) compared to occlusion culling.
 			[b]Note:[/b] Due to memory constraints, occlusion culling is not supported by default in Web export templates. It can be enabled by compiling custom Web export templates with [code]module_raycast_enabled=yes[/code].
 		</member>
+		<member name="use_pathtracing" type="bool" setter="set_use_pathtracing" getter="is_using_pathtracing" default="true">
+			If [code]false[/code], this viewport always rasterizes, even when its [Environment] has [member Environment.pathtracing_enabled] set. Useful for small render-to-texture viewports (in-world screens, periscopes) that share a path-traced [World3D] but should not run their own path-tracing pass.
+		</member>
 		<member name="use_taa" type="bool" setter="set_use_taa" getter="is_using_taa" default="false">
 			Enables temporal antialiasing for this viewport. TAA works by jittering the camera and accumulating the images of the last rendered frames, motion vector rendering is used to account for camera and object motion.
 			[b]Note:[/b] The implementation is not complete yet, some visual instances such as particles and skinned meshes may show artifacts.

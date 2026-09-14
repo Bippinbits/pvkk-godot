@@ -1482,6 +1482,9 @@ void RendererSceneRenderRD::render_scene(const Ref<RenderSceneBuffers> &p_render
 		render_data.rt_instances = p_rt_instances;
 		render_data.rt_lights = p_rt_lights;
 		render_data.viewport = p_viewport;
+		if (p_viewport.is_valid()) {
+			render_data.use_pathtracing = RSG::viewport->viewport_get_use_pathtracing(p_viewport);
+		}
 
 		if (p_render_buffers.is_valid() && p_reflection_probe.is_null()) {
 			render_data.transparent_bg = texture_storage->render_target_get_transparent(rb->get_render_target());

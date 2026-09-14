@@ -313,9 +313,10 @@ public:
 	virtual void environment_set_sdfgi_frames_to_update_light(RS::EnvironmentSDFGIFramesToUpdateLight p_update) = 0;
 
 	// Pathtracing
-	virtual void environment_set_pathtracing(RID p_env, bool p_enable, int p_debug_mode, int p_samples_per_pixel, int p_max_bounces, RSE::PathtracingDenoiser p_denoiser) = 0;
+	virtual void environment_set_pathtracing(RID p_env, bool p_enable, int p_debug_mode, int p_samples_per_pixel, int p_max_bounces, RSE::PathtracingDenoiser p_denoiser, bool p_sky_shader_enabled) = 0;
 
 	virtual bool environment_get_pathtracing_enabled(RID p_env) const = 0;
+	virtual bool environment_get_pathtracing_sky_shader_enabled(RID p_env) const = 0;
 	virtual int environment_get_pathtracing_debug_mode(RID p_env) const = 0;
 	virtual int environment_get_pathtracing_samples_per_pixel(RID p_env) const = 0;
 	virtual int environment_get_pathtracing_max_bounces(RID p_env) const = 0;

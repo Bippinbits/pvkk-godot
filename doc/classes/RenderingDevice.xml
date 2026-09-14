@@ -2546,6 +2546,9 @@
 		<constant name="SUPPORTS_IMAGE_ATOMIC_32_BIT" value="7" enum="Features">
 			Support for 32-bit image atomic operations.
 		</constant>
+		<constant name="SUPPORTS_SHADER_DEVICE_CLOCK" value="13" enum="Features">
+			Support for a device-wide shader clock. On Vulkan, requires [code]VK_KHR_shader_clock[/code] and its [code]shaderDeviceClock[/code] feature. Clock ticks are coherent across ray tracing calls and shader invocation reordering, but their period is implementation-dependent.
+		</constant>
 		<constant name="LIMIT_MAX_BOUND_UNIFORM_SETS" value="0" enum="Limit">
 			Maximum number of uniform sets that can be bound at a given time.
 		</constant>

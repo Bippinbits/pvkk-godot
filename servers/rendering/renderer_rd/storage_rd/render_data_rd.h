@@ -80,6 +80,7 @@ public:
 	bool transparent_bg = false;
 	bool load_color_and_depth = false;
 	bool skip_post_and_tonemap = false;
+	bool use_pathtracing = true;
 	Rect2i render_region;
 	RID viewport;
 

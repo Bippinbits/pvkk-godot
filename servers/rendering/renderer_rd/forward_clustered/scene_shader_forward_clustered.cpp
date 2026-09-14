@@ -69,6 +69,8 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	uses_tangent = false;
 	uses_normal_map = false;
 	uses_bent_normal_map = false;
+	uses_msdf = false;
+	uses_vertex_color = false;
 	wireframe = false;
 
 	unshaded = false;
@@ -139,6 +141,8 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	actions.usage_flag_pointers["NORMAL"] = &uses_normal;
 	actions.usage_flag_pointers["NORMAL_MAP"] = &uses_normal_map;
 	actions.usage_flag_pointers["BENT_NORMAL_MAP"] = &uses_bent_normal_map;
+	actions.usage_flag_pointers["msdf_pixel_range"] = &uses_msdf;
+	actions.usage_flag_pointers["COLOR"] = &uses_vertex_color;
 
 	actions.usage_flag_pointers["POINT_SIZE"] = &uses_point_size;
 	actions.usage_flag_pointers["POINT_COORD"] = &uses_point_size;
@@ -363,6 +367,10 @@ void SceneShaderForwardClustered::ShaderData::set_code_rt(const String &p_code_r
 	rt->uses_screen_texture = rt_gen_code.uses_screen_texture;
 	rt->uses_depth_texture = rt_gen_code.uses_depth_texture || local_uses_scene_depth;
 	rt->uses_normal_texture = rt_gen_code.uses_normal_roughness_texture;
+}
+
+bool SceneShaderForwardClustered::ShaderData::requires_custom_rt_hit_group() const {
+	return uses_msdf || uses_vertex_color;
 }
 
 bool SceneShaderForwardClustered::ShaderData::is_animated() const {

@@ -645,6 +645,15 @@ RSE::PathtracingDenoiser Environment::get_pathtracing_denoiser() const {
 	return pathtracing_denoiser;
 }
 
+void Environment::set_pathtracing_sky_shader_enabled(bool p_enabled) {
+	pathtracing_sky_shader_enabled = p_enabled;
+	_update_pathtracing();
+}
+
+bool Environment::is_pathtracing_sky_shader_enabled() const {
+	return pathtracing_sky_shader_enabled;
+}
+
 void Environment::_update_pathtracing() {
 	RS::get_singleton()->environment_set_pathtracing(
 			environment,
@@ -652,7 +661,8 @@ void Environment::_update_pathtracing() {
 			(int)pathtracing_debug_mode,
 			pathtracing_samples_per_pixel,
 			pathtracing_max_bounces,
-			pathtracing_denoiser);
+			pathtracing_denoiser,
+			pathtracing_sky_shader_enabled);
 }
 
 // Glow
@@ -1471,14 +1481,17 @@ void Environment::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_pathtracing_max_bounces"), &Environment::get_pathtracing_max_bounces);
 	ClassDB::bind_method(D_METHOD("set_pathtracing_denoiser", "denoiser"), &Environment::set_pathtracing_denoiser);
 	ClassDB::bind_method(D_METHOD("get_pathtracing_denoiser"), &Environment::get_pathtracing_denoiser);
+	ClassDB::bind_method(D_METHOD("set_pathtracing_sky_shader_enabled", "enabled"), &Environment::set_pathtracing_sky_shader_enabled);
+	ClassDB::bind_method(D_METHOD("is_pathtracing_sky_shader_enabled"), &Environment::is_pathtracing_sky_shader_enabled);
 	GLOBAL_DEF("rendering/pathtracing/use_simple_shadows", false);
 
 	ADD_GROUP("Pathtracing", "pathtracing_");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "pathtracing_enabled", PROPERTY_HINT_GROUP_ENABLE), "set_pathtracing_enabled", "is_pathtracing_enabled");
-	ADD_PROPERTY(PropertyInfo(Variant::INT, "pathtracing_debug_mode", PROPERTY_HINT_ENUM, "Disabled,Mirror Reflection,Geometry Normals,Final Normals,Normal Map,Tangent,Bitangent,UV,Albedo,ORM,Diffuse Albedo,Specular Albedo,Normal+Roughness,Specular Hit Dist,Metalness,Roughness,View Normals,Diffuse+Specular,Fresnel F0,Front/Back Face,Depth,Emissive,BRDF Rejection,Transparency Layers"), "set_pathtracing_debug_mode", "get_pathtracing_debug_mode");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "pathtracing_debug_mode", PROPERTY_HINT_ENUM, "Disabled,Mirror Reflection,Geometry Normals,Final Normals,Normal Map,Tangent,Bitangent,UV,Albedo,ORM,Diffuse Albedo,Specular Albedo,Normal+Roughness,Specular Hit Dist,Metalness,Roughness,View Normals,Diffuse+Specular,Fresnel F0,Front/Back Face,Depth,Emissive,BRDF Rejection,Transparency Layers,Timing Heatmap"), "set_pathtracing_debug_mode", "get_pathtracing_debug_mode");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "pathtracing_samples_per_pixel", PROPERTY_HINT_RANGE, "1,16,1"), "set_pathtracing_samples_per_pixel", "get_pathtracing_samples_per_pixel");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "pathtracing_max_bounces", PROPERTY_HINT_RANGE, "1,8,1"), "set_pathtracing_max_bounces", "get_pathtracing_max_bounces");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "pathtracing_denoiser", PROPERTY_HINT_ENUM, "None,DLSS Ray Reconstruction"), "set_pathtracing_denoiser", "get_pathtracing_denoiser");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "pathtracing_sky_shader_enabled"), "set_pathtracing_sky_shader_enabled", "is_pathtracing_sky_shader_enabled");
 
 	// Glow
 
@@ -1700,6 +1713,7 @@ void Environment::_bind_methods() {
 	BIND_ENUM_CONSTANT(RT_DEBUG_EMISSIVE);
 	BIND_ENUM_CONSTANT(RT_DEBUG_BRDF_REJECTION);
 	BIND_ENUM_CONSTANT(RT_DEBUG_TRANSPARENCY_LAYERS);
+	BIND_ENUM_CONSTANT(RT_DEBUG_TIMING_HEATMAP);
 
 	BIND_ENUM_CONSTANT(FOG_MODE_EXPONENTIAL);
 	BIND_ENUM_CONSTANT(FOG_MODE_DEPTH);

@@ -79,6 +79,8 @@ public:
 		virtual bool is_parameter_texture(const StringName &p_param) const;
 
 		virtual void set_code(const String &p_Code) = 0;
+		/// Returns whether RT must evaluate this shader outside the fixed HG0 path.
+		virtual bool requires_custom_rt_hit_group() const { return false; }
 		// Optional follow-up to `set_code` carrying the RT-preprocessed source.
 		// Default no-op; RT-aware subclasses override to extract RT-side
 		// classification flags.
@@ -510,6 +512,13 @@ public:
 	_FORCE_INLINE_ bool material_is_builtin_standard_3d(RID p_material) const {
 		Material *material = material_owner.get_or_null(p_material);
 		return material && material->shader && material->shader->builtin_standard_3d;
+	}
+
+	/// Returns whether the material needs its generated shader evaluated outside HG0.
+	_FORCE_INLINE_ bool material_requires_custom_rt_hit_group(RID p_material) const {
+		Material *material = material_owner.get_or_null(p_material);
+		return material && material->shader && material->shader->data &&
+				material->shader->data->requires_custom_rt_hit_group();
 	}
 };
 

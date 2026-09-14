@@ -583,6 +583,8 @@ bool SceneShaderRaytracing::_preprocess_shader(RID p_material, bool p_is_procedu
 	bool detected_alpha_clip = false;
 	actions.usage_flag_pointers["ALPHA_SCISSOR_THRESHOLD"] = &detected_alpha_clip;
 	actions.usage_flag_pointers["ALPHA_HASH_SCALE"] = &detected_alpha_clip;
+	actions.usage_flag_pointers["DISCARD"] = &detected_alpha_clip;
+	actions.discard_replacement = "{ alpha = 0.0; return; }";
 
 	// Blend transparents need the per-HG any-hit for exact peel/accumulation.
 	bool detected_alpha = false;
@@ -590,6 +592,9 @@ bool SceneShaderRaytracing::_preprocess_shader(RID p_material, bool p_is_procedu
 
 	bool uses_scene_depth = false;
 	actions.usage_flag_pointers["SCENE_DEPTH"] = &uses_scene_depth;
+	bool uses_instance_custom = false;
+	actions.usage_flag_pointers["INSTANCE_CUSTOM"] = &uses_instance_custom;
+	actions.function_renames["fwidth"] = "rt_fwidth";
 	int blend_modei = RendererRD::MaterialStorage::ShaderData::BLEND_MODE_MIX;
 	actions.render_mode_values["blend_add"] = Pair<int *, int>(&blend_modei, RendererRD::MaterialStorage::ShaderData::BLEND_MODE_ADD);
 	actions.render_mode_values["blend_mix"] = Pair<int *, int>(&blend_modei, RendererRD::MaterialStorage::ShaderData::BLEND_MODE_MIX);
@@ -613,6 +618,7 @@ bool SceneShaderRaytracing::_preprocess_shader(RID p_material, bool p_is_procedu
 	r_entry.uses_alpha_clip = detected_alpha_clip;
 	r_entry.needs_full_any_hit = detected_alpha || blend_modei != RendererRD::MaterialStorage::ShaderData::BLEND_MODE_MIX;
 	r_entry.uses_scene_depth = uses_scene_depth;
+	r_entry.uses_instance_custom = uses_instance_custom;
 	r_entry.vertex_code = gen_code.code.has("vertex") ? gen_code.code["vertex"] : String();
 	r_entry.fragment_code = gen_code.code.has("fragment") ? gen_code.code["fragment"] : String();
 	r_entry.fragment_globals = gen_code.stage_globals[ShaderCompiler::STAGE_FRAGMENT];
@@ -631,7 +637,7 @@ bool SceneShaderRaytracing::_preprocess_shader(RID p_material, bool p_is_procedu
 void SceneShaderRaytracing::finalize_custom_shaders() {
 	async_compilation_enabled = GLOBAL_GET_CACHED(bool, "rendering/pathtracing/async_shader_compilation");
 
-	_kick_rebuild_if_idle(); // Async dispatch only; sync drains below.
+	_start_next_build_if_idle(); // Async dispatch only; sync drains below.
 
 	if (!async_compilation_enabled) {
 		_drain_lane_inline_main_thread();
@@ -678,7 +684,14 @@ uint32_t SceneShaderRaytracing::compute_rt_flags(RID p_environment, bool p_fog_e
 	if (p_environment.is_valid()) {
 		RendererEnvironmentStorage *env_storage = RendererEnvironmentStorage::get_singleton();
 
-		if (env_storage->environment_get_pathtracing_debug_mode(p_environment) != 0) {
+		const int debug_mode = env_storage->environment_get_pathtracing_debug_mode(p_environment);
+		if (debug_mode == RT_DEBUG_TIMING_HEATMAP) {
+			if (RD::get_singleton()->has_feature(RD::SUPPORTS_SHADER_DEVICE_CLOCK)) {
+				flags |= RT_FLAG_TIMING_ENABLED;
+			} else {
+				WARN_PRINT_ONCE("PT Timing Heatmap requires VK_KHR_shader_clock with shaderDeviceClock support. Rendering normal path tracing.");
+			}
+		} else if (debug_mode != 0) {
 			flags |= RT_FLAG_DEBUG_VIS_ENABLED;
 		}
 
@@ -747,6 +760,9 @@ bool SceneShaderRaytracing::_ensure_variant_compile_context(uint32_t p_rt_flags)
 
 	if (p_rt_flags & RT_FLAG_DEBUG_VIS_ENABLED) {
 		inject_define(sources, "#define RT_DEBUG_ENABLED\n");
+	}
+	if (p_rt_flags & RT_FLAG_TIMING_ENABLED) {
+		inject_define(sources, "#define RT_TIMING_ENABLED\n");
 	}
 
 	// Procedural templates come from intersection stage; strip from base HG0 path.
@@ -1003,6 +1019,9 @@ SceneShaderRaytracing::PipelineBuildTask *SceneShaderRaytracing::_make_pipeline_
 		if (entry.uses_scene_depth) {
 			tex_defines += "#define RT_USES_SCENE_DEPTH\n";
 		}
+		if (entry.uses_instance_custom) {
+			tex_defines += "#define RT_USES_INSTANCE_CUSTOM\n";
+		}
 
 		String vertex_function;
 		String vertex_call;
@@ -1032,10 +1051,17 @@ SceneShaderRaytracing::PipelineBuildTask *SceneShaderRaytracing::_make_pipeline_
 					"}\n";
 		}
 
+		// `alpha`/`return` here are ShaderCompiler::IdentifierActions::discard_replacement
+		// (see below): glslang only permits `discard` in EShLangFragment, so it's a hard
+		// parse error in every RT stage. rt_run_fragment_shader() is a real function (see
+		// raytracing_custom_globals_inc.glsl), so `return` only exits the material shading;
+		// the any-hit shader already turns the resulting zero alpha into ignoreIntersectionEXT.
+		String fragment_function = "void rt_run_fragment_shader() {\n" + fragment_code + "\n}\n";
+
 		{
 			String s = ctx.ch_template;
 			s = s.replace("/* RT_CUSTOM_FRAGMENT_GLOBALS */", entry.fragment_globals);
-			s = s.replace("/* RT_CUSTOM_FRAGMENT_CODE */", fragment_code);
+			s = s.replace("/* RT_CUSTOM_FRAGMENT_FUNCTION */", fragment_function);
 			s = s.replace("/* RT_CUSTOM_UNIFORM_MEMBERS */", uniform_members);
 			s = s.replace("/* RT_CUSTOM_TEXTURE_DEFINES */", tex_defines);
 			s = s.replace("/* RT_CUSTOM_VERTEX_FUNCTION */", vertex_function);
@@ -1047,7 +1073,7 @@ SceneShaderRaytracing::PipelineBuildTask *SceneShaderRaytracing::_make_pipeline_
 		if (si.has_custom_any_hit) {
 			String s = ctx.ah_template;
 			s = s.replace("/* RT_CUSTOM_FRAGMENT_GLOBALS */", entry.fragment_globals);
-			s = s.replace("/* RT_CUSTOM_FRAGMENT_CODE */", fragment_code);
+			s = s.replace("/* RT_CUSTOM_FRAGMENT_FUNCTION */", fragment_function);
 			s = s.replace("/* RT_CUSTOM_UNIFORM_MEMBERS */", uniform_members);
 			s = s.replace("/* RT_CUSTOM_TEXTURE_DEFINES */", tex_defines);
 			s = s.replace("/* RT_CUSTOM_VERTEX_FUNCTION */", vertex_function);
@@ -1221,7 +1247,8 @@ void SceneShaderRaytracing::_build_pipeline_worker(PipelineBuildTask *p_task) {
 		return;
 	}
 
-	// raytracing_pipeline_create may run off render thread (RD uses internal sync).
+	// raytracing_pipeline_create() internally caches per-hit-group library pipelines by content
+	// (shader identity), so an unchanged hit group here is a cheap cache hit, not a recompile.
 	RD::PipelineShader base_ps = { p_task->base_shader, p_task->spec_constants };
 	RD::HitGroup hg0_default;
 	hg0_default.closest_hit_shader = base_ps;
@@ -1347,36 +1374,13 @@ void SceneShaderRaytracing::_finalize_pipeline_build(PipelineBuildTask *p_task) 
 	bundle.live_ready_mask = p_task->new_ready_mask;
 }
 
-// Single-lane rebuild dispatcher.
+// Single-lane rebuild dispatcher. No queue: the next dirty bundle IS the target, re-read fresh
+// every time the lane has capacity (lane just finished, or a new frame polls in) — never a stale
+// pre-built task waiting in line behind others.
 
-void SceneShaderRaytracing::_enqueue_build(PipelineBuildTask *p_task) {
+void SceneShaderRaytracing::_start_next_build_if_idle() {
 	MutexLock lock(compile_lane.mutex);
-	compile_lane.queue.push_back(p_task);
-	_dispatch_next_locked();
-}
-
-void SceneShaderRaytracing::_dispatch_next_locked() {
-	if (!async_compilation_enabled) {
-		return;
-	}
-	if (compile_lane.current != nullptr || compile_lane.queue.is_empty()) {
-		return;
-	}
-	PipelineBuildTask *t = compile_lane.queue[0];
-	compile_lane.queue.remove_at(0);
-	compile_lane.current = t;
-	t->worker_id = WorkerThreadPool::get_singleton()->add_native_task(
-			&SceneShaderRaytracing::_build_pipeline_worker_static, t, /*high_priority=*/false,
-			"RT Pipeline Build");
-}
-
-void SceneShaderRaytracing::_kick_rebuild_if_idle() {
-	bool lane_idle;
-	{
-		MutexLock lock(compile_lane.mutex);
-		lane_idle = (compile_lane.current == nullptr) && compile_lane.queue.is_empty();
-	}
-	if (!lane_idle) {
+	if (compile_lane.to_be_built != nullptr) {
 		return;
 	}
 	for (KeyValue<uint32_t, PipelineBundle> &kv : pipeline_bundles) {
@@ -1386,7 +1390,13 @@ void SceneShaderRaytracing::_kick_rebuild_if_idle() {
 		PipelineBuildTask *task = _make_pipeline_build_task(kv.key, kv.value);
 		if (task) {
 			kv.value.dirty = false;
-			_enqueue_build(task);
+			compile_lane.to_be_built = task;
+			if (async_compilation_enabled) {
+				task->worker_id = WorkerThreadPool::get_singleton()->add_native_task(
+						&SceneShaderRaytracing::_build_pipeline_worker_static, task, /*high_priority=*/false,
+						"RT Pipeline Build");
+			}
+			// If async is disabled, the task is parked here unstarted; _drain_lane_inline_main_thread() runs it.
 		}
 		break;
 	}
@@ -1397,9 +1407,9 @@ void SceneShaderRaytracing::drain_completed_compiles() {
 		PipelineBuildTask *finished = nullptr;
 		{
 			MutexLock lock(compile_lane.mutex);
-			if (compile_lane.current && compile_lane.current->done.is_set()) {
-				finished = compile_lane.current;
-				compile_lane.current = nullptr;
+			if (compile_lane.to_be_built && compile_lane.to_be_built->done.is_set()) {
+				finished = compile_lane.to_be_built;
+				compile_lane.to_be_built = nullptr;
 			}
 		}
 		if (!finished) {
@@ -1411,10 +1421,8 @@ void SceneShaderRaytracing::drain_completed_compiles() {
 		_finalize_pipeline_build(finished);
 		memdelete(finished);
 
-		{
-			MutexLock lock(compile_lane.mutex);
-			_dispatch_next_locked();
-		}
+		// Immediately pick up whatever's dirty now, rather than waiting for next frame's poll.
+		_start_next_build_if_idle();
 	}
 }
 
@@ -1423,44 +1431,41 @@ void SceneShaderRaytracing::_drain_lane_inline_main_thread() {
 		PipelineBuildTask *t = nullptr;
 		{
 			MutexLock lock(compile_lane.mutex);
-			if (compile_lane.current) {
-				break;
+			if (compile_lane.to_be_built && compile_lane.to_be_built->worker_id == WorkerThreadPool::INVALID_TASK_ID) {
+				t = compile_lane.to_be_built;
 			}
-			if (compile_lane.queue.is_empty()) {
-				break;
-			}
-			t = compile_lane.queue[0];
-			compile_lane.queue.remove_at(0);
+		}
+		if (!t) {
+			break;
 		}
 		_build_pipeline_worker(t);
 		_finalize_pipeline_build(t);
 		memdelete(t);
+		{
+			MutexLock lock(compile_lane.mutex);
+			compile_lane.to_be_built = nullptr;
+		}
+		_start_next_build_if_idle();
 	}
 }
 
 void SceneShaderRaytracing::_join_lane_for_shutdown() {
-	PipelineBuildTask *current = nullptr;
-	LocalVector<PipelineBuildTask *> queued;
+	PipelineBuildTask *to_be_built = nullptr;
 	{
 		MutexLock lock(compile_lane.mutex);
-		current = compile_lane.current;
-		compile_lane.current = nullptr;
-		queued = compile_lane.queue;
-		compile_lane.queue.clear();
+		to_be_built = compile_lane.to_be_built;
+		compile_lane.to_be_built = nullptr;
 	}
 
-	if (current) {
-		current->abort_requested.set();
-		if (current->worker_id != WorkerThreadPool::INVALID_TASK_ID && WorkerThreadPool::get_singleton()) {
-			WorkerThreadPool::get_singleton()->wait_for_task_completion(current->worker_id);
+	if (to_be_built) {
+		to_be_built->abort_requested.set();
+		if (to_be_built->worker_id != WorkerThreadPool::INVALID_TASK_ID && WorkerThreadPool::get_singleton()) {
+			WorkerThreadPool::get_singleton()->wait_for_task_completion(to_be_built->worker_id);
 		}
-		if (current->new_pipeline.is_valid()) {
-			RD::get_singleton()->free_rid(current->new_pipeline);
+		if (to_be_built->new_pipeline.is_valid()) {
+			RD::get_singleton()->free_rid(to_be_built->new_pipeline);
 		}
-		memdelete(current);
-	}
-	for (PipelineBuildTask *t : queued) {
-		memdelete(t);
+		memdelete(to_be_built);
 	}
 }
 

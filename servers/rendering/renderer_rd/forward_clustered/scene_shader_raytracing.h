@@ -80,6 +80,7 @@ public:
 		RT_FLAG_SER_ENABLED = (1 << 3),
 		RT_FLAG_RAY_QUERY_SHADOWS_ENABLED = (1 << 4),
 		RT_FLAG_DEPTH_COMPOSITE_ENABLED = (1 << 5),
+		RT_FLAG_TIMING_ENABLED = (1 << 6),
 	};
 
 	constexpr static uint32_t RT_SAMPLE_COUNT_SHIFT = 21;
@@ -96,13 +97,18 @@ public:
 	// Pathtracing parameter indices for the float[16] params buffer.
 	// Must match RT_PARAM_* defines in raytracing_inc.glsl.
 	static constexpr int RT_PARAM_VIS_MODE = 0;
+	// Must match Environment::RT_DEBUG_TIMING_HEATMAP. Timing uses normal shading.
+	static constexpr int RT_DEBUG_TIMING_HEATMAP = 24;
 	static constexpr int RT_PARAM_SAMPLE_COUNT = 1;
 	static constexpr int RT_PARAM_MAX_BOUNCES = 2;
 	static constexpr int RT_PARAM_DENOISER = 3;
 	static constexpr int RT_PARAM_MAX_TRANSPARENCY_LAYERS = 4;
 	static constexpr int RT_PARAM_TRANSPARENCY_MAX_BOUNCE = 5;
 	static constexpr int RT_PARAM_TRANSPARENT_COUNT = 6;
-	// Indices 7-13 reserved for future use.
+	static constexpr int RT_PARAM_TRANSPARENCY_INDIRECT_RANGE = 7;
+	static constexpr int RT_PARAM_TRANSPARENCY_INDIRECT_FADE = 8;
+	static constexpr int RT_PARAM_SKY_SCREEN_ENABLED = 9;
+	// Indices 10-13 reserved for future use.
 	static constexpr int RT_PARAM_LIGHT_COUNT = 14;
 	static constexpr int RT_PARAM_FRAME_INDEX = 15;
 
@@ -369,6 +375,7 @@ public:
 		bool uses_alpha_clip = false; // Writes ALPHA_SCISSOR_THRESHOLD; needs per-HG any-hit
 		bool needs_full_any_hit = false; // Blend-transparent or alpha: per-HG any-hit for peel/scissor evaluation
 		bool uses_scene_depth = false; // Reads SCENE_DEPTH; gates the rt_scene_depth imageLoad
+		bool uses_instance_custom = false; // Gates the MultiMesh custom-data buffer read.
 		bool is_procedural = false; // Uses intersection shader instead of triangle geometry
 		uint32_t alpha_texture_buffer_offset = UINT32_MAX; // Byte offset of hint_alpha texture index in CustomMaterialUniforms UBO; UINT32_MAX if absent
 	};
@@ -426,11 +433,12 @@ public:
 	HashMap<uint32_t, PipelineBundle> pipeline_bundles;
 
 	// Single-lane async bundle rebuild (worker: SPIR-V + raytracing_pipeline_create; main: SBT + swap).
+	// No queue: a dirty bundle IS the target state (SceneShaderRaytracing::PipelineBundle::dirty), always
+	// re-read fresh the moment the lane has capacity — never a stale pre-built snapshot waiting in line.
 	struct PipelineBuildTask;
 	struct CompileLane {
 		Mutex mutex;
-		PipelineBuildTask *current = nullptr;
-		LocalVector<PipelineBuildTask *> queue;
+		PipelineBuildTask *to_be_built = nullptr; // In flight; owned by the worker until done.
 	};
 
 	uint32_t register_custom_shader(uint32_t p_shader_id, RID p_material);
@@ -462,11 +470,9 @@ private:
 	// Bundle build / rebuild.
 	void _bundle_resize_for_slots(PipelineBundle &r_bundle);
 	bool _build_initial_bundle(uint32_t p_rt_flags, PipelineBundle &r_bundle);
-	void _kick_rebuild_if_idle();
 
 	// Compile lane / worker.
-	void _enqueue_build(PipelineBuildTask *p_task);
-	void _dispatch_next_locked(); // CompileLane::mutex MUST be held.
+	void _start_next_build_if_idle(); // Picks the next dirty bundle (if any) and starts building it.
 	void _build_pipeline_worker(PipelineBuildTask *p_task);
 	static void _build_pipeline_worker_static(void *p_userdata);
 	void _finalize_pipeline_build(PipelineBuildTask *p_task);

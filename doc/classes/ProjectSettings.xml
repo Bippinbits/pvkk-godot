@@ -3218,6 +3218,12 @@
 		<member name="rendering/pathtracing/async_shader_compilation" type="bool" setter="" getter="" default="true">
 			If [code]true[/code], path tracing ray hit shaders are compiled asynchronously in the background. This avoids frame stalls when new shader variants are first encountered during rendering. While a shader is compiling, a fallback shader may be used, which can cause temporary visual artifacts. Disable this if you require fully deterministic rendering from the first frame at the cost of potential stalls on shader warm-up.
 		</member>
+		<member name="rendering/pathtracing/debug_heatmap_max_ticks" type="float" setter="" getter="" default="100000.0">
+			Elapsed device clock ticks mapped to purple in [constant Environment.RT_DEBUG_TIMING_HEATMAP]. Zero ticks map to green, with cyan halfway through the range. Larger durations saturate at purple. Adjust this to the scene and GPU; Vulkan does not define a portable clock period for shader clocks. Measures all samples per pixel together. Changes take effect immediately.
+		</member>
+		<member name="rendering/pathtracing/debug_heatmap_opacity" type="float" setter="" getter="" default="0.35">
+			Opacity of [constant Environment.RT_DEBUG_TIMING_HEATMAP], applied after denoising and tone mapping. Set to [code]0.0[/code] to view the original shading while timing remains enabled, or [code]1.0[/code] for the heatmap alone. Changes take effect immediately.
+		</member>
 		<member name="rendering/pathtracing/deformed_mesh_cache_ttl_frames" type="int" setter="" getter="" default="60">
 			Number of frames a skinned or vertex-displaced deformed-mesh BLAS is kept alive in the path tracer cache after its last visible frame. Once this threshold is exceeded the BLAS and its associated buffers are freed. Increase this value if deformed meshes flicker back into view after brief occlusion; decrease it to reclaim GPU memory sooner.
 			[b]Note:[/b] Requires a restart to take effect.
@@ -3238,6 +3244,12 @@
 		<member name="rendering/pathtracing/multimesh_merged_blas_max_triangles" type="int" setter="" getter="" default="65536">
 			Maximum total triangle count ([code]instance_count * triangles_per_surface[/code]) for a [MultiMesh] surface to use a single merged BLAS in the path tracer. When the combined triangle count exceeds this value, the path tracer falls back to one TLAS entry per instance sharing a common BLAS instead. Lower this value to reduce peak GPU memory for large MultiMeshes; raise it to prefer the merged path (which avoids per-instance TLAS overhead).
 			[b]Note:[/b] Requires a restart to take effect.
+		</member>
+		<member name="rendering/pathtracing/transparency_indirect_fade" type="float" setter="" getter="" default="0.0">
+			Distance in meters over which transparent layers fade out before reaching [member rendering/pathtracing/transparency_indirect_range]. A faded layer contributes and attenuates proportionally less. [code]0[/code] gives a hard cutoff. Changes take effect immediately.
+		</member>
+		<member name="rendering/pathtracing/transparency_indirect_range" type="float" setter="" getter="" default="0.0">
+			Maximum distance in meters that indirect (bounce) ray segments trace for transparent surfaces. Transparent layers beyond this distance are ignored on indirect segments, bounding traversal cost for sky-facing bounces. Primary segments and singular (mirror) reflection chains always use the full range. [code]0[/code] disables the limit. Changes take effect immediately.
 		</member>
 		<member name="rendering/pathtracing/transparency_max_bounce" type="int" setter="" getter="" default="2">
 			Last bounce index at which the path tracer performs transparency handling. Every enabled ray segment receives the budget from [member rendering/pathtracing/max_transparency_layers]. Local lighting is composited deterministically; one indirect continuation is chosen by throughput-weighted reservoir sampling to keep path count bounded. Beyond this bounce, the transparent camera lane is not peeled. Changes take effect immediately.

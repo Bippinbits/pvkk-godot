@@ -1083,6 +1083,7 @@ public:
 	virtual void viewport_set_screen_space_aa(RID p_viewport, ViewportScreenSpaceAA p_mode) = 0;
 
 	virtual void viewport_set_use_taa(RID p_viewport, bool p_use_taa) = 0;
+	virtual void viewport_set_use_pathtracing(RID p_viewport, bool p_use_pathtracing) = 0;
 
 	virtual void viewport_set_use_debanding(RID p_viewport, bool p_use_debanding) = 0;
 
@@ -1385,7 +1386,7 @@ public:
 		PT_DENOISER_DLSS_RAY_RECONSTRUCTION,
 	};
 
-	virtual void environment_set_pathtracing(RID p_env, bool p_enable, int p_debug_mode, int p_samples_per_pixel, int p_max_bounces, PathtracingDenoiser p_denoiser) = 0;
+	virtual void environment_set_pathtracing(RID p_env, bool p_enable, int p_debug_mode, int p_samples_per_pixel, int p_max_bounces, PathtracingDenoiser p_denoiser, bool p_sky_shader_enabled) = 0;
 	virtual void environment_set_fog_depth(RID p_env, float p_curve, float p_begin, float p_end) = 0;
 
 	virtual void environment_set_volumetric_fog(RID p_env, bool p_enable, float p_density, const Color &p_albedo, const Color &p_emission, float p_emission_energy, float p_anisotropy, float p_length, float p_detail_spread, float p_gi_inject, bool p_temporal_reprojection, float p_temporal_reprojection_amount, float p_ambient_inject, float p_sky_affect) = 0;

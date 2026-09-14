@@ -53,9 +53,15 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 	}
 	bool is_reflection_probe = p_render_data->reflection_probe.is_valid();
 
-	const bool use_rt = !is_reflection_probe && p_render_data->environment.is_valid() &&
+	const bool use_rt = !is_reflection_probe && p_render_data->use_pathtracing && p_render_data->environment.is_valid() &&
 			RendererEnvironmentStorage::get_singleton()->environment_get_pathtracing_enabled(p_render_data->environment) &&
 			_setup_rt();
+	const bool timing_enabled = use_rt &&
+			RendererEnvironmentStorage::get_singleton()->environment_get_pathtracing_debug_mode(p_render_data->environment) == SceneShaderRaytracing::RT_DEBUG_TIMING_HEATMAP &&
+			RD::get_singleton()->has_feature(RD::SUPPORTS_SHADER_DEVICE_CLOCK);
+	if (!timing_enabled && rb->has_texture(RB_SCOPE_RT_TIMING, RB_TEX_RT_TIMING)) {
+		rb->clear_context(RB_SCOPE_RT_TIMING);
+	}
 	if (!use_rt) {
 		_age_out_motion_vectors(p_render_data);
 
@@ -177,7 +183,11 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 	// Captured from build_tlas/update_uniform_set so the trace-dispatch block
 	// below can bind without RenderRaytracing keeping hidden "current" state.
 	RID rt_uniform_set;
+	RTViewportState *rt_state = nullptr;
 	bool using_depth_reconstruct = false;
+	// Set below and consumed by the sky block further down, which draws the real
+	// sky shader into the RT sky texture before the trace dispatch.
+	bool pt_sky_screen = false;
 
 	if (rb_data.is_valid() && raytracing && raytracing->get_shader()) {
 		RENDER_TIMESTAMP("Build Acceleration Structures");
@@ -206,8 +216,23 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 			raytracing->dlss_rr_free_buffers(rb.ptr());
 		}
 
-		RTViewportState *rt_state = raytracing->build_tlas(p_render_data, rt_flags);
+		// The uniform set is built here, ahead of the sky block, so the sky texture
+		// has to exist by now even though it is drawn into later this frame. Only
+		// worth it when the sky is actually the background: everything else already
+		// resolves correctly through the octmap.
+		pt_sky_screen = rt_environment.is_valid() &&
+				environment_get_pathtracing_sky_shader_enabled(rt_environment) &&
+				!p_render_data->transparent_bg &&
+				environment_get_background(rt_environment) == RSE::ENV_BG_SKY &&
+				environment_get_sky(rt_environment).is_valid();
+		if (pt_sky_screen) {
+			raytracing->rt_ensure_sky_texture(rb.ptr());
+			pt_sky_screen = raytracing->rt_has_sky_texture(rb.ptr());
+		}
+
+		rt_state = raytracing->build_tlas(p_render_data, rt_flags);
 		if (rt_state) {
+			rt_state->sky_screen_enabled = pt_sky_screen;
 			raytracing->update_scene_ubo(rt_state, p_render_data, screen_size, p_default_bg_color);
 			rt_uniform_set = raytracing->update_uniform_set(rt_state, p_render_data, rt_flags);
 		}
@@ -305,6 +330,22 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 			}
 
 			RD::get_singleton()->draw_command_end_label();
+
+			// Run the sky shader per pixel into its own target. The trace below reads
+			// it for primary-ray misses, so the background matches the raster sky
+			// exactly (and stays inside the denoiser's input, unlike a post-trace
+			// composite). Indirect rays keep using the octmap.
+			if (pt_sky_screen && draw_sky) {
+				RID sky_fb = raytracing->rt_get_sky_framebuffer(rb.ptr());
+				if (sky_fb.is_valid()) {
+					RENDER_TIMESTAMP("Render Sky (Pathtraced Primary Rays)");
+					RD::get_singleton()->draw_command_begin_label("Draw Sky (Pathtraced Primary Rays)");
+					RD::DrawListID sky_draw_list = RD::get_singleton()->draw_list_begin(sky_fb, RD::DRAW_IGNORE_COLOR_ALL);
+					sky.draw_sky(sky_draw_list, rb, p_render_data->environment, sky_fb, time, sky_luminance_multiplier, sky_brightness_multiplier);
+					RD::get_singleton()->draw_list_end();
+					RD::get_singleton()->draw_command_end_label();
+				}
+			}
 		}
 
 		if (bg_mode != RSE::ENV_BG_CLEAR_COLOR && bg_mode != RSE::ENV_BG_COLOR) {
@@ -373,7 +414,7 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 		}
 
 		// Make sure BDA referenced buffers are registered as dependencies -- these cannot be inferred by the draw graph.
-		raytracing->register_raytracing_buffer_dependencies(raytracing_list);
+		raytracing->register_raytracing_buffer_dependencies(raytracing_list, rt_state);
 
 		// Raytracing dispatches at internal (pre-upscale) size
 		Size2i rt_size = rb->get_internal_size();
@@ -520,6 +561,18 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 	RENDER_TIMESTAMP("Tonemap");
 
 	_render_buffers_post_process_and_tonemap(p_render_data);
+
+	if ((rt_flags & SceneShaderRaytracing::RT_FLAG_TIMING_ENABLED) && rb->has_texture(RB_SCOPE_RT_TIMING, RB_TEX_RT_TIMING)) {
+		// Overlay after denoising, exposure and tone mapping, keeping their inputs and history unchanged.
+		RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
+		RID render_target = rb->get_render_target();
+		copy_effects->copy_timing_heatmap_to_fb(rb->get_texture(RB_SCOPE_RT_TIMING, RB_TEX_RT_TIMING),
+				texture_storage->render_target_get_rd_framebuffer(render_target),
+				Rect2i(Point2i(), texture_storage->render_target_get_size(render_target)),
+				GLOBAL_GET("rendering/pathtracing/debug_heatmap_max_ticks"),
+				GLOBAL_GET("rendering/pathtracing/debug_heatmap_opacity"),
+				texture_storage->render_target_is_using_hdr(render_target));
+	}
 
 	_render_buffers_debug_draw(p_render_data);
 }

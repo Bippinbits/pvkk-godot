@@ -10,6 +10,7 @@ layout(buffer_reference, std140) readonly buffer CustomMaterialUniforms{
 // texture #defines, and fragment_globals functions can all access them.
 // Assigned to real hit values in main() before use.
 CustomMaterialUniforms material = CustomMaterialUniforms(uint64_t(0));
+MaterialData rt_mat; // Assigned in main() before rt_run_fragment_shader() is called.
 vec3 vertex = vec3(0.0);
 vec3 normal = vec3(0.0, 0.0, 1.0);
 vec3 tangent = vec3(1.0, 0.0, 0.0);
@@ -36,7 +37,7 @@ float alpha_antialiasing_edge = 0.0;
 vec2 alpha_texture_coordinate = vec2(0.0);
 // Vertex-stage built-ins with no RT equivalent; writes are discarded.
 vec4 position = vec4(0.0);
-vec4 instance_custom = vec4(0.0);
+vec4 instance_custom = vec4(0.0); // Filled by hit setup only when the material uses INSTANCE_CUSTOM.
 float rt_point_size = 1.0;
 int rt_instance_id = 0;
 int rt_vertex_id = 0;
@@ -49,6 +50,44 @@ vec4 custom2_attrib = vec4(0.0);
 vec4 custom3_attrib = vec4(0.0);
 vec3 eye_offset = vec3(0.0);
 float global_prev_time = 0.0;
+
+// Fragment shading outputs, written by rt_run_fragment_shader() below. Global
+// (rather than main()-local) so a `discard` inside the custom fragment code can
+// be rewritten to `return` and only exit that function, not the whole hit shader
+// (see ShaderCompiler::IdentifierActions::discard_replacement).
+vec3 albedo = vec3(1.0);
+float alpha = 1.0;
+float metallic = 0.0;
+float specular = 0.5;
+vec3 emission = vec3(0.0);
+vec3 normal_map = vec3(0.5, 0.5, 1.0);
+float normal_map_depth = 1.0;
+float ao = 1.0;
+float ao_light_affect = 0.0;
+vec3 backlight = vec3(0.0);
+float sss_strength = 0.0;
+float rim = 0.0;
+float rim_tint = 0.0;
+float clearcoat = 0.0;
+float clearcoat_roughness = 0.0;
+float anisotropy = 0.0;
+vec2 anisotropy_flow = vec2(1.0, 0.0);
+float alpha_scissor_threshold = 0.0;
+float alpha_hash_scale = 1.0;
+vec3 light_vertex = vec3(0.0);
+vec2 rt_point_coord = vec2(0.0);
+float rt_depth = 0.0;
+float premul_alpha = 1.0;
+vec4 custom_radiance = vec4(0.0);
+vec4 custom_irradiance = vec4(0.0);
+vec4 transmittance_color = vec4(0.0);
+float transmittance_depth = 0.0;
+float transmittance_boost = 0.0;
+// Raster-only builtins. FOG writes are discarded. VOLUMETRIC_FOG reads see the
+// analytic fog at this hit in the raster froxel convention (rgb = premultiplied
+// inscatter, a = transmittance); neutral no-fog is a = 1.
+vec4 fog = vec4(0.0);
+vec4 volumetric_fog_rt = vec4(0.0, 0.0, 0.0, 1.0);
 
 #ifndef ViewIndex
 #define ViewIndex 0
@@ -69,7 +108,31 @@ float global_prev_time = 0.0;
 // opaque hits keep far (reverse-Z 0.0), a proximity-fade no-op.
 float rt_scene_depth = 0.0;
 
+// No quad derivatives in hit shaders, and the path tracer is supersampled
+// (jitter + temporal accumulation), so a per-sample footprint ramp would only
+// add blur on top of the reconstruction filter. fwidth() is a point-sample
+// footprint here, like the LOD-0 texture reads. Non-zero keeps 1.0 / fwidth()
+// (MSDF) finite.
+const float RT_FWIDTH_EPSILON = 1e-6;
+
+float rt_fwidth(float value) {
+	return RT_FWIDTH_EPSILON;
+}
+
+vec2 rt_fwidth(vec2 value) {
+	return vec2(RT_FWIDTH_EPSILON);
+}
+
+vec3 rt_fwidth(vec3 value) {
+	return vec3(RT_FWIDTH_EPSILON);
+}
+
+vec4 rt_fwidth(vec4 value) {
+	return vec4(RT_FWIDTH_EPSILON);
+}
+
 /* RT_CUSTOM_TEXTURE_DEFINES */
 /* RT_CUSTOM_FRAGMENT_GLOBALS */
 
 /* RT_CUSTOM_VERTEX_FUNCTION */
+/* RT_CUSTOM_FRAGMENT_FUNCTION */

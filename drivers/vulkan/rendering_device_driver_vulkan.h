@@ -83,6 +83,7 @@ class RenderingDeviceDriverVulkan : public RenderingDeviceDriver {
 	struct ShaderCapabilities {
 		bool shader_float16_is_supported = false;
 		bool shader_int8_is_supported = false;
+		bool shader_device_clock_is_supported = false;
 	};
 
 	struct StorageBufferCapabilities {
@@ -737,6 +738,50 @@ public:
 	virtual void command_bind_raytracing_pipeline(CommandBufferID p_cmd_buffer, RaytracingPipelineID p_pipeline) override final;
 	virtual void command_bind_raytracing_uniform_set(CommandBufferID p_cmd_buffer, UniformSetID p_uniform_set, ShaderID p_shader, uint32_t p_set_index) override final;
 	virtual void command_trace_rays(CommandBufferID p_cmd_buffer, const ShaderBindingTable &p_raygen_sbt, const ShaderBindingTable &p_miss_sbt, const ShaderBindingTable &p_hit_sbt, uint32_t p_width, uint32_t p_height, uint32_t p_depth) override final;
+
+private:
+	// VK_KHR_pipeline_library, automatically used by raytracing_pipeline_create()
+	struct RTHitGroupLibraryKey {
+		struct Sub {
+			uint64_t shader_id = 0;
+			Vector<PipelineSpecializationConstant> specialization_constants; // Owned copy; VectorView isn't safe to keep past the call.
+
+			bool operator==(const Sub &p_rhs) const {
+				return shader_id == p_rhs.shader_id && specialization_constants == p_rhs.specialization_constants;
+			}
+		};
+		Sub closest_hit, any_hit, intersection;
+		uint32_t max_trace_recursion_depth = 0;
+
+		static uint32_t _hash_sub(const Sub &p_sub, uint32_t h) {
+			h = hash_murmur3_one_64(p_sub.shader_id, h);
+			for (int i = 0; i < p_sub.specialization_constants.size(); i++) {
+				const PipelineSpecializationConstant &sc = p_sub.specialization_constants[i];
+				h = hash_murmur3_one_32(sc.type, h);
+				h = hash_murmur3_one_32(sc.constant_id, h);
+				h = hash_murmur3_one_32(sc.int_value, h);
+			}
+			return h;
+		}
+
+		uint32_t hash() const {
+			uint32_t h = _hash_sub(closest_hit, 0);
+			h = _hash_sub(any_hit, h);
+			h = _hash_sub(intersection, h);
+			h = hash_murmur3_one_32(max_trace_recursion_depth, h);
+			return hash_fmix32(h);
+		}
+		bool operator==(const RTHitGroupLibraryKey &p_rhs) const {
+			return closest_hit == p_rhs.closest_hit && any_hit == p_rhs.any_hit && intersection == p_rhs.intersection &&
+					max_trace_recursion_depth == p_rhs.max_trace_recursion_depth;
+		}
+	};
+	HashMap<RTHitGroupLibraryKey, RaytracingPipelineID> rt_hit_group_library_cache;
+	Mutex rt_hit_group_library_cache_mutex; // raytracing_pipeline_create() can run off the render thread (async compile lane) concurrently with other callers (e.g. bootstrap builds).
+
+	RaytracingPipelineID _rt_get_or_build_hit_group_library(VectorView<PipelineShader> p_shaders, const HitGroup &p_hit_group, uint32_t p_max_trace_recursion_depth, ShaderID p_layout_defining_shader);
+	RaytracingPipelineID _rt_pipeline_library_create(VectorView<PipelineShader> p_shaders, VectorView<HitGroup> p_hit_groups, uint32_t p_max_trace_recursion_depth, ShaderID p_layout_defining_shader);
+	RaytracingPipelineID _rt_pipeline_link(VectorView<PipelineShader> p_shaders, VectorView<uint32_t> p_raygen_shader_indices, VectorView<uint32_t> p_miss_shader_indices, VectorView<HitGroup> p_own_hit_groups, VectorView<RaytracingPipelineID> p_libraries, uint32_t p_max_trace_recursion_depth, ShaderID p_layout_defining_shader);
 
 public:
 	virtual RaytracingPipelineID raytracing_pipeline_create(VectorView<PipelineShader> p_shaders, VectorView<uint32_t> p_raygen_shader_indices, VectorView<uint32_t> p_miss_shader_indices, VectorView<HitGroup> p_hit_groups, uint32_t p_max_trace_recursion_depth, ShaderID p_layout_defining_shader) override final;

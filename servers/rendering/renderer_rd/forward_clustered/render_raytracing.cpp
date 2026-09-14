@@ -32,6 +32,7 @@
 #include "core/math/math_funcs.h"
 #include "servers/rendering/renderer_rd/environment/sky.h"
 #include "servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.h"
+#include "servers/rendering/renderer_rd/framebuffer_cache_rd.h"
 #include "servers/rendering/renderer_rd/forward_clustered/scene_shader_raytracing.h"
 #include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
@@ -127,6 +128,9 @@ void RenderRaytracing::_free_viewport_state_internal(RTViewportState *p_state) {
 	if (p_state->tlas.is_valid()) {
 		RD::get_singleton()->free_rid(p_state->tlas);
 	}
+	if (p_state->tlas_transparent.is_valid()) {
+		RD::get_singleton()->free_rid(p_state->tlas_transparent);
+	}
 	if (p_state->geometry_buffer.is_valid()) {
 		RD::get_singleton()->free_rid(p_state->geometry_buffer);
 	}
@@ -203,6 +207,33 @@ bool RenderRaytracing::rt_has_depth_texture(RenderSceneBuffersRD *p_render_buffe
 RID RenderRaytracing::rt_get_depth_texture(RenderSceneBuffersRD *p_render_buffers) const {
 	ERR_FAIL_NULL_V(p_render_buffers, RID());
 	return p_render_buffers->get_texture(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_RT_DEPTH);
+}
+
+void RenderRaytracing::rt_ensure_sky_texture(RenderSceneBuffersRD *p_render_buffers) {
+	ERR_FAIL_NULL(p_render_buffers);
+
+	if (!p_render_buffers->has_texture(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_RT_SKY)) {
+		uint32_t usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_COLOR_ATTACHMENT_BIT;
+		p_render_buffers->create_texture(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_RT_SKY, RD::DATA_FORMAT_R16G16B16A16_SFLOAT, usage_bits, RD::TEXTURE_SAMPLES_1);
+	}
+}
+
+bool RenderRaytracing::rt_has_sky_texture(RenderSceneBuffersRD *p_render_buffers) const {
+	return p_render_buffers && p_render_buffers->has_texture(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_RT_SKY);
+}
+
+RID RenderRaytracing::rt_get_sky_texture(RenderSceneBuffersRD *p_render_buffers) const {
+	ERR_FAIL_NULL_V(p_render_buffers, RID());
+	return p_render_buffers->get_texture(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_RT_SKY);
+}
+
+RID RenderRaytracing::rt_get_sky_framebuffer(RenderSceneBuffersRD *p_render_buffers) const {
+	ERR_FAIL_NULL_V(p_render_buffers, RID());
+	if (!p_render_buffers->has_texture(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_RT_SKY)) {
+		return RID();
+	}
+	RID texture = p_render_buffers->get_texture(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_RT_SKY);
+	return FramebufferCacheRD::get_singleton()->get_cache_multiview(p_render_buffers->get_view_count(), texture);
 }
 
 void RenderRaytracing::dlss_rr_ensure_buffers(RenderSceneBuffersRD *p_render_buffers) {
@@ -528,6 +559,7 @@ RTMergedMMEntry *RenderRaytracing::_access_merged_mm_slot(RID &r_handle) {
 
 void RenderRaytracing::prepare_frame() {
 	tlas_instances.clear();
+	tlas_transparent_instances.clear();
 	geometry_data.clear();
 	material_data.clear();
 	motion_indices.clear();
@@ -939,6 +971,7 @@ static void _fill_surface_geometry_data(
 	// Attribute buffer layout
 	uint32_t attrib_offset = 0;
 	geom.uv_byte_offset = RT_OFFSET_NONE;
+	geom.uv2_byte_offset = RT_OFFSET_NONE;
 	geom.color_byte_offset = RT_OFFSET_NONE;
 
 	if (surface_format & RSE::ARRAY_FORMAT_COLOR) {
@@ -950,6 +983,7 @@ static void _fill_surface_geometry_data(
 		attrib_offset += compressed ? sizeof(uint16_t) * 2 : sizeof(float) * 2;
 	}
 	if (surface_format & RSE::ARRAY_FORMAT_TEX_UV2) {
+		geom.uv2_byte_offset = attrib_offset;
 		attrib_offset += compressed ? sizeof(uint16_t) * 2 : sizeof(float) * 2;
 	}
 	for (int ci = 0; ci < RSE::ARRAY_CUSTOM_COUNT; ci++) {
@@ -965,6 +999,7 @@ static void _fill_surface_geometry_data(
 	// UV scale (fp16 packed, matches GLSL unpackHalf2x16)
 	Vector4 uv_scale = mesh_storage->mesh_surface_get_uv_scale(p_mesh_surface);
 	geom.uv_scale_packed = (uint32_t(Math::make_half_float(uv_scale.y)) << 16) | Math::make_half_float(uv_scale.x);
+	geom.uv2_scale_packed = (uint32_t(Math::make_half_float(uv_scale.w)) << 16) | Math::make_half_float(uv_scale.z);
 
 	// Index format (no device address — caller fills those in)
 	if (index_buffer.is_valid() && index_count > 0) {
@@ -1075,29 +1110,34 @@ static uint32_t _def_bool(const ShaderLanguage::ShaderNode::Uniform &u, int idx)
 	return (int)u.default_value.size() > idx ? (uint32_t)u.default_value[idx].boolean : 0u;
 }
 
+// Match raster UBO fill
+static bool _val_is_scalar(const Variant &val) {
+	return val.get_type() == Variant::FLOAT || val.get_type() == Variant::INT || val.get_type() == Variant::BOOL;
+}
+
 static void pack_uniform(const ShaderLanguage::ShaderNode::Uniform &u, const Variant &val, uint8_t *dst) {
 	using SL = ShaderLanguage;
 
 	switch (u.type) {
 		case SL::TYPE_FLOAT: {
-			float v = val.get_type() == Variant::FLOAT ? (float)(double)val : _def_real(u, 0);
+			float v = _val_is_scalar(val) ? (float)(double)val : _def_real(u, 0);
 			memcpy(dst, &v, 4);
 		} break;
 		case SL::TYPE_INT: {
-			int32_t v = val.get_type() == Variant::INT ? (int32_t)(int64_t)val : _def_sint(u, 0);
+			int32_t v = _val_is_scalar(val) ? (int32_t)(int64_t)val : _def_sint(u, 0);
 			memcpy(dst, &v, 4);
 		} break;
 		case SL::TYPE_UINT: {
-			uint32_t v = val.get_type() == Variant::INT ? (uint32_t)(int64_t)val : _def_uint(u, 0);
+			uint32_t v = _val_is_scalar(val) ? (uint32_t)(int64_t)val : _def_uint(u, 0);
 			memcpy(dst, &v, 4);
 		} break;
 		case SL::TYPE_BOOL: {
-			uint32_t v = val.get_type() == Variant::BOOL ? (uint32_t)(bool)val : _def_bool(u, 0);
+			uint32_t v = _val_is_scalar(val) ? (uint32_t)(bool)val : _def_bool(u, 0);
 			memcpy(dst, &v, 4);
 		} break;
 		case SL::TYPE_VEC2: {
 			float fv[2];
-			if (val.get_type() == Variant::VECTOR2) {
+			if (val.get_type() == Variant::VECTOR2 || val.get_type() == Variant::VECTOR2I) {
 				Vector2 v = val;
 				fv[0] = (float)v.x;
 				fv[1] = (float)v.y;
@@ -1550,9 +1590,9 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 		mat.albedo_color[3] = c.a;
 	}
 
-	// A ShaderMaterial may declare `albedo`, `emission`, ... too, so only the
-	// shader's origin can classify the material.
-	mat_data->is_custom_shader = !material_storage->material_is_builtin_standard_3d(p_material_rid);
+	mat_data->is_custom_shader =
+			!material_storage->material_is_builtin_standard_3d(p_material_rid) ||
+			material_storage->material_requires_custom_rt_hit_group(p_material_rid);
 
 	if (!mat_data->is_custom_shader) {
 		mat_data->rt_sbt_offset = 0;
@@ -1845,6 +1885,8 @@ void RenderRaytracing::build_acceleration_structures(RTViewportState *p_state, c
 	RENDER_TIMESTAMP("TLAS Build");
 
 	_build_one_tlas(p_state->tlas, p_state->tlas_max_instances, tlas_instances, "RT TLAS");
+	// Built even when empty so the raygen binding stays valid.
+	_build_one_tlas(p_state->tlas_transparent, p_state->tlas_transparent_max_instances, tlas_transparent_instances, "RT TLAS Transparent");
 }
 
 void RenderRaytracing::_build_one_tlas(RID &r_tlas, uint32_t &r_max_instances, const RTInstanceArrays &p_instances, const String &p_name) {
@@ -1926,6 +1968,10 @@ bool RenderRaytracing::_build_merged_mm_blas(
 	uint32_t index_count = mesh_storage->mesh_surface_get_index_count(p_mesh_surface, 0);
 	bool indexed = index_buffer.is_valid() && index_count > 0;
 	uint32_t prim_count = indexed ? (index_count / 3) : (vertex_count / 3);
+	if (mesh_storage->multimesh_uses_custom_data(p_mm_rid) &&
+			mesh_storage->multimesh_get_stride(p_mm_rid) > 0xffu) {
+		return false;
+	}
 
 	// Skip compressed meshes: their positions are UNORM16x4, not float3.
 	uint64_t surface_format = mesh_storage->mesh_surface_get_format(p_mesh_surface);
@@ -2309,10 +2355,15 @@ _FORCE_INLINE_ static uint32_t _rt_indices_to_primitives(RSE::PrimitiveType p_pr
 	return (p_indices - subtractor[p_primitive]) / divisor[p_primitive];
 }
 
-// Blend-class bits (RT_MAT_BLEND_CLASS_*) for the per-instance MaterialData
-// copy of transparent surfaces; closest-hit uses them during peeling.
-static uint32_t _rt_blend_class_mat_flags(const SceneShaderForwardClustered::ShaderData *sd,
+// Shader flags for the per-instance MaterialData copy. Unshaded applies to
+// opaque HG0 surfaces too; blend-class bits are only used during peeling.
+static uint32_t _rt_surface_mat_flags(const SceneShaderForwardClustered::ShaderData *sd,
 		SceneShaderForwardClustered::ShaderData::RTBlendClass p_class) {
+	uint32_t flags = sd && sd->unshaded ? RT_MAT_FLAG_UNSHADED : 0u;
+	if (p_class == SceneShaderForwardClustered::ShaderData::RT_BLEND_OPAQUE) {
+		return flags;
+	}
+	flags |= RT_MAT_FLAG_TRANSPARENT;
 	const int bm = sd ? (sd->rt ? sd->rt->blend_mode : sd->blend_mode) : (int)SceneShaderForwardClustered::ShaderData::BLEND_MODE_MIX;
 	uint32_t v = RT_MAT_BLEND_CLASS_MIX;
 	if (p_class == SceneShaderForwardClustered::ShaderData::RT_BLEND_OIT) {
@@ -2338,12 +2389,9 @@ static uint32_t _rt_blend_class_mat_flags(const SceneShaderForwardClustered::Sha
 				break;
 		}
 	}
-	uint32_t flags = v << RT_MAT_BLEND_CLASS_SHIFT;
+	flags |= v << RT_MAT_BLEND_CLASS_SHIFT;
 	if (sd && sd->rt_depth_draw_always()) {
 		flags |= RT_MAT_FLAG_DEPTH_DRAW_ALWAYS;
-	}
-	if (sd && sd->unshaded) {
-		flags |= RT_MAT_FLAG_UNSHADED;
 	}
 	return flags;
 }
@@ -2368,6 +2416,7 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 	}
 
 	prepare_frame();
+	state->custom_data_buffers.clear();
 
 	// Builds bundle if needed; live_ready_mask drives TLAS inclusion below.
 	SceneShaderRaytracing *rt_shader_singleton = SceneShaderRaytracing::get_singleton();
@@ -2429,7 +2478,7 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 		bool transparent;
 		uint32_t layer_mask;
 		uint32_t instance_uniforms_ofs = 0xFFFFFFFFu;
-		uint32_t blend_class_flags = 0;
+		uint32_t material_flags = 0;
 	};
 	LocalVector<PendingMMSurface> pending_mm_surfaces;
 	uint32_t transparent_instance_count = 0;
@@ -2502,6 +2551,11 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 				RT_GeometryData geom = {};
 				geom.flags = RT_GEOM_FLAG_PROCEDURAL;
 				geom.vertex_buffer_address = ps->gpu_buffer_address;
+				geom.normal_byte_offset = RT_OFFSET_NONE;
+				geom.tangent_byte_offset = RT_OFFSET_NONE;
+				geom.uv_byte_offset = RT_OFFSET_NONE;
+				geom.uv2_byte_offset = RT_OFFSET_NONE;
+				geom.color_byte_offset = RT_OFFSET_NONE;
 				geom.aabb_size_x = (float)ps->culling_aabb.size.x;
 				geom.aabb_size_y = (float)ps->culling_aabb.size.y;
 				geom.aabb_size_z = (float)ps->culling_aabb.size.z;
@@ -2647,11 +2701,9 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 				pending.transparent = mm_transparent;
 				pending.layer_mask = inst->layer_mask;
 				pending.instance_uniforms_ofs = uint32_t(inst->shader_uniforms_offset);
-				pending.blend_class_flags = mm_transparent
-						? _rt_blend_class_mat_flags(mm_surf->shader, mm_blend_class) | RT_MAT_FLAG_TRANSPARENT
-						: 0u;
+				pending.material_flags = _rt_surface_mat_flags(mm_surf->shader, mm_blend_class);
 				if (_rt_uses_alpha_scissor(mm_surf->shader, mat_data, rt_shader_singleton)) {
-					pending.blend_class_flags |= RT_MAT_FLAG_ALPHA_SCISSOR;
+					pending.material_flags |= RT_MAT_FLAG_ALPHA_SCISSOR;
 				}
 				pending_mm_surfaces.push_back(pending);
 
@@ -2784,10 +2836,7 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 
 			out.sbt_offsets.push_back(mat_data->rt_sbt_offset);
 			material_data.push_back(mat_data->data);
-			if (surf_transparent) {
-				material_data[material_data.size() - 1].flags |=
-						_rt_blend_class_mat_flags(surf->shader, surf_blend_class) | RT_MAT_FLAG_TRANSPARENT;
-			}
+			material_data[material_data.size() - 1].flags |= _rt_surface_mat_flags(surf->shader, surf_blend_class);
 			if (_rt_uses_alpha_scissor(surf->shader, mat_data, rt_shader_singleton)) {
 				material_data[material_data.size() - 1].flags |= RT_MAT_FLAG_ALPHA_SCISSOR;
 			}
@@ -2834,6 +2883,7 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 			out.masks.push_back(surf_tlas_mask);
 			if (surf_transparent && (surf_tlas_mask & RT_MASK_TRANSPARENT) != 0) {
 				transparent_instance_count++;
+				tlas_transparent_instances.push_copy(out, out.blass.size() - 1, RT_MASK_TRANSPARENT);
 			}
 
 			surf = surf->next;
@@ -2846,6 +2896,21 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 	RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
 
 	for (const PendingMMSurface &pending : pending_mm_surfaces) {
+		// These addresses belong to the final viewport geometry, not the shared surface cache.
+		uint64_t custom_data_address = 0;
+		uint32_t custom_data_stride_bytes = 0;
+		if (mesh_storage->multimesh_uses_custom_data(pending.mm_rid)) {
+			ERR_CONTINUE(!pending.mm_gpu_buffer.is_valid());
+			uint64_t buffer_address = RD::get_singleton()->buffer_get_device_address(pending.mm_gpu_buffer);
+			ERR_CONTINUE(buffer_address == 0);
+			uint32_t stride = mesh_storage->multimesh_get_stride(pending.mm_rid);
+			uint32_t custom_offset = mesh_storage->multimesh_get_custom_data_offset(pending.mm_rid);
+			uint32_t current_offset = mesh_storage->multimesh_get_current_instance_offset(pending.mm_rid);
+			ERR_CONTINUE(custom_offset + 4 > stride);
+			custom_data_stride_bytes = stride * sizeof(float);
+			custom_data_address = buffer_address + (uint64_t(current_offset) * stride + custom_offset) * sizeof(float);
+			state->custom_data_buffers.push_back(pending.mm_gpu_buffer);
+		}
 #ifdef TOOLS_ENABLED
 		uint32_t mm_pre_build_size = dirty_blas_list.size();
 		uint32_t mm_pre_refit_size = dirty_blas_update_list.size();
@@ -2858,20 +2923,28 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 
 		RTInstanceArrays &mm_out = tlas_instances;
 		if (use_merged) {
+			//ERR_CONTINUE(pending.mm_count == 0 || merged_sd.geometry.primitive_count == 0 || merged_sd.geometry.primitive_count % pending.mm_count != 0);
 			mm_out.blass.push_back(merged_sd.blas);
 			mm_out.transforms.push_back(pending.instance_transform);
 			geometry_data.push_back(merged_sd.geometry);
+			if (custom_data_address != 0) {
+				RT_GeometryData &geom = geometry_data[geometry_data.size() - 1];
+				geom.custom_data_address = custom_data_address;
+				geom.custom_data_primitive_divisor = merged_sd.geometry.primitive_count / pending.mm_count;
+				geom.custom_data_stride = custom_data_stride_bytes / sizeof(float);
+			}
 			geometry_data[geometry_data.size() - 1].layers = pending.layer_mask;
 			geometry_data[geometry_data.size() - 1].instance_uniforms_ofs = pending.instance_uniforms_ofs;
 			mm_out.custom_indices.push_back(geometry_data.size() - 1);
 			mm_out.sbt_offsets.push_back(pending.mat_data->rt_sbt_offset);
 			material_data.push_back(pending.mat_data->data);
-			material_data[material_data.size() - 1].flags |= pending.blend_class_flags;
+			material_data[material_data.size() - 1].flags |= pending.material_flags;
 			motion_indices.push_back(-1);
 			mm_out.flags.push_back(pending.inst_flags);
 			mm_out.masks.push_back(pending.tlas_mask);
 			if (pending.transparent && (pending.tlas_mask & RT_MASK_TRANSPARENT) != 0) {
 				transparent_instance_count++;
+				tlas_transparent_instances.push_copy(mm_out, mm_out.blass.size() - 1, RT_MASK_TRANSPARENT);
 			}
 #ifdef TOOLS_ENABLED
 			if (collect_render_info) {
@@ -2926,12 +2999,15 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 				mm_out.blass.push_back(surf_data->blas);
 				mm_out.transforms.push_back(final_transform);
 				geometry_data.push_back(surf_data->geometry);
+				if (custom_data_address != 0) {
+					geometry_data[geometry_data.size() - 1].custom_data_address = custom_data_address + uint64_t(mi) * custom_data_stride_bytes;
+				}
 				geometry_data[geometry_data.size() - 1].layers = pending.layer_mask;
 				geometry_data[geometry_data.size() - 1].instance_uniforms_ofs = pending.instance_uniforms_ofs;
 				mm_out.custom_indices.push_back(geometry_data.size() - 1);
 				mm_out.sbt_offsets.push_back(pending.mat_data->rt_sbt_offset);
 				material_data.push_back(pending.mat_data->data);
-				material_data[material_data.size() - 1].flags |= pending.blend_class_flags;
+				material_data[material_data.size() - 1].flags |= pending.material_flags;
 
 				if (pending.transform_moved) {
 					Transform3D prev_final = pending.prev_instance_transform * mm_xform;
@@ -2950,6 +3026,7 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 				mm_out.masks.push_back(pending.tlas_mask);
 				if (pending.transparent && (pending.tlas_mask & RT_MASK_TRANSPARENT) != 0) {
 					transparent_instance_count++;
+					tlas_transparent_instances.push_copy(mm_out, mm_out.blass.size() - 1, RT_MASK_TRANSPARENT);
 				}
 			}
 
@@ -3267,6 +3344,15 @@ RID RenderRaytracing::update_uniform_set(RTViewportState *p_state, const RenderD
 		uniforms.push_back(u);
 	}
 
+	{
+		RD::Uniform u;
+		u.binding = 31;
+		u.uniform_type = RD::UNIFORM_TYPE_ACCELERATION_STRUCTURE;
+		ERR_FAIL_COND_V(p_state->tlas_transparent == RID(), RID());
+		u.append_id(p_state->tlas_transparent);
+		uniforms.push_back(u);
+	}
+
 	// Binding 4: Per-instance motion index buffer (int32 per TLAS instance, -1 = no motion).
 	{
 		RD::Uniform u;
@@ -3331,6 +3417,9 @@ RID RenderRaytracing::update_uniform_set(RTViewportState *p_state, const RenderD
 		rt_ubo.params[SceneShaderRaytracing::RT_PARAM_MAX_TRANSPARENCY_LAYERS] = (float)GLOBAL_GET_CACHED(int, "rendering/pathtracing/max_transparency_layers");
 		rt_ubo.params[SceneShaderRaytracing::RT_PARAM_TRANSPARENCY_MAX_BOUNCE] = (float)GLOBAL_GET_CACHED(int, "rendering/pathtracing/transparency_max_bounce");
 		rt_ubo.params[SceneShaderRaytracing::RT_PARAM_TRANSPARENT_COUNT] = (float)p_state->transparent_instance_count;
+		rt_ubo.params[SceneShaderRaytracing::RT_PARAM_TRANSPARENCY_INDIRECT_RANGE] = (float)GLOBAL_GET_CACHED(double, "rendering/pathtracing/transparency_indirect_range");
+		rt_ubo.params[SceneShaderRaytracing::RT_PARAM_TRANSPARENCY_INDIRECT_FADE] = (float)GLOBAL_GET_CACHED(double, "rendering/pathtracing/transparency_indirect_fade");
+		rt_ubo.params[SceneShaderRaytracing::RT_PARAM_SKY_SCREEN_ENABLED] = p_state->sky_screen_enabled ? 1.0f : 0.0f;
 		rt_ubo.params[SceneShaderRaytracing::RT_PARAM_FRAME_INDEX] = float(p_state->frame_counter++);
 
 		// Unjittered VP for motion vectors (matches raster convention).
@@ -3521,6 +3610,30 @@ RID RenderRaytracing::update_uniform_set(RTViewportState *p_state, const RenderD
 		uniforms.push_back(u);
 	}
 
+	// Binding 33: screen-space sky drawn before the trace. Primary-ray misses read
+	// this instead of the octmap when RT_PARAM_SKY_SCREEN_ENABLED is set.
+	{
+		RD::Uniform u;
+		u.binding = 33;
+		u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+		u.append_id(rt_has_sky_texture(rb) ? rt_get_sky_texture(rb) : RendererRD::TextureStorage::get_singleton()->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_BLACK));
+		uniforms.push_back(u);
+	}
+
+	if (p_rt_flags & SceneShaderRaytracing::RT_FLAG_TIMING_ENABLED) {
+		if (!rb->has_texture(RB_SCOPE_RT_TIMING, RB_TEX_RT_TIMING)) {
+			rb->create_texture(RB_SCOPE_RT_TIMING, RB_TEX_RT_TIMING, RD::DATA_FORMAT_R32_SFLOAT,
+					RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT, RD::TEXTURE_SAMPLES_1);
+		}
+		RD::Uniform u;
+		u.binding = 34;
+		u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
+		u.append_id(rb->get_texture(RB_SCOPE_RT_TIMING, RB_TEX_RT_TIMING));
+		uniforms.push_back(u);
+	} else if (rb->has_texture(RB_SCOPE_RT_TIMING, RB_TEX_RT_TIMING)) {
+		rb->clear_context(RB_SCOPE_RT_TIMING);
+	}
+
 	RID shader_rd = shader ? shader->get_pipeline_shader_rd(p_rt_flags) : RID();
 
 	RID result;
@@ -3560,8 +3673,12 @@ RID RenderRaytracing::update_uniform_set(RTViewportState *p_state, const RenderD
 // Trace-time buffer dependencies
 // ---------------------------------------------------------------------------
 
-void RenderRaytracing::register_raytracing_buffer_dependencies(RD::RaytracingListID p_list) {
+void RenderRaytracing::register_raytracing_buffer_dependencies(RD::RaytracingListID p_list, const RTViewportState *p_state) {
 	RD *rd = RD::get_singleton();
+	ERR_FAIL_NULL(p_state);
+	for (RID buffer : p_state->custom_data_buffers) {
+		rd->raytracing_list_add_buffer_dependency(p_list, buffer, /*p_writable=*/false);
+	}
 
 	// The hit shader reads vertex / attribute / index data via BDA stored in
 	// RT_GeometryData. The draw graph cannot infer those reads from the BDA, so

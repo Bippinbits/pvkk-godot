@@ -12,7 +12,7 @@ layout(buffer_reference, std430) readonly buffer Uint32Buffer {
 };
 
 // ============================================================================
-// GEOMETRY DATA (matches C++ RT_GeometryData, 128 bytes)
+// GEOMETRY DATA (matches C++ RT_GeometryData, 144 bytes, 8-byte alignment)
 // ============================================================================
 struct GeometryData {
 	uint64_t vertex_address;
@@ -50,7 +50,12 @@ struct GeometryData {
 
 	uint layers; // VisualInstance3D render layers of the owning instance.
 	uint instance_uniforms_ofs; // Per-instance shader uniforms offset in the global buffer.
-	uint _pad[3];
+	uint uv2_byte_offset;
+	uint uv2_scale_packed; // fp16 x, fp16 y
+	uint custom_data_primitive_divisor; // Source triangle count for merged instances; 0 for fixed address.
+	uint64_t custom_data_address;
+	uint custom_data_stride; // Low 8 bits: stride in floats; upper 24 bits reserved, zero.
+	uint _pad;
 };
 
 void get_aabb_compression_xforms(GeometryData geom, out mat4 aabb_xform, out mat4 inv_aabb_xform) {

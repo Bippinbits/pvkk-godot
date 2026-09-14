@@ -1381,9 +1381,10 @@ public:
 	PASS1(environment_set_sdfgi_frames_to_update_light, RS::EnvironmentSDFGIFramesToUpdateLight)
 
 	// Pathtracing
-	PASS6(environment_set_pathtracing, RID, bool, int, int, int, RSE::PathtracingDenoiser)
+	PASS7(environment_set_pathtracing, RID, bool, int, int, int, RSE::PathtracingDenoiser, bool)
 
 	PASS1RC(bool, environment_get_pathtracing_enabled, RID)
+	PASS1RC(bool, environment_get_pathtracing_sky_shader_enabled, RID)
 	PASS1RC(int, environment_get_pathtracing_debug_mode, RID)
 	PASS1RC(int, environment_get_pathtracing_samples_per_pixel, RID)
 	PASS1RC(int, environment_get_pathtracing_max_bounces, RID)

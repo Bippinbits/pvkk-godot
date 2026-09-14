@@ -19,6 +19,7 @@ struct HitData {
 	vec3 tangent; // World space.
 	vec3 bitangent; // World space.
 	vec2 uv; // Raw UV (no material scale/offset applied).
+	vec2 uv2; // Raw UV2 (no shader scale/offset applied).
 	vec4 color; // Vertex color (white if not present).
 	bool is_front_face;
 	uint geometry_idx;
@@ -39,6 +40,7 @@ HitData compute_hit_data() {
 	VertexAttributes attrs = fetch_vertex_attributes(geom, attribs, FETCH_UV | FETCH_TBN);
 #endif
 	h.uv = attrs.uv;
+	h.uv2 = attrs.uv2;
 	h.color = attrs.color;
 
 	mat3 model_rotation = mat3(gl_ObjectToWorldEXT);
@@ -50,6 +52,7 @@ HitData compute_hit_data() {
 #ifdef ENABLE_INTERSECTION_SHADERS
 	if ((geom.flags & FLAG_PROCEDURAL) != 0u) {
 		h.uv = hit_attribs.bary_or_uv;
+		h.uv2 = h.uv;
 		vec3 obj_normal = normalize(unpackSnorm4x8(hit_attribs.packed_normal).xyz);
 		vec3 obj_tangent = normalize(unpackSnorm4x8(hit_attribs.packed_tangent).xyz);
 		h.geometry_normal = normalize(normal_matrix * obj_normal);
@@ -69,7 +72,7 @@ HitData compute_hit_data() {
 		h.tangent = normalize(normal_matrix * attrs.tangent);
 		h.bitangent = cross(h.geometry_normal, h.tangent) * attrs.bitangent_sign;
 
-		h.is_front_face = (gl_HitKindEXT == gl_HitKindFrontFacingTriangleEXT);
+		h.is_front_face = (dot(h.geometry_normal, -gl_WorldRayDirectionEXT) > 0.0);
 		if (!h.is_front_face) {
 			h.geometry_normal = -h.geometry_normal;
 		}
@@ -264,6 +267,7 @@ float specular_to_f0(float specular) {
 #ifdef RT_DEBUG_ENABLED
 void debug_visualize(
 		int vis_mode,
+		bool is_front_face,
 		vec3 geometry_normal,
 		vec3 final_normal,
 		vec3 tangent_space_normal,
@@ -353,7 +357,6 @@ void debug_visualize(
 	} else if (vis_mode == 18) {
 		ps.radiance = baseColorToSpecularF0(albedo, metalness, specular_to_f0(specular));
 	} else if (vis_mode == 19) {
-		bool is_front_face = (gl_HitKindEXT == gl_HitKindFrontFacingTriangleEXT);
 		ps.radiance = is_front_face ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
 	} else if (vis_mode == 20) {
 		float depth_range = scene_data_block.data.z_far - scene_data_block.data.z_near;
@@ -461,7 +464,7 @@ vec3 shade_local_surface(HitData h, MaterialResult m, vec3 N, vec3 V, bool p_is_
 	if (light_count > 0u) {
 		MaterialProperties material = material_properties_from_result(m);
 		vec3 hit_pos_offset = offset_ray_origin(h.hit_pos, h.geometry_normal);
-		lit += lights_evaluate_direct_lighting(hit_pos_offset, N, V, material,
+		lit += lights_evaluate_direct_lighting(hit_pos_offset, N, V, material, m.backlight,
 				rng_state, p_is_indirect, light_count, geometries[h.geometry_idx].layers);
 	}
 	return lit;
@@ -514,7 +517,9 @@ bool sample_surface_continuation(HitData h, MaterialResult m, vec3 N, vec3 V, in
 	ps.packed_bounces_flags = (brdf_type == DIFFUSE_TYPE)
 			? inc_diffuse_bounce(ps.packed_bounces_flags)
 			: inc_total_bounce(ps.packed_bounces_flags);
-	ps.hit_t = gl_HitTEXT;
+	if (brdf_type == DIFFUSE_TYPE || material.roughness > SINGULAR_ROUGHNESS_MAX) {
+		ps.packed_bounces_flags |= NON_SINGULAR_PATH_FLAG;
+	}
 	ps.offset_normal = h.geometry_normal;
 	ps.next_ray_dir = next_dir;
 	return true;
@@ -524,6 +529,8 @@ bool sample_surface_continuation(HitData h, MaterialResult m, vec3 N, vec3 V, in
 /// Also handles DLSS-RR G-buffer output on primary ray.
 void shade_and_bounce(HitData h, MaterialResult m) {
 	PathState ps = path_unpack(payload);
+	// Every surface bounds this ray segment, even if it cannot continue the path.
+	ps.hit_t = gl_HitTEXT;
 
 	vec3 V = -gl_WorldRayDirectionEXT;
 
@@ -562,8 +569,11 @@ void shade_and_bounce(HitData h, MaterialResult m) {
 			} else {
 				ps.radiance += contribution;
 			}
+			// Add/Sub don't attenuate the destination (peel_alpha above), but they
+			// still need a chance at their own indirect bounce so they can pick up
+			// GI/sky ambient like every other blend class does.
+			continuation_alpha = material_alpha;
 			if (bclass != RT_BLEND_CLASS_ADD && bclass != RT_BLEND_CLASS_SUB) {
-				continuation_alpha = material_alpha;
 				ps.radiance += branch_fog * continuation_alpha;
 			}
 
@@ -625,7 +635,6 @@ void shade_and_bounce(HitData h, MaterialResult m) {
 				ps.packed_bounces_flags |= PEEL_HAS_CONTINUATION_FLAG;
 			}
 		}
-		ps.hit_t = gl_HitTEXT;
 		path_pack(payload, ps);
 		return;
 	}

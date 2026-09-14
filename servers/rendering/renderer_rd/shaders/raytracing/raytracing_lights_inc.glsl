@@ -293,6 +293,7 @@ vec3 lights_evaluate_direct_lighting(
 		vec3 N,
 		vec3 V,
 		MaterialProperties material,
+		vec3 backlight,
 		inout uint rng_state,
 		bool is_indirect_bounce,
 		uint light_count,
@@ -388,13 +389,19 @@ vec3 lights_evaluate_direct_lighting(
 		vec3 brdf_diffuse, brdf_specular;
 		evalCombinedBRDFSeparate(N, L, V, material, brdf_diffuse, brdf_specular);
 
+		// Backlight/translucency: light "wraps around" from the far side of the
+		// surface. Nonzero exactly where NdotL<=0 would otherwise zero the diffuse
+		// term. Mirrors the rasterizer's (1/PI - diffuse_brdf_NL) * backlight formula.
+		float NdotL = dot(N, L);
+		vec3 backlight_term = backlight * max(0.0, 1.0 - clamp(NdotL, -1.0, 1.0)) * (1.0 / PI);
+
 		// Distance attenuation.
 		LightSample ls_atten;
 		ls_atten.distance_sq = dist_sq;
 		float atten = lights_get_attenuation(ls_atten, light.inv_max_range, light.attenuation) * spot_atten;
 
 		float spec_mul = lights_get_specular_multiplier(light.specular_amount, material.roughness);
-		vec3 brdf_value = brdf_diffuse + brdf_specular * spec_mul;
+		vec3 brdf_value = brdf_diffuse + brdf_specular * spec_mul + backlight_term;
 
 		float indirect_mul = is_indirect_bounce ? light.indirect_energy : 1.0;
 
@@ -409,7 +416,8 @@ vec3 lights_evaluate_direct_lighting(
 		vec3 L = lights_sample_cone(ls, u, light_pdf);
 
 		float NdotL = dot(N, L);
-		if (NdotL <= 0.0) {
+		bool has_backlight = any(greaterThan(backlight, vec3(0.0)));
+		if (NdotL <= 0.0 && !has_backlight) {
 			return vec3(0.0);
 		}
 
@@ -419,8 +427,10 @@ vec3 lights_evaluate_direct_lighting(
 		vec3 brdf_diffuse, brdf_specular;
 		evalCombinedBRDFSeparate(N, L, V, material, brdf_diffuse, brdf_specular);
 
+		vec3 backlight_term = has_backlight ? backlight * max(0.0, 1.0 - clamp(NdotL, -1.0, 1.0)) * (1.0 / PI) : vec3(0.0);
+
 		float spec_mul = lights_get_specular_multiplier(light.specular_amount, material.roughness);
-		vec3 brdf_value = brdf_diffuse + brdf_specular * spec_mul;
+		vec3 brdf_value = brdf_diffuse + brdf_specular * spec_mul + backlight_term;
 
 		float indirect_mul = is_indirect_bounce ? light.indirect_energy : 1.0;
 

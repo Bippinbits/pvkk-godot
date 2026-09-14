@@ -219,6 +219,11 @@
 			Number of ray samples cast per pixel per frame. Higher values reduce noise but increase GPU cost proportionally. When using a temporal denoiser such as DLSS Ray Reconstruction, a low sample count (1-2) is typically sufficient since the denoiser accumulates information across frames.
 			[b]Note:[/b] Only has an effect when [member pathtracing_enabled] is [code]true[/code].
 		</member>
+		<member name="pathtracing_sky_shader_enabled" type="bool" setter="set_pathtracing_sky_shader_enabled" getter="is_pathtracing_sky_shader_enabled" default="false">
+			If [code]true[/code], the sky shader is evaluated per-pixel into a screen-space buffer and sampled directly by camera rays, so the path-traced background matches the rasterized sky exactly. When [code]false[/code], camera rays fall back to the prefiltered radiance map, which is lower resolution and can lag behind time-animated sky shaders. Indirect rays always use the radiance map regardless of this setting.
+			[b]Note:[/b] This adds a full-screen sky pass, so it costs roughly as much as drawing the sky in the rasterizer. Only enable it for environments whose sky shader has detail that the radiance map cannot represent.
+			[b]Note:[/b] Only has an effect when [member pathtracing_enabled] is [code]true[/code].
+		</member>
 		<member name="reflected_light_source" type="int" setter="set_reflection_source" getter="get_reflection_source" enum="Environment.ReflectionSource" default="0">
 			The reflected (specular) light source.
 		</member>
@@ -546,6 +551,11 @@
 		</constant>
 		<constant name="RT_DEBUG_TRANSPARENCY_LAYERS" value="23" enum="PathtracingDebugMode">
 			Displays the transparency cost of the primary segment as a heatmap: green (no transparent hits), yellow (2 peeled layers), red (4 or more peeled layers).
+		</constant>
+		<constant name="RT_DEBUG_TIMING_HEATMAP" value="24" enum="PathtracingDebugMode">
+			Overlays a green (fast), cyan, purple (slow) tint on normal path tracing. Measures elapsed device clock ticks for each pixel's complete ray generation invocation, including all samples, bounces, transparency and hit/miss shading. Denoising, exposure and tone mapping run on the original radiance before the overlay is drawn.
+			Use [member ProjectSettings.rendering/pathtracing/debug_heatmap_max_ticks] to adjust the range and [member ProjectSettings.rendering/pathtracing/debug_heatmap_opacity] to adjust the tint strength. Timings include scheduling and traversal latency; they are relative GPU clock ticks, not portable time units or isolated shader instruction costs.
+			Requires Vulkan [code]VK_KHR_shader_clock[/code] with [code]shaderDeviceClock[/code] support. Unsupported devices render normal path tracing without the overlay. The timing texture is allocated only while this mode is active and is released when another debug mode is selected or path tracing is disabled.
 		</constant>
 		<constant name="FOG_MODE_EXPONENTIAL" value="0" enum="FogMode">
 			Use a physically-based fog model defined primarily by fog density.

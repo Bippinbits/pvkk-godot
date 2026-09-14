@@ -42,6 +42,10 @@
 
 #define RB_TEX_RAYTRACING SNAME("raytracing")
 #define RB_TEX_RT_DEPTH SNAME("rt_depth")
+#define RB_TEX_RT_SKY SNAME("rt_sky")
+
+#define RB_SCOPE_RT_TIMING SNAME("rt_timing")
+#define RB_TEX_RT_TIMING SNAME("ticks")
 
 #define RB_SCOPE_DLSS_RR SNAME("dlss_rr")
 #define RB_TEX_DLSS_RR_DIFFUSE_ALBEDO SNAME("diffuse_albedo")
@@ -57,8 +61,8 @@ namespace RendererSceneRenderImplementation {
 class RenderForwardClustered;
 class SceneShaderRaytracing;
 
-// Must match GLSL GeometryData (std430, 128 bytes).
-struct alignas(16) RT_GeometryData {
+// Must match GLSL GeometryData (std430, 144 bytes, 8-byte alignment).
+struct alignas(8) RT_GeometryData {
 	uint64_t vertex_buffer_address;
 	uint64_t attribute_buffer_address;
 	uint64_t index_buffer_address;
@@ -86,9 +90,14 @@ struct alignas(16) RT_GeometryData {
 	uint32_t prev_vertex_buffer_address_hi;
 	uint32_t layers; // VisualInstance3D render layers of the owning instance.
 	uint32_t instance_uniforms_ofs; // Per-instance shader uniforms offset in the global buffer.
-	uint32_t _pad[3];
+	uint32_t uv2_byte_offset;
+	uint32_t uv2_scale_packed;
+	uint32_t custom_data_primitive_divisor; // Source triangle count for merged instances; 0 for fixed address.
+	uint64_t custom_data_address;
+	uint32_t custom_data_stride; // Low 8 bits: stride in floats; upper 24 bits reserved, zero.
+	uint32_t _pad;
 };
-static_assert(sizeof(RT_GeometryData) == 128, "RT_GeometryData must be 128 bytes for std430");
+static_assert(sizeof(RT_GeometryData) == 144, "RT_GeometryData must be 144 bytes for std430");
 
 /// Per-instance motion data for velocity computation (matches GLSL InstanceMotionData, 48 bytes).
 struct RT_InstanceMotionData {
@@ -438,6 +447,8 @@ struct RTViewportState {
 	RenderSceneBuffersRD *render_buffers = nullptr;
 	RID tlas;
 	uint32_t tlas_max_instances = 0;
+	RID tlas_transparent;
+	uint32_t tlas_transparent_max_instances = 0;
 
 	// Owned per state: the raster path's recycled scene UBO slots can race a
 	// later pass's buffer_update against this state's in-flight RT dispatch.
@@ -447,6 +458,7 @@ struct RTViewportState {
 
 	RID geometry_buffer;
 	uint32_t geometry_buffer_capacity = 0;
+	LocalVector<RID> custom_data_buffers; // Non-owning BDA read dependencies for this viewport's geometry.
 	RID material_buffer;
 	uint32_t material_buffer_capacity = 0;
 	RID motion_index_buffer;
@@ -459,6 +471,10 @@ struct RTViewportState {
 	RID scene_uniform_set;
 
 	uint32_t frame_counter = 0;
+
+	// Set per frame: the screen-space sky texture was drawn and primary-ray
+	// misses should read it instead of the prefiltered radiance octmap.
+	bool sky_screen_enabled = false;
 };
 
 class RenderRaytracing {
@@ -540,8 +556,18 @@ class RenderRaytracing {
 			sbt_offsets.clear();
 			custom_indices.clear();
 		}
+
+		void push_copy(const RTInstanceArrays &p_src, uint32_t p_index, uint8_t p_mask) {
+			blass.push_back(p_src.blass[p_index]);
+			transforms.push_back(p_src.transforms[p_index]);
+			flags.push_back(p_src.flags[p_index]);
+			masks.push_back(p_mask);
+			sbt_offsets.push_back(p_src.sbt_offsets[p_index]);
+			custom_indices.push_back(p_src.custom_indices[p_index]);
+		}
 	};
 	RTInstanceArrays tlas_instances;
+	RTInstanceArrays tlas_transparent_instances;
 
 	// Shared render buffers still get one state per viewport/world.
 	HashMap<RTViewportStateKey, RTViewportState *> viewport_states;
@@ -631,6 +657,13 @@ public:
 	bool rt_has_depth_texture(RenderSceneBuffersRD *p_render_buffers) const;
 	RID rt_get_depth_texture(RenderSceneBuffersRD *p_render_buffers) const;
 
+	// Screen-space sky, drawn before the trace so primary-ray misses can read
+	// the real sky shader instead of the prefiltered radiance octmap.
+	void rt_ensure_sky_texture(RenderSceneBuffersRD *p_render_buffers);
+	bool rt_has_sky_texture(RenderSceneBuffersRD *p_render_buffers) const;
+	RID rt_get_sky_texture(RenderSceneBuffersRD *p_render_buffers) const;
+	RID rt_get_sky_framebuffer(RenderSceneBuffersRD *p_render_buffers) const;
+
 	// DLSS Ray Reconstruction guide buffers (stored on the render buffers).
 	void dlss_rr_ensure_buffers(RenderSceneBuffersRD *p_render_buffers);
 	void dlss_rr_free_buffers(RenderSceneBuffersRD *p_render_buffers);
@@ -640,7 +673,7 @@ public:
 	RID dlss_rr_get_normal_roughness(RenderSceneBuffersRD *p_render_buffers) const;
 	RID dlss_rr_get_specular_hit_dist(RenderSceneBuffersRD *p_render_buffers) const;
 
-	void register_raytracing_buffer_dependencies(RD::RaytracingListID p_list);
+	void register_raytracing_buffer_dependencies(RD::RaytracingListID p_list, const RTViewportState *p_state);
 
 	SceneShaderRaytracing *get_shader() const { return shader; }
 

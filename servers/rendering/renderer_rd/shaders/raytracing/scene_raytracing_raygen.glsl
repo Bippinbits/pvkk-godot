@@ -6,6 +6,21 @@
 
 #VERSION_DEFINES
 
+#ifdef RT_TIMING_ENABLED
+#extension GL_EXT_shader_realtime_clock : require
+layout(set = 0, binding = 34, r32f) uniform writeonly image2D timing_image;
+
+void store_path_timing(ivec2 pixel, uvec2 start_clock) {
+	uvec2 end_clock = clockRealtime2x32EXT();
+	// Subtract before converting to float, including the low-word borrow.
+	// Device clocks remain coherent across trace calls and SER migration.
+	uvec2 elapsed = uvec2(end_clock.x - start_clock.x,
+			end_clock.y - start_clock.y - uint(end_clock.x < start_clock.x));
+	float ticks = float(elapsed.y) * 4294967296.0 + float(elapsed.x);
+	imageStore(timing_image, pixel, vec4(ticks));
+}
+#endif
+
 // clang-format off
 #include "raytracing_inc.glsl"
 #include "../scene_data_inc.glsl"
@@ -26,6 +41,7 @@
 
 layout(set = 0, binding = 0, rgba32f) uniform image2D image;
 layout(set = 0, binding = 1) uniform accelerationStructureEXT tlas;
+layout(set = 0, binding = 31) uniform accelerationStructureEXT tlas_transparent;
 layout(set = 0, binding = 29) uniform texture2D prepass_depth_texture;
 layout(set = 0, binding = 30) uniform texture2D prepass_color_texture;
 
@@ -63,6 +79,9 @@ void continuation_reservoir_add(inout ContinuationReservoir r, PathState candida
 }
 
 void main() {
+#ifdef RT_TIMING_ENABLED
+	uvec2 start_clock = clockRealtime2x32EXT();
+#endif
 	uvec2 pixel = gl_LaunchIDEXT.xy;
 	const vec2 pixel_center = vec2(pixel) + vec2(0.5);
 	const vec2 in_uv = pixel_center / vec2(gl_LaunchSizeEXT.xy);
@@ -81,7 +100,11 @@ void main() {
 	// stop at its depth, and on a primary miss its color/velocity/guides win the pixel.
 	float composite_t_max = 10000.0;
 	float composite_prepass_depth = 0.0;
-	if ((RT_FLAGS & RT_FLAG_DEPTH_COMPOSITE_ENABLED) != 0u) {
+	// The co-tenant renders the whole shared target before us, so on a primary miss
+	// its color is the correct background whatever its depth. Testing the depth here
+	// would exclude its sky, which sits at the reverse-Z far value of 0.0.
+	bool composite_enabled = (RT_FLAGS & RT_FLAG_DEPTH_COMPOSITE_ENABLED) != 0u;
+	if (composite_enabled) {
 		composite_prepass_depth = texelFetch(sampler2D(prepass_depth_texture, SAMPLER_NEAREST_CLAMP), ivec2(pixel), 0).r;
 		if (composite_prepass_depth > 0.0) {
 			vec4 prepass_pos = scene_data_block.data.inv_projection_matrix * vec4(d.x, d.y, composite_prepass_depth, 1.0);
@@ -120,21 +143,14 @@ void main() {
 			vec3 throughput_entry = ps.throughput;
 			vec3 radiance_pre = ps.radiance;
 			uint flags_entry = ps.packed_bounces_flags;
+			ps.hit_t = -1.0; // A miss must not retain the previous segment's hit distance.
 			path_pack(payload, ps);
 			float t_far = (bounce == 0u) ? composite_t_max : 10000.0;
 
 #ifdef USE_SER
 			hitObjectNV hitObject;
 			hitObjectTraceRayNV(hitObject, tlas, RT_RAY_FLAGS, RT_VIS_MASK, 0, 0, 0, ray_origin, 0.001, ray_dir, t_far, 0);
-
-			// Reorder with a coherence hint that has 8 bits
-			uint hint = 0;
-			if (hitObjectIsHitNV(hitObject)) {
-				// TODO: This hint barely does anything. There is a lot of untapped potential here.
-				hint = hitObjectGetInstanceIdNV(hitObject);
-			}
-			reorderThreadNV(hitObject, hint, 8);
-
+			reorderThreadNV(hitObject);
 			hitObjectExecuteShaderNV(hitObject, 0);
 #else
 			traceRayEXT(tlas, RT_RAY_FLAGS, RT_VIS_MASK, 0, 0, 0, ray_origin, 0.001, ray_dir, t_far, 0);
@@ -171,7 +187,15 @@ void main() {
 						payload.scene_depth = composite_prepass_depth;
 					}
 				}
-				float seg_end = opaque_terminated ? t_far : ps.hit_t;
+				// Termination only means there is no next bounce. Unshaded surfaces
+				// and hits at the bounce limit still occlude transparency behind them.
+				float seg_end = ps.hit_t >= 0.0 ? min(ps.hit_t, t_far) : t_far;
+				float indirect_range = get_rt_param(RT_PARAM_TRANSPARENCY_INDIRECT_RANGE);
+				float indirect_fade = get_rt_param(RT_PARAM_TRANSPARENCY_INDIRECT_FADE);
+				bool range_limited = bounce > 0u && !is_singular_path(flags_entry) && indirect_range > 0.0;
+				if (range_limited) {
+					seg_end = min(seg_end, indirect_range);
+				}
 				uint peel_hits = 0u;
 				vec3 throughput_after_opaque = ps.throughput;
 				vec3 radiance_after_opaque = ps.radiance;
@@ -180,9 +204,11 @@ void main() {
 				uint continuation_rng = ps.rng_state;
 
 				float T_total = 1.0;
-				uint layer_cap = min(uint(get_rt_param(RT_PARAM_MAX_TRANSPARENCY_LAYERS)), 64u);
+				uint layer_cap = (bounce == 0u || is_singular_path(flags_entry))
+						? min(uint(get_rt_param(RT_PARAM_MAX_TRANSPARENCY_LAYERS)), 64u)
+						: 1u;
 				float peel_tmin = 0.001;
-				for (uint l = 0u; l < layer_cap && T_total > (1.0 / 256.0); l++) {
+				for (uint l = 0u; l < layer_cap && T_total > (1.0 / 256.0) && peel_tmin < seg_end; l++) {
 					ps.hit_t = -1.0;
 					ps.packed_bounces_flags = flags_entry | PEEL_RAY_FLAG;
 					if (l == 0u) {
@@ -190,21 +216,28 @@ void main() {
 					}
 					ps.rng_state = continuation_rng;
 					ps.throughput = throughput_entry * T_total;
+					vec3 radiance_before_layer = ps.radiance;
 					path_pack(payload, ps);
-					traceRayEXT(tlas, RT_RAY_FLAGS, RT_TMASK_TRANSPARENT,
+					traceRayEXT(tlas_transparent, RT_RAY_FLAGS, RT_TMASK_TRANSPARENT,
 							0, 0, 0, ray_origin, peel_tmin, ray_dir, seg_end, 0);
 					ps = path_unpack(payload);
 					if (ps.hit_t < 0.0) {
 						break;
 					}
 					continuation_rng = ps.rng_state;
+					float layer_weight = 1.0;
+					if (range_limited && indirect_fade > 0.0) {
+						layer_weight = 1.0 - smoothstep(indirect_range - indirect_fade, indirect_range, ps.hit_t);
+						ps.radiance = radiance_before_layer + (ps.radiance - radiance_before_layer) * layer_weight;
+					}
 					if ((ps.packed_bounces_flags & PEEL_HAS_CONTINUATION_FLAG) != 0u) {
 						PathState layer_continuation = ps;
 						layer_continuation.packed_bounces_flags &=
 								~(PEEL_RAY_FLAG | PEEL_FIRST_LAYER_FLAG | PEEL_HAS_CONTINUATION_FLAG | PEEL_DEPTH_BARRIER_HIT_FLAG);
+						layer_continuation.throughput *= layer_weight;
 						continuation_reservoir_add(continuation, layer_continuation, continuation_rng);
 					}
-					float a = get_peel_alpha(ps.packed_bounces_flags);
+					float a = get_peel_alpha(ps.packed_bounces_flags) * layer_weight;
 					T_total *= (1.0 - a);
 					peel_hits++;
 					// Advance by one representable positive float to avoid
@@ -223,7 +256,7 @@ void main() {
 				} else {
 					vec3 peel_sum = ps.radiance - radiance_after_opaque;
 					vec3 segment_radiance = radiance_after_opaque - radiance_pre;
-					if (bounce == 0u && composite_prepass_depth > 0.0 &&
+					if (bounce == 0u && composite_enabled &&
 							is_primary_miss(opaque_continuation.packed_bounces_flags)) {
 						vec3 composite_color = texelFetch(
 								sampler2D(prepass_color_texture, SAMPLER_NEAREST_CLAMP), ivec2(pixel), 0).rgb;
@@ -265,7 +298,7 @@ void main() {
 		}
 
 		total_radiance += ps.radiance;
-		composite_passthrough = composite_passthrough || (composite_prepass_depth > 0.0 && is_primary_miss(ps.packed_bounces_flags));
+		composite_passthrough = composite_passthrough || (composite_enabled && is_primary_miss(ps.packed_bounces_flags));
 	}
 
 #ifdef RT_DEBUG_ENABLED
@@ -284,12 +317,18 @@ void main() {
 		// leave its velocity and DLSS-RR guides untouched.
 		imageStore(image, ivec2(pixel), texelFetch(sampler2D(prepass_color_texture, SAMPLER_NEAREST_CLAMP), ivec2(pixel), 0));
 		imageStore(rt_depth_image, ivec2(pixel), vec4(composite_prepass_depth));
+#ifdef RT_TIMING_ENABLED
+		store_path_timing(ivec2(pixel), start_clock);
+#endif
 		return;
 	}
 
 	vec3 final_radiance = total_radiance / float(samples_per_pixel);
 
 	imageStore(image, ivec2(pixel), vec4(final_radiance, 1.0));
+#ifdef RT_TIMING_ENABLED
+	store_path_timing(ivec2(pixel), start_clock);
+#endif
 }
 
 #[miss]
@@ -313,6 +352,7 @@ void main() {
 layout(location = 0) rayPayloadInEXT PathPayload payload;
 
 layout(set = 0, binding = 29) uniform texture2D prepass_depth_texture;
+layout(set = 0, binding = 33) uniform texture2D sky_screen_texture;
 
 #ifdef USE_RADIANCE_OCTMAP_ARRAY
 
@@ -366,9 +406,9 @@ void main() {
 	bool composite_passthrough = false;
 	if (get_total_bounces(ps.packed_bounces_flags) == 0u) {
 		ps.packed_bounces_flags = set_primary_miss(ps.packed_bounces_flags);
-		if ((RT_FLAGS & RT_FLAG_DEPTH_COMPOSITE_ENABLED) != 0u) {
-			composite_passthrough = texelFetch(sampler2D(prepass_depth_texture, radiance_sampler), ivec2(gl_LaunchIDEXT.xy), 0).r > 0.0;
-		}
+		// Matches raygen: a primary miss always yields the pixel to the co-tenant,
+		// including where the co-tenant left far depth (its own sky).
+		composite_passthrough = (RT_FLAGS & RT_FLAG_DEPTH_COMPOSITE_ENABLED) != 0u;
 	}
 
 #ifdef RT_DEBUG_ENABLED
@@ -401,27 +441,37 @@ void main() {
 		}
 	}
 
-	mat3 camera_basis = mat3(scene_data_block.data.inv_view_matrix);
-	mat3 world_to_sky = scene_data_block.data.radiance_inverse_xform * camera_basis;
-	vec3 sky_dir = world_to_sky * gl_WorldRayDirectionEXT;
+	// A camera ray leaves along the pixel it was launched from, and blend-alpha
+	// peels do not refract, so the launch ID still indexes the right texel even
+	// behind transparency. The screen-space sky is the same shader the rasterizer
+	// runs and comes out of sky.glsl already fogged and in render-buffer
+	// luminance, so it takes neither the IBL normalization nor the fog mix below.
+	vec3 sky_color;
+	if (get_rt_param(RT_PARAM_SKY_SCREEN_ENABLED) > 0.5 && get_total_bounces(ps.packed_bounces_flags) == 0u) {
+		sky_color = texelFetch(sampler2D(sky_screen_texture, radiance_sampler), ivec2(gl_LaunchIDEXT.xy), 0).rgb;
+	} else {
+		mat3 camera_basis = mat3(scene_data_block.data.inv_view_matrix);
+		mat3 world_to_sky = scene_data_block.data.radiance_inverse_xform * camera_basis;
+		vec3 sky_dir = world_to_sky * gl_WorldRayDirectionEXT;
 
-	vec2 border = vec2(scene_data_block.data.radiance_border_size,
-			1.0 - scene_data_block.data.radiance_border_size * 2.0);
-	vec2 sky_uv = vec3_to_oct_with_border(sky_dir, border);
+		vec2 border = vec2(scene_data_block.data.radiance_border_size,
+				1.0 - scene_data_block.data.radiance_border_size * 2.0);
+		vec2 sky_uv = vec3_to_oct_with_border(sky_dir, border);
 
-	vec3 sky_color = radiance_octmap_sample(sky_uv, 0.0);
-	sky_color *= scene_data_block.data.IBL_exposure_normalization;
+		sky_color = radiance_octmap_sample(sky_uv, 0.0);
+		sky_color *= scene_data_block.data.IBL_exposure_normalization;
 
-	if ((RT_FLAGS & RT_FLAG_FOG_ENABLED) != 0u) {
-		vec3 fog_color = scene_data_block.data.fog_light_color;
+		if ((RT_FLAGS & RT_FLAG_FOG_ENABLED) != 0u) {
+			vec3 fog_color = scene_data_block.data.fog_light_color;
 
-		if (scene_data_block.data.fog_aerial_perspective > 0.0) {
-			vec3 sky_fog = radiance_octmap_sample(sky_uv, 1.0 / MAX_ROUGHNESS_LOD);
-			sky_fog *= scene_data_block.data.IBL_exposure_normalization;
-			fog_color = mix(fog_color, sky_fog, scene_data_block.data.fog_aerial_perspective);
+			if (scene_data_block.data.fog_aerial_perspective > 0.0) {
+				vec3 sky_fog = radiance_octmap_sample(sky_uv, 1.0 / MAX_ROUGHNESS_LOD);
+				sky_fog *= scene_data_block.data.IBL_exposure_normalization;
+				fog_color = mix(fog_color, sky_fog, scene_data_block.data.fog_aerial_perspective);
+			}
+
+			sky_color = mix(sky_color, fog_color, scene_data_block.data.fog_sky_affect);
 		}
-
-		sky_color = mix(sky_color, fog_color, scene_data_block.data.fog_sky_affect);
 	}
 
 #ifdef DLSS_RR_ENABLED
@@ -570,6 +620,7 @@ void main() {
 	uint rt_geometry_idx = h.geometry_idx;
 	vec3 rt_hit_pos = h.hit_pos;
 	vec2 rt_uv = h.uv;
+	vec2 rt_uv2 = h.uv2;
 	vec4 rt_color = h.color;
 	vec3 rt_normal = h.geometry_normal;
 	vec3 rt_tangent = h.tangent;
@@ -586,6 +637,7 @@ void main() {
 	m.metalness = metallic;
 	m.specular = specular;
 	m.emissive = emission * scene_data_block.data.emissive_exposure_normalization;
+	m.backlight = backlight;
 	// view space -> world space
 	mat3 view_to_world = mat3(inv_view_matrix);
 	m.normal = normalize(view_to_world * normal);
@@ -612,7 +664,7 @@ void main() {
 			vec3 V = -gl_WorldRayDirectionEXT;
 			float NdotV = max(dot(m.normal, V), 0.0001);
 			vec3 orm = vec3(1.0, m.roughness, m.metalness);
-			debug_visualize(VIS_MODE, h.geometry_normal, m.normal, normal_map,
+			debug_visualize(VIS_MODE, h.is_front_face, h.geometry_normal, m.normal, normal_map,
 					world_tangent, world_bitangent, h.uv, m.albedo, orm, m.metalness, m.roughness, m.specular, m.emissive, V, NdotV);
 			return;
 		}
@@ -661,6 +713,7 @@ void main() {
 	m.specular = mat.specular;
 	m.emissive = emissive;
 	m.normal = final_normal;
+	m.backlight = vec3(0.0); // TODO: wire up BaseMaterial3D's "Back Lighting" for RT (raster-only today).
 
 	// Proximity/distance fade (BaseMaterial3D feature, mirrors raster).
 	if ((mat.flags & (RT_MAT_FLAG_PROXIMITY_FADE | RT_MAT_FLAG_DISTANCE_FADE)) != 0u) {
@@ -691,7 +744,7 @@ void main() {
 			vec3 V = -gl_WorldRayDirectionEXT;
 			float NdotV = max(dot(m.normal, V), 0.0001);
 			vec2 debug_uv = muv.triplanar ? muv.triplanar_pos.xy : muv.uv;
-			debug_visualize(VIS_MODE, h.geometry_normal, final_normal, tangent_space_normal,
+			debug_visualize(VIS_MODE, h.is_front_face, h.geometry_normal, final_normal, tangent_space_normal,
 					h.tangent, h.bitangent, debug_uv, albedo, orm, metalness, roughness, mat.specular, emissive, V, NdotV);
 			return;
 		}
@@ -784,6 +837,7 @@ void main() {
 	// Compute hit data inline (cannot include closest_hit_common_inc here).
 	uint rt_geometry_idx = geometry_idx;
 	vec2 rt_uv = fetch_uv(geom, i0, i1, i2, bary);
+	vec2 rt_uv2 = fetch_uv2(geom, i0, i1, i2, bary);
 	TBNResult ah_tbn = fetch_tbn(geom, i0, i1, i2, bary);
 
 	mat3 model_rotation = mat3(gl_ObjectToWorldEXT);
@@ -796,7 +850,7 @@ void main() {
 	vec3 rt_tangent = normalize(normal_matrix * ah_tbn.tangent);
 	vec3 rt_bitangent = cross(rt_normal, rt_tangent) * ah_tbn.bitangent_sign;
 
-	bool rt_front_face = (gl_HitKindEXT == gl_HitKindFrontFacingTriangleEXT);
+	bool rt_front_face = (dot(rt_normal, -gl_WorldRayDirectionEXT) > 0.0);
 	if (!rt_front_face) {
 		rt_normal = -rt_normal;
 	}
@@ -827,7 +881,8 @@ void main() {
 	}
 #endif
 
-	if ((mat.flags & RT_MAT_BLEND_CLASS_MASK) == RT_BLEND_CLASS_PREMULT && hit_alpha > 1e-6) {
+	uint blend_class = (mat.flags & RT_MAT_BLEND_CLASS_MASK) >> RT_MAT_BLEND_CLASS_SHIFT;
+	if (blend_class == RT_BLEND_CLASS_PREMULT && hit_alpha > 1e-6) {
 		hit_tint = clamp(hit_tint / hit_alpha, vec3(0.0), vec3(1.0));
 	}
 
@@ -838,7 +893,15 @@ void main() {
 	} else if (!transparent && hit_alpha < 0.5) {
 		ignoreIntersectionEXT;
 	}
-
+	// Alpha-0 texels of Mix/OIT/Add/Sub layers contribute nothing; skip them so
+	// they don't spend a peel layer or take the first-layer depth/guide slot
+	// from what's behind (glyph hull in front of its outline). Premult and Mul
+	// carry light at alpha 0; depth_draw_always keeps raster's occlude-at-zero.
+	if (transparent && hit_alpha < (1.0 / 255.0) &&
+			blend_class != RT_BLEND_CLASS_PREMULT && blend_class != RT_BLEND_CLASS_MUL &&
+			(mat.flags & RT_MAT_FLAG_DEPTH_DRAW_ALWAYS) == 0u) {
+		ignoreIntersectionEXT;
+	}
 	// Transparent shadow candidates use stochastic coverage. Surviving rays
 	// accumulate a colored filter in the existing throughput payload.
 	if (transparent && is_shadow_ray(payload.packed_bounces_flags)) {

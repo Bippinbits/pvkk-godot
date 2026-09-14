@@ -323,6 +323,7 @@ private:
 	MSAA msaa_3d = MSAA_DISABLED;
 	ScreenSpaceAA screen_space_aa = SCREEN_SPACE_AA_DISABLED;
 	bool use_taa = false;
+	bool use_pathtracing = true;
 
 	Scaling3DMode scaling_3d_mode = SCALING_3D_MODE_BILINEAR;
 	float scaling_3d_scale = 1.0;
@@ -587,6 +588,9 @@ public:
 
 	void set_use_taa(bool p_use_taa);
 	bool is_using_taa() const;
+
+	void set_use_pathtracing(bool p_use_pathtracing);
+	bool is_using_pathtracing() const;
 
 	void set_use_oversampling(bool p_oversampling);
 	bool is_using_oversampling() const;

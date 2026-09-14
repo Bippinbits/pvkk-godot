@@ -254,6 +254,8 @@ public:
 		bool uses_particle_trails = false;
 		bool uses_normal_map = false;
 		bool uses_bent_normal_map = false;
+		bool uses_msdf = false;
+		bool uses_vertex_color = false; // Reads COLOR; HG0 has no vertex color, so Label3D/Sprite3D modulate needs the custom hit group
 		bool wireframe = false;
 
 		bool unshaded = false;
@@ -393,6 +395,7 @@ public:
 
 		virtual void set_code(const String &p_Code) override;
 		virtual void set_code_rt(const String &p_code_rt) override;
+		virtual bool requires_custom_rt_hit_group() const override;
 
 		virtual bool is_animated() const override;
 		virtual bool casts_shadows() const override;
