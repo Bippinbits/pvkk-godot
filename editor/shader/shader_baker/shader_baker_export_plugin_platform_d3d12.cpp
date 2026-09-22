@@ -46,8 +46,17 @@ RenderingShaderContainerFormat *ShaderBakerExportPluginPlatformD3D12::create_sha
 	return shader_container_format_d3d12;
 }
 
-bool ShaderBakerExportPluginPlatformD3D12::matches_driver(const String &p_driver) {
-	return p_driver == "d3d12";
+String ShaderBakerExportPluginPlatformD3D12::get_driver() const {
+	return "d3d12";
+}
+
+bool ShaderBakerExportPluginPlatformD3D12::should_run(const Ref<EditorExportPreset> &p_preset, const String &p_project_driver) {
+	if (p_project_driver == get_driver()) {
+		return true;
+	}
+
+	const StringName export_d3d12 = "application/export_d3d12";
+	return p_preset->has(export_d3d12) && int(p_preset->get(export_d3d12)) == 1;
 }
 
 ShaderBakerExportPluginPlatformD3D12 ::~ShaderBakerExportPluginPlatformD3D12() {

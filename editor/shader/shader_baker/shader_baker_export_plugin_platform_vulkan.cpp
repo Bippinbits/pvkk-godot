@@ -36,6 +36,6 @@ RenderingShaderContainerFormat *ShaderBakerExportPluginPlatformVulkan::create_sh
 	return memnew(RenderingShaderContainerFormatVulkan);
 }
 
-bool ShaderBakerExportPluginPlatformVulkan::matches_driver(const String &p_driver) {
-	return p_driver == "vulkan";
+String ShaderBakerExportPluginPlatformVulkan::get_driver() const {
+	return "vulkan";
 }

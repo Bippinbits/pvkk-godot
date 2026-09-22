@@ -56,34 +56,44 @@ bool ShaderBakerExportPlugin::_is_active(const Vector<String> &p_features) const
 	return RendererSceneRenderRD::get_singleton() != nullptr && RendererRD::MaterialStorage::get_singleton() != nullptr && p_features.has("shader_baker");
 }
 
-bool ShaderBakerExportPlugin::_initialize_container_format(const Ref<EditorExportPlatform> &p_platform, const Ref<EditorExportPreset> &p_preset) {
-	shader_container_driver = p_preset->get_project_setting("rendering/rendering_device/driver");
-	ERR_FAIL_COND_V_MSG(shader_container_driver.is_empty(), false, "Invalid `rendering/rendering_device/driver` setting, disabling shader baking.");
+bool ShaderBakerExportPlugin::_initialize_container_formats(const Ref<EditorExportPlatform> &p_platform, const Ref<EditorExportPreset> &p_preset) {
+	String project_driver = p_preset->get_project_setting("rendering/rendering_device/driver");
+	ERR_FAIL_COND_V_MSG(project_driver.is_empty(), false, "Invalid `rendering/rendering_device/driver` setting, disabling shader baking.");
 
 	for (Ref<ShaderBakerExportPluginPlatform> platform : platforms) {
-		if (platform->matches_driver(shader_container_driver)) {
-			shader_container_format = platform->create_shader_container_format(p_platform, p_preset);
-			ERR_FAIL_NULL_V_MSG(shader_container_format, false, "Unable to create shader container format for the export platform.");
-			return true;
+		if (!platform->should_run(p_preset, project_driver)) {
+			continue;
+		}
+
+		ActiveDriver active_driver;
+		active_driver.container_format = platform->create_shader_container_format(p_platform, p_preset);
+		ERR_FAIL_NULL_V_MSG(active_driver.container_format, false, "Unable to create shader container format for the export platform.");
+		active_driver.driver = platform->get_driver();
+		active_drivers.push_back(active_driver);
+	}
+
+	return !active_drivers.is_empty();
+}
+
+void ShaderBakerExportPlugin::_cleanup_container_formats() {
+	for (ActiveDriver &active_driver : active_drivers) {
+		if (active_driver.container_format != nullptr) {
+			memdelete(active_driver.container_format);
+			active_driver.container_format = nullptr;
 		}
 	}
 
-	return false;
+	active_drivers.clear();
 }
 
-void ShaderBakerExportPlugin::_cleanup_container_format() {
-	if (shader_container_format != nullptr) {
-		memdelete(shader_container_format);
-		shader_container_format = nullptr;
-	}
-}
+bool ShaderBakerExportPlugin::_initialize_cache_directories() {
+	for (ActiveDriver &active_driver : active_drivers) {
+		active_driver.cache_export_path = get_export_base_path().path_join("shader_baker").path_join(shader_cache_platform_name).path_join(active_driver.driver);
 
-bool ShaderBakerExportPlugin::_initialize_cache_directory() {
-	shader_cache_export_path = get_export_base_path().path_join("shader_baker").path_join(shader_cache_platform_name).path_join(shader_container_driver);
-
-	if (!DirAccess::dir_exists_absolute(shader_cache_export_path)) {
-		Error err = DirAccess::make_dir_recursive_absolute(shader_cache_export_path);
-		ERR_FAIL_COND_V_MSG(err != OK, false, "Can't create shader cache folder for exporting.");
+		if (!DirAccess::dir_exists_absolute(active_driver.cache_export_path)) {
+			Error err = DirAccess::make_dir_recursive_absolute(active_driver.cache_export_path);
+			ERR_FAIL_COND_V_MSG(err != OK, false, "Can't create shader cache folder for exporting.");
+		}
 	}
 
 	return true;
@@ -94,7 +104,7 @@ bool ShaderBakerExportPlugin::_begin_customize_resources(const Ref<EditorExportP
 		return false;
 	}
 
-	if (!_initialize_container_format(p_platform, get_export_preset())) {
+	if (!_initialize_container_formats(p_platform, get_export_preset())) {
 		return false;
 	}
 
@@ -116,6 +126,10 @@ bool ShaderBakerExportPlugin::_begin_customize_resources(const Ref<EditorExportP
 	to_hash.append(GODOT_VERSION_HASH);
 	to_hash.append("[Renderer]");
 	to_hash.append(shader_cache_renderer_name);
+	to_hash.append("[Drivers]");
+	for (const ActiveDriver &active_driver : active_drivers) {
+		to_hash.append(active_driver.driver);
+	}
 	customization_configuration_hash = to_hash.as_string().hash64();
 
 	BitField<RenderingShaderLibrary::FeatureBits> renderer_features = {};
@@ -171,7 +185,7 @@ bool ShaderBakerExportPlugin::_begin_customize_scenes(const Ref<EditorExportPlat
 		return false;
 	}
 
-	if (shader_container_format == nullptr) {
+	if (active_drivers.is_empty()) {
 		// Resource customization failed to initialize.
 		return false;
 	}
@@ -180,7 +194,7 @@ bool ShaderBakerExportPlugin::_begin_customize_scenes(const Ref<EditorExportPlat
 }
 
 void ShaderBakerExportPlugin::_end_customize_resources() {
-	if (!_initialize_cache_directory()) {
+	if (!_initialize_cache_directories()) {
 		return;
 	}
 
@@ -224,7 +238,7 @@ void ShaderBakerExportPlugin::_end_customize_resources() {
 			PackedByteArray cache_file_bytes = ShaderRD::save_shader_cache_bytes(group_item.variants, work_result.variant_data);
 			add_file(shader_cache_user_dir.path_join(group_item.cache_path), cache_file_bytes, false);
 
-			String cache_file_path = shader_cache_export_path.path_join(group_item.cache_path);
+			String cache_file_path = active_drivers[group_item.driver_index].cache_export_path.path_join(group_item.cache_path);
 			if (!DirAccess::exists(cache_file_path)) {
 				DirAccess::make_dir_recursive_absolute(cache_file_path.get_base_dir());
 			}
@@ -237,39 +251,40 @@ void ShaderBakerExportPlugin::_end_customize_resources() {
 	}
 
 	if (!tasks_cancelled) {
-		String file_cache_path = shader_cache_export_path.path_join("file_cache");
-		Ref<FileAccess> cache_list_access = FileAccess::open(file_cache_path, FileAccess::READ_WRITE);
-		if (cache_list_access.is_null()) {
-			cache_list_access = FileAccess::open(file_cache_path, FileAccess::WRITE);
-		}
+		for (ActiveDriver &active_driver : active_drivers) {
+			String file_cache_path = active_driver.cache_export_path.path_join("file_cache");
+			Ref<FileAccess> cache_list_access = FileAccess::open(file_cache_path, FileAccess::READ_WRITE);
+			if (cache_list_access.is_null()) {
+				cache_list_access = FileAccess::open(file_cache_path, FileAccess::WRITE);
+			}
 
-		if (cache_list_access.is_valid()) {
-			String cache_list_line;
-			while (cache_list_line = cache_list_access->get_line(), !cache_list_line.is_empty()) {
-				// Only add if it wasn't already added.
-				if (!shader_paths_processed.has(cache_list_line)) {
-					PackedByteArray cache_file_bytes = FileAccess::get_file_as_bytes(shader_cache_export_path.path_join(cache_list_line));
-					if (!cache_file_bytes.is_empty()) {
-						add_file(shader_cache_user_dir.path_join(cache_list_line), cache_file_bytes, false);
+			if (cache_list_access.is_valid()) {
+				String cache_list_line;
+				while (cache_list_line = cache_list_access->get_line(), !cache_list_line.is_empty()) {
+					// Only add if it wasn't already added.
+					if (!active_driver.shader_paths_processed.has(cache_list_line)) {
+						PackedByteArray cache_file_bytes = FileAccess::get_file_as_bytes(active_driver.cache_export_path.path_join(cache_list_line));
+						if (!cache_file_bytes.is_empty()) {
+							add_file(shader_cache_user_dir.path_join(cache_list_line), cache_file_bytes, false);
+						}
 					}
+
+					active_driver.shader_paths_processed.erase(cache_list_line);
 				}
 
-				shader_paths_processed.erase(cache_list_line);
-			}
+				for (const String &shader_path : active_driver.shader_paths_processed) {
+					cache_list_access->store_line(shader_path);
+				}
 
-			for (const String &shader_path : shader_paths_processed) {
-				cache_list_access->store_line(shader_path);
+				cache_list_access->close();
 			}
-
-			cache_list_access->close();
 		}
 	}
 
-	shader_paths_processed.clear();
 	shader_work_results.clear();
 	shader_group_items.clear();
 
-	_cleanup_container_format();
+	_cleanup_container_formats();
 }
 
 Ref<Resource> ShaderBakerExportPlugin::_customize_resource(const Ref<Resource> &p_resource, const String &p_path) {
@@ -371,52 +386,57 @@ uint64_t ShaderBakerExportPlugin::_get_customization_configuration_hash() const 
 void ShaderBakerExportPlugin::_customize_shader_version(ShaderRD *p_shader, RID p_version) {
 	const int64_t variant_count = p_shader->get_variant_count();
 	const int64_t group_count = p_shader->get_group_count();
-	LocalVector<ShaderGroupItem> group_items;
-	group_items.resize(group_count);
+	for (uint32_t driver_index = 0; driver_index < active_drivers.size(); driver_index++) {
+		ActiveDriver &active_driver = active_drivers[driver_index];
+		LocalVector<ShaderGroupItem> group_items;
+		group_items.resize(group_count);
 
-	RBSet<uint32_t> groups_to_compile;
-	for (int64_t i = 0; i < group_count; i++) {
-		if (!p_shader->is_group_enabled(i)) {
-			continue;
+		RBSet<uint32_t> groups_to_compile;
+		for (int64_t i = 0; i < group_count; i++) {
+			if (!p_shader->is_group_enabled(i)) {
+				continue;
+			}
+
+			String cache_path = p_shader->version_get_cache_file_relative_path(p_version, i, active_driver.driver);
+			if (active_driver.shader_paths_processed.has(cache_path)) {
+				continue;
+			}
+
+			active_driver.shader_paths_processed.insert(cache_path);
+			groups_to_compile.insert(i);
+
+			group_items[i].cache_path = cache_path;
+			group_items[i].variants = p_shader->get_group_to_variants(i);
+			group_items[i].driver_index = driver_index;
+
+			{
+				MutexLock lock(shader_work_results_mutex);
+				shader_work_results[cache_path].variant_data.resize(variant_count);
+			}
 		}
 
-		String cache_path = p_shader->version_get_cache_file_relative_path(p_version, i, shader_container_driver);
-		if (shader_paths_processed.has(cache_path)) {
-			continue;
+		for (int64_t i = 0; i < variant_count; i++) {
+			int group = p_shader->get_variant_to_group(i);
+			if (!p_shader->is_variant_enabled(i) || !groups_to_compile.has(group)) {
+				continue;
+			}
+
+			WorkItem work_item;
+			work_item.cache_path = group_items[group].cache_path;
+			work_item.driver_index = driver_index;
+			work_item.shader_name = p_shader->get_name();
+			work_item.stage_sources = p_shader->version_build_variant_stage_sources(p_version, i);
+			work_item.dynamic_buffers = p_shader->get_dynamic_buffers();
+			work_item.variant = i;
+
+			WorkerThreadPool::TaskID task_id = WorkerThreadPool::get_singleton()->add_template_task(this, &ShaderBakerExportPlugin::_process_work_item, work_item);
+			group_items[group].variant_tasks.push_back(task_id);
+			tasks_total++;
 		}
 
-		shader_paths_processed.insert(cache_path);
-		groups_to_compile.insert(i);
-
-		group_items[i].cache_path = cache_path;
-		group_items[i].variants = p_shader->get_group_to_variants(i);
-
-		{
-			MutexLock lock(shader_work_results_mutex);
-			shader_work_results[cache_path].variant_data.resize(variant_count);
+		for (uint32_t i : groups_to_compile) {
+			shader_group_items.push_back(group_items[i]);
 		}
-	}
-
-	for (int64_t i = 0; i < variant_count; i++) {
-		int group = p_shader->get_variant_to_group(i);
-		if (!p_shader->is_variant_enabled(i) || !groups_to_compile.has(group)) {
-			continue;
-		}
-
-		WorkItem work_item;
-		work_item.cache_path = group_items[group].cache_path;
-		work_item.shader_name = p_shader->get_name();
-		work_item.stage_sources = p_shader->version_build_variant_stage_sources(p_version, i);
-		work_item.dynamic_buffers = p_shader->get_dynamic_buffers();
-		work_item.variant = i;
-
-		WorkerThreadPool::TaskID task_id = WorkerThreadPool::get_singleton()->add_template_task(this, &ShaderBakerExportPlugin::_process_work_item, work_item);
-		group_items[group].variant_tasks.push_back(task_id);
-		tasks_total++;
-	}
-
-	for (uint32_t i : groups_to_compile) {
-		shader_group_items.push_back(group_items[i]);
 	}
 }
 
@@ -427,12 +447,12 @@ void ShaderBakerExportPlugin::_process_work_item(WorkItem p_work_item) {
 		if (unlikely(spirv_data.is_empty())) {
 			ERR_PRINT("Unable to retrieve SPIR-V data for shader.");
 		} else {
-			Ref<RenderingShaderContainer> shader_container = shader_container_format->create_container();
+			Ref<RenderingShaderContainer> shader_container = active_drivers[p_work_item.driver_index].container_format->create_container();
 
 			// Compile shader binary from SPIR-V.
 			bool code_compiled = shader_container->set_code_from_spirv(p_work_item.shader_name, spirv_data);
 			if (unlikely(!code_compiled)) {
-				ERR_PRINT("Failed to compile code to native for SPIR-V.");
+				ERR_PRINT(vformat("Failed to compile code to native for SPIR-V for shader \"%s\" and driver \"%s\".", p_work_item.shader_name, active_drivers[p_work_item.driver_index].driver));
 			} else {
 				PackedByteArray shader_bytes = shader_container->to_bytes();
 				{

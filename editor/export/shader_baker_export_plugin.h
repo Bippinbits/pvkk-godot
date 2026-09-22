@@ -40,7 +40,8 @@ class ShaderBakerExportPluginPlatform : public RefCounted {
 
 public:
 	virtual RenderingShaderContainerFormat *create_shader_container_format(const Ref<EditorExportPlatform> &p_platform, const Ref<EditorExportPreset> &p_preset) = 0;
-	virtual bool matches_driver(const String &p_driver) = 0;
+	virtual String get_driver() const = 0;
+	virtual bool should_run(const Ref<EditorExportPreset> &p_preset, const String &p_project_driver) { return get_driver() == p_project_driver; }
 	virtual ~ShaderBakerExportPluginPlatform() {}
 };
 
@@ -50,6 +51,7 @@ class ShaderBakerExportPlugin : public EditorExportPlugin {
 protected:
 	struct WorkItem {
 		String cache_path;
+		uint32_t driver_index = 0;
 		String shader_name;
 		Vector<String> stage_sources;
 		Vector<uint64_t> dynamic_buffers;
@@ -65,17 +67,22 @@ protected:
 		String cache_path;
 		LocalVector<int> variants;
 		LocalVector<WorkerThreadPool::TaskID> variant_tasks;
+		uint32_t driver_index = 0;
+	};
+
+	struct ActiveDriver {
+		RenderingShaderContainerFormat *container_format = nullptr;
+		String driver;
+		String cache_export_path;
+		RBSet<String> shader_paths_processed;
 	};
 
 	String shader_cache_platform_name;
 	String shader_cache_renderer_name;
-	String shader_cache_export_path;
-	RBSet<String> shader_paths_processed;
 	HashMap<String, WorkResult> shader_work_results;
 	Mutex shader_work_results_mutex;
 	LocalVector<ShaderGroupItem> shader_group_items;
-	RenderingShaderContainerFormat *shader_container_format = nullptr;
-	String shader_container_driver;
+	LocalVector<ActiveDriver> active_drivers;
 	Vector<Ref<ShaderBakerExportPluginPlatform>> platforms;
 	uint64_t customization_configuration_hash = 0;
 	uint32_t tasks_processed = 0;
@@ -86,9 +93,9 @@ protected:
 
 	virtual String get_name() const override;
 	virtual bool _is_active(const Vector<String> &p_features) const;
-	virtual bool _initialize_container_format(const Ref<EditorExportPlatform> &p_platform, const Ref<EditorExportPreset> &p_preset);
-	virtual void _cleanup_container_format();
-	virtual bool _initialize_cache_directory();
+	virtual bool _initialize_container_formats(const Ref<EditorExportPlatform> &p_platform, const Ref<EditorExportPreset> &p_preset);
+	virtual void _cleanup_container_formats();
+	virtual bool _initialize_cache_directories();
 	virtual bool _begin_customize_resources(const Ref<EditorExportPlatform> &p_platform, const Vector<String> &p_features) override;
 	virtual bool _begin_customize_scenes(const Ref<EditorExportPlatform> &p_platform, const Vector<String> &p_features) override;
 	virtual void _end_customize_resources() override;

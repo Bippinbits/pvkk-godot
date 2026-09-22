@@ -54,6 +54,6 @@ RenderingShaderContainerFormat *ShaderBakerExportPluginPlatformMetal::create_sha
 	return memnew(RenderingShaderContainerFormatMetal(profile, true));
 }
 
-bool ShaderBakerExportPluginPlatformMetal::matches_driver(const String &p_driver) {
-	return p_driver == "metal";
+String ShaderBakerExportPluginPlatformMetal::get_driver() const {
+	return "metal";
 }
