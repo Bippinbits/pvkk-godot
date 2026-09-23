@@ -1164,7 +1164,6 @@ uniform float ao_light_affect : hint_range(0.0, 1.0, 0.01);
 		code += R"(
 uniform vec4 transmittance_color : source_color;
 uniform float transmittance_depth : hint_range(0.001, 8.0, 0.001);
-uniform sampler2D texture_subsurface_transmittance : hint_default_white, %s;
 uniform float transmittance_boost : hint_range(0.0, 1.0, 0.01);
 )";
 		if (textures[TEXTURE_SUBSURFACE_TRANSMITTANCE].is_valid()) {
