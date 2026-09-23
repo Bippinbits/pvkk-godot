@@ -224,6 +224,9 @@ private:
 	int channel_count = 0;
 	int to_mix = 0;
 
+	// Either a SpeakerMode value, or any other value for default.
+	int speaker_mode_config = -1;
+
 	float playback_speed_scale = 1.0f;
 
 	bool tag_used_audio_streams = false;
@@ -327,6 +330,8 @@ private:
 
 	void _update_bus_effects(int p_bus);
 
+	String _get_speaker_mode_name() const;
+
 	static AudioServer *singleton;
 
 	void init_channels_and_buffers();
@@ -345,6 +350,8 @@ private:
 	SafeList<CallbackItem *> update_callback_list;
 	SafeList<CallbackItem *> mix_callback_list;
 	SafeList<CallbackItem *> listener_changed_callback_list;
+
+	void _project_settings_changed_cb();
 
 	friend class AudioDriver;
 	void _driver_process(int p_frames, int32_t *p_buffer);
@@ -453,6 +460,11 @@ public:
 	uint64_t get_mixed_frames() const;
 
 	String get_driver_name() const;
+	SpeakerMode get_driver_speaker_mode() const;
+	int get_driver_channel_count() const;
+
+	void set_speaker_mode_config(int p_speaker_mode);
+	int get_speaker_mode_config() const;
 
 	void notify_listener_changed();
 

@@ -177,10 +177,22 @@
 				[b]Note:[/b] This can be expensive; it is not recommended to call [method get_output_latency] every frame.
 			</description>
 		</method>
+		<method name="get_driver_speaker_mode" qualifiers="const">
+			<return type="int" enum="AudioServer.SpeakerMode" />
+			<description>
+				Returns the speaker configuration reported by the audio driver, ignoring any override set with [method set_speaker_mode_override] or [member ProjectSettings.audio/driver/speaker_mode_override].
+			</description>
+		</method>
 		<method name="get_speaker_mode" qualifiers="const">
 			<return type="int" enum="AudioServer.SpeakerMode" />
 			<description>
-				Returns the speaker configuration.
+				Returns the speaker configuration used for mixing. This is the speaker configuration reported by the audio driver, unless overridden with [method set_speaker_mode_override], [member ProjectSettings.audio/driver/speaker_mode_override] or the [code]--speaker-mode-override[/code] command line argument.
+			</description>
+		</method>
+		<method name="get_speaker_mode_override" qualifiers="const">
+			<return type="int" />
+			<description>
+				Returns the current speaker mode override as set by [method set_speaker_mode_override], or [code]-1[/code] if the driver's speaker configuration is used.
 			</description>
 		</method>
 		<method name="get_time_since_last_mix" qualifiers="const">
@@ -357,6 +369,13 @@
 			<description>
 				If [param active] is [code]true[/code], starts the microphone input stream specified by [member input_device] or returns an error if it failed.
 				If [param active] is [code]false[/code], stops the input stream if it is running.
+			</description>
+		</method>
+		<method name="set_speaker_mode_override">
+			<return type="void" />
+			<param index="0" name="speaker_mode" type="int" />
+			<description>
+				Overrides the speaker configuration used for mixing, regardless of what the audio driver reports. [param speaker_mode] is a [enum SpeakerMode] value, or [code]-1[/code] to use the driver's speaker configuration. The change takes effect on the next mix step, so it can be changed at runtime, for example from an options menu to force stereo output on virtual surround devices.
 			</description>
 		</method>
 		<method name="swap_bus_effects">
