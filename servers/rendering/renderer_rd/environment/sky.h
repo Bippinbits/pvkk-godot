@@ -213,6 +213,9 @@ public:
 		bool dirty = true;
 		float uv_border_size = 0.0; // Border size in UV space.
 
+		uint64_t last_radiance_update_frame = UINT64_MAX;
+		bool was_last_radiance_update_incremental = false;
+
 		LocalVector<Layer> layers;
 
 		void clear_reflection_data();
@@ -220,6 +223,7 @@ public:
 		void create_reflection_fast_filter(bool p_use_arrays);
 		void create_reflection_importance_sample(bool p_use_arrays, int p_base_layer, uint32_t p_sky_ggx_samples_quality);
 		void update_reflection_mipmaps(int p_start, int p_end);
+		bool is_reflection_check_allowed_this_frame() const;
 	};
 
 	/* Sky shader */

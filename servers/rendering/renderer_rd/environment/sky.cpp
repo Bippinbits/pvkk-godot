@@ -500,6 +500,10 @@ void SkyRD::ReflectionData::update_reflection_mipmaps(int p_start, int p_end) {
 	RD::get_singleton()->draw_command_end_label();
 }
 
+bool SkyRD::ReflectionData::is_reflection_check_allowed_this_frame() const {
+	return !was_last_radiance_update_incremental || (last_radiance_update_frame != RSG::rasterizer->get_frame_number());
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 // SkyRD::Sky
 
@@ -1029,9 +1033,13 @@ void SkyRD::setup_sky(const RenderDataRD *p_render_data, const Size2i p_screen_s
 		}
 
 		if (shader_data->uses_time && p_render_data->scene_data->time - sky->prev_time > 0.00001) {
-			sky->prev_time = p_render_data->scene_data->time;
-			sky->reflection.dirty = true;
-			RenderingServerDefault::redraw_request();
+			if (sky->reflection.is_reflection_check_allowed_this_frame()) {
+				sky->prev_time = p_render_data->scene_data->time;
+				sky->reflection.dirty = true;
+				RenderingServerDefault::redraw_request();
+			} else {
+				WARN_PRINT_ED("A sky in incremental update mode can't be updated by more than scene per frame. Make sure the scene time is consistent between both scenes.");
+			}
 		}
 
 		bool sun_scatter_enabled = RendererSceneRenderRD::get_singleton()->environment_get_fog_enabled(p_render_data->environment) && RendererSceneRenderRD::get_singleton()->environment_get_fog_sun_scatter(p_render_data->environment) > 0.001;
@@ -1053,8 +1061,12 @@ void SkyRD::setup_sky(const RenderDataRD *p_render_data, const Size2i p_screen_s
 		}
 
 		if (!p_render_data->scene_data->cam_transform.origin.is_equal_approx(sky->prev_position) && shader_data->uses_position) {
-			sky->prev_position = p_render_data->scene_data->cam_transform.origin;
-			sky->reflection.dirty = true;
+			if (sky->reflection.is_reflection_check_allowed_this_frame()) {
+				sky->prev_position = p_render_data->scene_data->cam_transform.origin;
+				sky->reflection.dirty = true;
+			} else {
+				WARN_PRINT_ED("A sky in incremental update mode can't be updated by more than scene per frame. Make sure the camera is consistent between both scenes.");
+			}
 		}
 	}
 
@@ -1113,17 +1125,13 @@ void SkyRD::setup_sky(const RenderDataRD *p_render_data, const Size2i p_screen_s
 				}
 			}
 		}
+
 		// Check whether the directional_light_buffer changes.
 		bool light_data_dirty = false;
 
 		// Light buffer is dirty if we have fewer or more lights.
-		// If we have fewer lights, make sure that old lights are disabled.
 		if (sky_scene_state.ubo.directional_light_count != sky_scene_state.last_frame_directional_light_count) {
 			light_data_dirty = true;
-			for (uint32_t i = sky_scene_state.ubo.directional_light_count; i < sky_scene_state.max_directional_lights; i++) {
-				sky_scene_state.directional_lights[i].enabled = false;
-				sky_scene_state.last_frame_directional_lights[i].enabled = false;
-			}
 		}
 
 		if (!light_data_dirty) {
@@ -1144,14 +1152,24 @@ void SkyRD::setup_sky(const RenderDataRD *p_render_data, const Size2i p_screen_s
 		}
 
 		if (light_data_dirty) {
-			RD::get_singleton()->buffer_update(sky_scene_state.directional_light_buffer, 0, sizeof(SkyDirectionalLightData) * sky_scene_state.max_directional_lights, sky_scene_state.directional_lights);
+			if (sky->reflection.is_reflection_check_allowed_this_frame()) {
+				// If we have fewer lights, make sure that old lights are disabled.
+				for (uint32_t i = sky_scene_state.ubo.directional_light_count; i < sky_scene_state.max_directional_lights; i++) {
+					sky_scene_state.directional_lights[i].enabled = false;
+					sky_scene_state.last_frame_directional_lights[i].enabled = false;
+				}
 
-			SkyDirectionalLightData *temp = sky_scene_state.last_frame_directional_lights;
-			sky_scene_state.last_frame_directional_lights = sky_scene_state.directional_lights;
-			sky_scene_state.directional_lights = temp;
-			sky_scene_state.last_frame_directional_light_count = sky_scene_state.ubo.directional_light_count;
-			if (sky) {
-				sky->reflection.dirty = true;
+				RD::get_singleton()->buffer_update(sky_scene_state.directional_light_buffer, 0, sizeof(SkyDirectionalLightData) * sky_scene_state.max_directional_lights, sky_scene_state.directional_lights);
+
+				SkyDirectionalLightData *temp = sky_scene_state.last_frame_directional_lights;
+				sky_scene_state.last_frame_directional_lights = sky_scene_state.directional_lights;
+				sky_scene_state.directional_lights = temp;
+				sky_scene_state.last_frame_directional_light_count = sky_scene_state.ubo.directional_light_count;
+				if (sky) {
+					sky->reflection.dirty = true;
+				}
+			} else {
+				WARN_PRINT_ED("A sky in incremental update mode can't be updated by more than scene per frame. Make sure lights are consistent between both scenes.");
 			}
 		}
 	}
@@ -1380,6 +1398,10 @@ void SkyRD::update_radiance_buffers(Ref<RenderSceneBuffersRD> p_render_buffers, 
 			sky->processing_layer++;
 		}
 	}
+
+	// These are used to prevent more dirty checks from happening for this sky in this frame.
+	sky->reflection.last_radiance_update_frame = RSG::rasterizer->get_frame_number();
+	sky->reflection.was_last_radiance_update_incremental = !update_single_frame;
 }
 
 void SkyRD::update_res_buffers(Ref<RenderSceneBuffersRD> p_render_buffers, RID p_env, double p_time, float p_luminance_multiplier, float p_brightness_multiplier) {
