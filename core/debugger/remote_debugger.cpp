@@ -39,6 +39,7 @@
 #include "core/io/resource_loader.h"
 #include "core/math/expression.h"
 #include "core/object/script_language.h"
+#include "core/os/main_loop.h"
 #include "core/os/os.h"
 #include "servers/display/display_server.h"
 
@@ -685,11 +686,13 @@ void RemoteDebugger::poll_events(bool p_is_idle) {
 
 	// Reload scripts during idle poll only.
 	if (p_is_idle) {
+		bool reloaded_any = false;
 		if (reload_all_scripts) {
 			for (int i = 0; i < ScriptServer::get_language_count(); i++) {
 				ScriptServer::get_language(i)->reload_all_scripts();
 			}
 			reload_all_scripts = false;
+			reloaded_any = true;
 		} else if (!script_paths_to_reload.is_empty()) {
 			Array scripts_to_reload;
 			for (const Variant &v : script_paths_to_reload) {
@@ -711,8 +714,13 @@ void RemoteDebugger::poll_events(bool p_is_idle) {
 			for (int i = 0; i < ScriptServer::get_language_count(); i++) {
 				ScriptServer::get_language(i)->reload_scripts(scripts_to_reload, true);
 			}
+			reloaded_any = !scripts_to_reload.is_empty();
 		}
 		script_paths_to_reload.clear();
+
+		if (reloaded_any && OS::get_singleton()->get_main_loop()) {
+			OS::get_singleton()->get_main_loop()->notification(MainLoop::NOTIFICATION_SCRIPTS_RELOADED);
+		}
 	}
 }
 

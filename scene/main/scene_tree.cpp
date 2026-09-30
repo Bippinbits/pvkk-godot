@@ -925,7 +925,8 @@ void SceneTree::_notification(int p_notification) {
 		case NOTIFICATION_APPLICATION_RESUMED:
 		case NOTIFICATION_APPLICATION_PAUSED:
 		case NOTIFICATION_APPLICATION_FOCUS_IN:
-		case NOTIFICATION_APPLICATION_FOCUS_OUT: {
+		case NOTIFICATION_APPLICATION_FOCUS_OUT:
+		case NOTIFICATION_SCRIPTS_RELOADED: {
 			// Pass these to nodes, since they are mirrored.
 			get_root()->propagate_notification(p_notification);
 		} break;
