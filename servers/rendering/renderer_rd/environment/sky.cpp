@@ -1152,7 +1152,7 @@ void SkyRD::setup_sky(const RenderDataRD *p_render_data, const Size2i p_screen_s
 		}
 
 		if (light_data_dirty) {
-			if (sky->reflection.is_reflection_check_allowed_this_frame()) {
+			if (!sky || sky->reflection.is_reflection_check_allowed_this_frame()) {
 				// If we have fewer lights, make sure that old lights are disabled.
 				for (uint32_t i = sky_scene_state.ubo.directional_light_count; i < sky_scene_state.max_directional_lights; i++) {
 					sky_scene_state.directional_lights[i].enabled = false;
