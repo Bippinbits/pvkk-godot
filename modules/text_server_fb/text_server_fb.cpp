@@ -2457,8 +2457,8 @@ RID TextServerFallback::_font_get_glyph_texture_rid(const RID &p_font_rid, const
 					// Same as the "fix alpha border" process option when importing SVGs
 					img->fix_alpha_edges();
 				}
+				img = tex.image->duplicate();
 				if (fd->mipmaps && !img->has_mipmaps()) {
-					img = tex.image->duplicate();
 					img->generate_mipmaps();
 				}
 				if (tex.texture.is_null()) {
@@ -2509,8 +2509,8 @@ Size2 TextServerFallback::_font_get_glyph_texture_size(const RID &p_font_rid, co
 					// Same as the "fix alpha border" process option when importing SVGs
 					img->fix_alpha_edges();
 				}
+				img = tex.image->duplicate();
 				if (fd->mipmaps && !img->has_mipmaps()) {
-					img = tex.image->duplicate();
 					img->generate_mipmaps();
 				}
 				if (tex.texture.is_null()) {
@@ -2940,8 +2940,8 @@ void TextServerFallback::_font_draw_glyph(const RID &p_font_rid, const RID &p_ca
 						// Same as the "fix alpha border" process option when importing SVGs
 						img->fix_alpha_edges();
 					}
+					img = tex.image->duplicate();
 					if (fd->mipmaps && !img->has_mipmaps()) {
-						img = tex.image->duplicate();
 						img->generate_mipmaps();
 					}
 					if (tex.texture.is_null()) {
@@ -3082,8 +3082,8 @@ void TextServerFallback::_font_draw_glyph_outline(const RID &p_font_rid, const R
 				if (ffsd->textures[fgl.texture_idx].dirty) {
 					ShelfPackTexture &tex = ffsd->textures.write[fgl.texture_idx];
 					Ref<Image> img = tex.image;
+					img = tex.image->duplicate();
 					if (fd->mipmaps && !img->has_mipmaps()) {
-						img = tex.image->duplicate();
 						img->generate_mipmaps();
 					}
 					if (tex.texture.is_null()) {
