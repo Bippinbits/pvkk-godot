@@ -13,9 +13,18 @@ layout(rgba16f, set = 0, binding = 0) uniform restrict image2D color_image;
 layout(set = 1, binding = 0) uniform sampler2D source_depth;
 #endif
 
-#if defined(MODE_BOKEH_BOX) || defined(MODE_BOKEH_HEXAGONAL) || defined(MODE_BOKEH_CIRCULAR)
+#if defined(MODE_BOKEH_BOX) || defined(MODE_BOKEH_HEXAGONAL) || defined(MODE_BOKEH_CIRCULAR) || defined(MODE_BOKEH_TILE_MAX)
 layout(set = 1, binding = 0) uniform sampler2D color_texture;
 layout(rgba16f, set = 0, binding = 0) uniform restrict writeonly image2D bokeh_image;
+#endif
+
+#ifdef MODE_BOKEH_CIRCULAR
+layout(set = 2, binding = 0) uniform sampler2D tile_texture;
+#endif
+
+#if defined(MODE_BOKEH_CIRCULAR) || defined(MODE_BOKEH_TILE_MAX)
+#define TILE_SIZE 16
+shared uint tile_max;
 #endif
 
 #ifdef MODE_COMPOSITE_BOKEH
@@ -113,7 +122,72 @@ vec4 weighted_filter_dir(vec2 dir, vec2 uv, vec2 pixel_size) {
 
 #endif
 
+#ifdef MODE_BOKEH_CIRCULAR
+
+float get_tile_blur_size() {
+	ivec2 full_size = textureSize(color_texture, 0);
+	vec2 scale = vec2(full_size) / vec2(params.size * 2);
+	float max_scale = max(scale.x, scale.y);
+	ivec2 tile_count = (full_size + TILE_SIZE - 1) / TILE_SIZE;
+	ivec2 group = ivec2(gl_WorkGroupID.xy);
+	vec2 group_begin = (vec2(group * TILE_SIZE) + 0.5) * scale;
+	vec2 group_end = (vec2(group * TILE_SIZE) + float(TILE_SIZE) - 1.5) * scale;
+	int reach = int(ceil((params.blur_size * max_scale + 1.5) / float(TILE_SIZE))) + 1;
+	int width = reach * 2 + 1;
+
+	if (gl_LocalInvocationIndex == 0) {
+		tile_max = 0u;
+	}
+	barrier();
+
+	for (int i = int(gl_LocalInvocationIndex); i < width * width; i += BLOCK_SIZE * BLOCK_SIZE) {
+		ivec2 tile = group + ivec2(i % width, i / width) - reach;
+		if (any(lessThan(tile, ivec2(0))) || any(greaterThanEqual(tile, tile_count))) {
+			continue;
+		}
+		float size = texelFetch(tile_texture, tile, 0).r + 0.5;
+		vec2 tile_begin = vec2(tile * TILE_SIZE) + 0.5;
+		vec2 tile_end = tile_begin + float(TILE_SIZE - 1);
+		vec2 gap = max(vec2(0.0), max(tile_begin - group_end, group_begin - tile_end));
+		if (length(gap) < size * max_scale + 1.5) {
+			atomicMax(tile_max, floatBitsToUint(size));
+		}
+	}
+
+	barrier();
+	return uintBitsToFloat(tile_max);
+}
+
+#endif
+
 void main() {
+#ifdef MODE_BOKEH_TILE_MAX
+	if (gl_LocalInvocationIndex == 0) {
+		tile_max = 0u;
+	}
+	barrier();
+
+	ivec2 tile_pos = ivec2(gl_WorkGroupID.xy) * TILE_SIZE + ivec2(gl_LocalInvocationID.xy) * 2;
+	ivec2 last_pixel = textureSize(color_texture, 0) - 1;
+	float max_size = 0.0;
+	for (int y = 0; y < 2; y++) {
+		for (int x = 0; x < 2; x++) {
+			max_size = max(max_size, abs(texelFetch(color_texture, min(tile_pos + ivec2(x, y), last_pixel), 0).a));
+		}
+	}
+	atomicMax(tile_max, floatBitsToUint(max_size));
+	barrier();
+
+	if (gl_LocalInvocationIndex == 0) {
+		imageStore(bokeh_image, ivec2(gl_WorkGroupID.xy), vec4(uintBitsToFloat(tile_max)));
+	}
+	return;
+#endif
+
+#ifdef MODE_BOKEH_CIRCULAR
+	float tile_blur_size = min(params.blur_size, get_tile_blur_size());
+#endif
+
 	ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
 
 	if (any(greaterThan(pos, params.size))) { //too large, do nothing
@@ -190,7 +264,7 @@ void main() {
 	float accum = 1.0;
 	float radius = params.blur_scale;
 
-	for (float ang = 0.0; radius < params.blur_size; ang += GOLDEN_ANGLE) {
+	for (float ang = 0.0; radius < tile_blur_size; ang += GOLDEN_ANGLE) {
 		vec2 suv = uv + vec2(cos(ang), sin(ang)) * pixel_size * radius;
 		vec4 sample_color = texture(color_texture, suv);
 		float sample_size = abs(sample_color.a);

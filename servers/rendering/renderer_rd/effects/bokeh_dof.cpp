@@ -48,13 +48,18 @@ BokehDOF::BokehDOF(bool p_prefer_raster_effects) {
 	bokeh_modes.push_back("\n#define MODE_BOKEH_HEXAGONAL\n");
 	bokeh_modes.push_back("\n#define MODE_BOKEH_CIRCULAR\n#define OUTPUT_WEIGHT\n");
 	bokeh_modes.push_back("\n#define MODE_COMPOSITE_BOKEH\n");
+	bokeh_modes.push_back("\n#define MODE_BOKEH_TILE_MAX\n");
 	if (prefer_raster_effects) {
 		bokeh.raster_shader.initialize(bokeh_modes);
+		bokeh.raster_shader.set_variant_enabled(BOKEH_TILE_MAX, false);
 
 		bokeh.shader_version = bokeh.raster_shader.version_create();
 
-		const int att_count[BOKEH_MAX] = { 1, 2, 1, 2, 1, 2, 1 };
+		const int att_count[BOKEH_MAX] = { 1, 2, 1, 2, 1, 2, 1, 1 };
 		for (int i = 0; i < BOKEH_MAX; i++) {
+			if (!bokeh.raster_shader.is_variant_enabled(i)) {
+				continue;
+			}
 			RD::PipelineColorBlendState blend_state = (i == BOKEH_COMPOSITE) ? RD::PipelineColorBlendState::create_blend(att_count[i]) : RD::PipelineColorBlendState::create_disabled(att_count[i]);
 			bokeh.raster_pipelines[i].setup(bokeh.raster_shader.version_get_shader(bokeh.shader_version, i), RD::RENDER_PRIMITIVE_TRIANGLES, RD::PipelineRasterizationState(), RD::PipelineMultisampleState(), RD::PipelineDepthStencilState(), blend_state, 0);
 		}
@@ -244,6 +249,19 @@ void BokehDOF::bokeh_dof_compute(const BokehBuffers &p_buffers, RID p_camera_att
 	} else {
 		//circle
 
+		shader = bokeh.compute_shader.version_get_shader(bokeh.shader_version, BOKEH_TILE_MAX);
+		ERR_FAIL_COND(shader.is_null());
+
+		RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, bokeh.compute_pipelines[BOKEH_TILE_MAX].get_rid());
+
+		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set_cache->get_cache(shader, 0, u_half_image1), 0);
+		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set_cache->get_cache(shader, 1, u_base_texture), 1);
+
+		RD::get_singleton()->compute_list_set_push_constant(compute_list, &bokeh.push_constant, sizeof(BokehPushConstant));
+
+		RD::get_singleton()->compute_list_dispatch(compute_list, (p_buffers.base_texture_size.x + 15) / 16, (p_buffers.base_texture_size.y + 15) / 16, 1);
+		RD::get_singleton()->compute_list_add_barrier(compute_list);
+
 		shader = bokeh.compute_shader.version_get_shader(bokeh.shader_version, BOKEH_GEN_BOKEH_CIRCULAR);
 		ERR_FAIL_COND(shader.is_null());
 
@@ -259,6 +277,7 @@ void BokehDOF::bokeh_dof_compute(const BokehBuffers &p_buffers, RID p_camera_att
 
 		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set_cache->get_cache(shader, 0, u_half_image0), 0);
 		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set_cache->get_cache(shader, 1, u_base_texture), 1);
+		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set_cache->get_cache(shader, 2, u_half_texture1), 2);
 
 		bokeh.push_constant.size[0] = p_buffers.base_texture_size.x >> 1;
 		bokeh.push_constant.size[1] = p_buffers.base_texture_size.y >> 1;
