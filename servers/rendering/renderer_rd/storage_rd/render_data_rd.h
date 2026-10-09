@@ -71,6 +71,7 @@ public:
 
 	uint32_t directional_light_count = 0;
 	bool directional_light_soft_shadows = false;
+	bool shadows_from_ray_queries = false;
 
 	bool lightmap_bicubic_filter = false;
 
@@ -80,7 +81,6 @@ public:
 	bool transparent_bg = false;
 	bool load_color_and_depth = false;
 	bool skip_post_and_tonemap = false;
-	bool use_pathtracing = true;
 	Rect2i render_region;
 	RID viewport;
 

@@ -232,27 +232,46 @@ vec3 fog_sample_radiance(vec3 vertex, float mip_level) {
 }
 
 #include "../fog_inc.glsl"
+#include "raytracing_volumetric_fog_inc.glsl"
 
-/// Apply environment fog for the ray segment that was just traversed.
-/// Attenuates throughput and adds in-scattered fog color.
-void apply_segment_fog(float segment_dist, inout vec3 radiance, inout vec3 throughput) {
-	if ((RT_FLAGS & RT_FLAG_FOG_ENABLED) == 0u) {
-		return;
+/// Analytic and, on camera segments, froxel fog at a hit, as premultiplied
+/// inscatter and transmittance.
+vec4 rt_fog_at(vec3 world_pos, vec3 view_vertex, bool camera_segment) {
+	bool use_fog = (RT_FLAGS & RT_FLAG_FOG_ENABLED) != 0u;
+	vec4 fog = vec4(0.0, 0.0, 0.0, 1.0);
+	if (use_fog) {
+		fog = fog_process(scene_data_block.data, view_vertex);
+		fog = vec4(fog.rgb * fog.a, 1.0 - fog.a);
 	}
+	if (camera_segment && rt_volumetric_fog_enabled()) {
+		fog = rt_combine_fog(fog, use_fog, rt_volumetric_fog_at(world_pos, view_vertex));
+	}
+	return fog;
+}
 
-	// Build a view-space vertex along the ray direction at the hit distance.
-	// fog_process needs view-space position for distance and height calculations.
+vec3 rt_world_to_view(vec3 p_world) {
 	mat4 view_mat = transpose(mat4(
 			scene_data_block.data.view_matrix[0],
 			scene_data_block.data.view_matrix[1],
 			scene_data_block.data.view_matrix[2],
 			vec4(0.0, 0.0, 0.0, 1.0)));
-	vec3 world_hit = gl_WorldRayOriginEXT + gl_WorldRayDirectionEXT * segment_dist;
-	vec3 vertex = (view_mat * vec4(world_hit, 1.0)).xyz;
+	return (view_mat * vec4(p_world, 1.0)).xyz;
+}
 
-	vec4 fog = fog_process(scene_data_block.data, vertex);
-	radiance += throughput * fog.rgb * fog.a;
-	throughput *= (1.0 - fog.a);
+/// Apply environment fog for the ray segment that was just traversed.
+/// Attenuates throughput and adds in-scattered fog color.
+void apply_segment_fog(float segment_dist, uint mat_flags, bool camera_segment, inout vec3 radiance, inout vec3 throughput) {
+	if ((mat_flags & RT_MAT_FLAG_FOG_DISABLED) != 0u) {
+		return;
+	}
+	if ((RT_FLAGS & RT_FLAG_FOG_ENABLED) == 0u && !(camera_segment && rt_volumetric_fog_enabled())) {
+		return;
+	}
+
+	vec3 world_hit = gl_WorldRayOriginEXT + gl_WorldRayDirectionEXT * segment_dist;
+	vec4 fog = rt_fog_at(world_hit, rt_world_to_view(world_hit), camera_segment);
+	radiance += throughput * fog.rgb;
+	throughput *= fog.a;
 }
 
 /// Converts specular parameter [0..1] to dielectric F0.
@@ -265,6 +284,73 @@ float specular_to_f0(float specular) {
 // ============================================================================
 
 #ifdef RT_DEBUG_ENABLED
+#define RT_VIS_DIRECTIONAL_SHADOW_BLOCKER 27
+
+bool debug_is_camera_visible(uint p_geometry_idx, vec3 p_origin, vec3 p_direction, float p_t) {
+	rayQueryEXT rq;
+	rayQueryInitializeEXT(rq, tlas, gl_RayFlagsNoOpaqueEXT, RT_VIS_MASK, p_origin, max(p_t - 0.01, 0.0), p_direction, p_t + 0.01);
+	while (rayQueryProceedEXT(rq)) {
+		if (rayQueryGetIntersectionInstanceCustomIndexEXT(rq, false) == p_geometry_idx) {
+			rayQueryConfirmIntersectionEXT(rq);
+		}
+	}
+	return rayQueryGetIntersectionTypeEXT(rq, true) != gl_RayQueryCommittedIntersectionNoneEXT;
+}
+
+// White: sun visible. Yellow: only transparent casters (scaled by transmittance).
+// Red: opaque blocker the camera cannot see (raster ignores it). Blue: opaque blocker the camera sees.
+// Darker means a farther blocker. Grey: facing away from the sun. Magenta: no directional light.
+vec3 debug_directional_shadow_blocker(vec3 p_geometry_normal) {
+	uint light_count = uint(get_rt_param(RT_PARAM_LIGHT_COUNT));
+	int sun = -1;
+	for (uint i = 0u; i < light_count; i++) {
+		if (rt_lights[i].type == RT_LIGHT_TYPE_DIRECTIONAL) {
+			sun = int(i);
+			break;
+		}
+	}
+	if (sun < 0) {
+		return vec3(1.0, 0.0, 1.0);
+	}
+	vec3 to_sun = -normalize(rt_lights[sun].position);
+	if (dot(p_geometry_normal, to_sun) <= 0.0) {
+		return vec3(0.1);
+	}
+
+	vec3 origin = offset_ray_origin(gl_WorldRayOriginEXT + gl_WorldRayDirectionEXT * gl_HitTEXT, p_geometry_normal);
+	vec3 transmittance = vec3(1.0);
+	rayQueryEXT rq;
+	rayQueryInitializeEXT(rq, tlas, gl_RayFlagsNoOpaqueEXT, 0xFCu, origin, 0.001, to_sun, 10000.0);
+	while (rayQueryProceedEXT(rq)) {
+		uint geometry_idx = rayQueryGetIntersectionInstanceCustomIndexEXT(rq, false);
+		uint mat_flags = materials[geometry_idx].flags;
+		if ((mat_flags & (RT_MAT_FLAG_TRANSPARENT | RT_MAT_FLAG_ALPHA_SCISSOR)) == 0u) {
+			rayQueryConfirmIntersectionEXT(rq);
+			continue;
+		}
+		bool transparent = (mat_flags & RT_MAT_FLAG_TRANSPARENT) != 0u;
+		if (transparent && (mat_flags & RT_MAT_FLAG_NO_RAY_QUERY_ALPHA) != 0u) {
+			continue;
+		}
+		vec4 surface = ray_query_surface(geometry_idx, rayQueryGetIntersectionPrimitiveIndexEXT(rq, false), rayQueryGetIntersectionBarycentricsEXT(rq, false), 0.0);
+		if (transparent) {
+			// Expected value of ray_query_shadow_transmittance's stochastic coverage.
+			transmittance *= (1.0 - surface.a) * mix(vec3(1.0), surface.rgb, surface.a);
+		} else if (surface.a >= 0.5) {
+			rayQueryConfirmIntersectionEXT(rq);
+		}
+	}
+
+	if (rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionNoneEXT) {
+		return transmittance == vec3(1.0) ? vec3(1.0) : vec3(1.0, 1.0, 0.0) * luminance(transmittance);
+	}
+	float t = rayQueryGetIntersectionTEXT(rq, true);
+	uint blocker = rayQueryGetIntersectionInstanceCustomIndexEXT(rq, true);
+	float brightness = clamp(1.0 - log2(1.0 + t) / 8.0, 0.25, 1.0);
+	vec3 color = debug_is_camera_visible(blocker, origin, to_sun, t) ? vec3(0.0, 0.3, 1.0) : vec3(1.0, 0.0, 0.0);
+	return color * brightness;
+}
+
 void debug_visualize(
 		int vis_mode,
 		bool is_front_face,
@@ -364,6 +450,11 @@ void debug_visualize(
 		ps.radiance = vec3(d);
 	} else if (vis_mode == 21) {
 		ps.radiance = emissive;
+	} else if (vis_mode == RT_VIS_DIRECTIONAL_SHADOW_BLOCKER) {
+		ps.radiance = debug_directional_shadow_blocker(geometry_normal);
+	} else if (vis_mode == RT_VIS_VOLUMETRIC_FOG || vis_mode == RT_VIS_VOLUMETRIC_FOG_TRANSMITTANCE) {
+		vec3 world_hit = gl_WorldRayOriginEXT + gl_WorldRayDirectionEXT * gl_HitTEXT;
+		ps.radiance = rt_volumetric_fog_debug(vis_mode, rt_volumetric_fog_at(world_hit, rt_world_to_view(world_hit)));
 	} else if (vis_mode == 22) {
 		// BRDF below-hemisphere fallback visualization. Reflects the two-layer
 		// recovery applied in shade_and_bounce:
@@ -372,9 +463,6 @@ void debug_visualize(
 		//   Layer 2 - mirror rejected directions across the geometry plane
 		//             (biased; reuses the rejected sample's BRDF weight)
 		//
-		// We sample both BRDF lobes once with the un-clamped shading normal
-		// and once with the clamped shading normal, reusing the same random
-		// pair so the two passes are directly comparable.
 		//
 		// Color legend (ordered cleanest -> most biased):
 		//   green   = no rejection in either pass (no fallback needed)
@@ -550,7 +638,7 @@ void shade_and_bounce(HitData h, MaterialResult m) {
 		float continuation_alpha = 0.0;
 		vec3 fogged_throughput = ps.throughput;
 		vec3 branch_fog = vec3(0.0);
-		apply_segment_fog(gl_HitTEXT, branch_fog, fogged_throughput);
+		apply_segment_fog(gl_HitTEXT, mat_flags, get_total_bounces(ps.packed_bounces_flags) == 0u, branch_fog, fogged_throughput);
 		if (bclass == RT_BLEND_CLASS_MUL) {
 			// Mul contributes no light; its color folds into the scalar T.
 			peel_alpha = clamp(1.0 - luminance(m.albedo), 0.0, 1.0);
@@ -629,11 +717,10 @@ void shade_and_bounce(HitData h, MaterialResult m) {
 			ps.packed_bounces_flags |= PEEL_DEPTH_BARRIER_HIT_FLAG;
 		}
 		ps.packed_bounces_flags &= ~PEEL_HAS_CONTINUATION_FLAG;
-		if (continuation_alpha > 0.0) {
-			ps.throughput *= continuation_alpha;
-			if (sample_surface_continuation(h, m, N, V, ps)) {
-				ps.packed_bounces_flags |= PEEL_HAS_CONTINUATION_FLAG;
-			}
+		// Continue with probability alpha rather than scaling throughput by it, so faint
+		// layers rarely spawn a full indirect path.
+		if (rand(ps.rng_state) < continuation_alpha && sample_surface_continuation(h, m, N, V, ps)) {
+			ps.packed_bounces_flags |= PEEL_HAS_CONTINUATION_FLAG;
 		}
 		path_pack(payload, ps);
 		return;
@@ -643,7 +730,7 @@ void shade_and_bounce(HitData h, MaterialResult m) {
 	uint diffuse_bounces = get_diffuse_bounces(ps.packed_bounces_flags);
 
 	// Environment fog for this ray segment (before surface contribution).
-	apply_segment_fog(gl_HitTEXT, ps.radiance, ps.throughput);
+	apply_segment_fog(gl_HitTEXT, materials[h.geometry_idx].flags, total_bounces == 0u, ps.radiance, ps.throughput);
 
 	path_pack(payload, ps);
 	ps.radiance += ps.throughput * shade_local_surface(

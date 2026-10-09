@@ -551,6 +551,18 @@ void Viewport::_update_viewport_path() {
 	}
 }
 
+void Viewport::_update_debug_name() {
+	if (!is_inside_tree()) {
+		return;
+	}
+
+	// Most SubViewports keep their default (or auto-generated "@") name, so those borrow the parent's name instead.
+	const String node_name = get_name();
+	const bool generic_name = node_name == get_class() || node_name.begins_with("@");
+	const String debug_name = get_tree()->get_root() == this ? String("Main") : (generic_name ? String(get_parent()->get_name()) : node_name);
+	RS::get_singleton()->viewport_set_debug_name(viewport, debug_name);
+}
+
 bool Viewport::_can_hide_focus_state() {
 	return Engine::get_singleton()->is_editor_hint() || GLOBAL_GET_CACHED(int, "gui/common/show_focus_state_on_pointer_event") < 2;
 }
@@ -573,6 +585,7 @@ void Viewport::_notification(int p_what) {
 	switch (p_what) {
 		case NOTIFICATION_ENTER_TREE: {
 			_update_viewport_path();
+			_update_debug_name();
 
 			if (get_parent()) {
 				parent = get_parent()->get_viewport();
@@ -676,6 +689,7 @@ void Viewport::_notification(int p_what) {
 
 		case NOTIFICATION_PATH_RENAMED: {
 			_update_viewport_path();
+			_update_debug_name();
 		} break;
 
 #if !defined(PHYSICS_2D_DISABLED) || !defined(PHYSICS_3D_DISABLED)

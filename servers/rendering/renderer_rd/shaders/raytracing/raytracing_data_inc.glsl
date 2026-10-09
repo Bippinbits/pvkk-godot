@@ -112,6 +112,8 @@ struct InstanceMotionData {
 #define RT_MAT_FLAG_ALPHA_SCISSOR 2048u
 #define RT_MAT_FLAG_PROXIMITY_FADE 4096u
 #define RT_MAT_FLAG_DISTANCE_FADE 8192u
+#define RT_MAT_FLAG_FOG_DISABLED 16384u
+#define RT_MAT_FLAG_NO_RAY_QUERY_ALPHA 32768u
 
 struct MaterialData {
 	uint albedo_texture_idx;

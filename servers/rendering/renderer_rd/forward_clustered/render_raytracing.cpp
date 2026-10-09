@@ -97,6 +97,15 @@ static RTViewportStateKey _viewport_state_key(const RenderDataRD *p_render_data)
 			p_render_data->render_buffers.ptr(), p_render_data->viewport, p_render_data->environment);
 }
 
+static Ref<RendererRD::Fog::VolumetricFog> _rt_get_volumetric_fog(const RenderDataRD *p_render_data) {
+	Ref<RenderSceneBuffersRD> rb = p_render_data->render_buffers;
+	if (rb.is_null() || !rb->has_custom_data(RB_SCOPE_FOG) || p_render_data->environment.is_null() || !RendererEnvironmentStorage::get_singleton()->environment_get_volumetric_fog_enabled(p_render_data->environment)) {
+		return Ref<RendererRD::Fog::VolumetricFog>();
+	}
+	Ref<RendererRD::Fog::VolumetricFog> fog = rb->get_custom_data(RB_SCOPE_FOG);
+	return fog.is_valid() && fog->fog_map.is_valid() ? fog : Ref<RendererRD::Fog::VolumetricFog>();
+}
+
 RTViewportState *RenderRaytracing::_get_or_create_viewport_state(const RenderDataRD *p_render_data) {
 	if (!p_render_data || p_render_data->render_buffers.is_null()) {
 		return nullptr;
@@ -154,6 +163,12 @@ void RenderRaytracing::_free_viewport_state_internal(RTViewportState *p_state) {
 	}
 	if (p_state->scene_uniform_set.is_valid() && RD::get_singleton()->uniform_set_is_valid(p_state->scene_uniform_set)) {
 		RD::get_singleton()->free_rid(p_state->scene_uniform_set);
+	}
+	if (p_state->fog_shadows_uniform_set.is_valid() && RD::get_singleton()->uniform_set_is_valid(p_state->fog_shadows_uniform_set)) {
+		RD::get_singleton()->free_rid(p_state->fog_shadows_uniform_set);
+	}
+	if (p_state->fog_shadows_ubo.is_valid()) {
+		RD::get_singleton()->free_rid(p_state->fog_shadows_ubo);
 	}
 	memdelete(p_state);
 }
@@ -1590,9 +1605,8 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 		mat.albedo_color[3] = c.a;
 	}
 
-	mat_data->is_custom_shader =
-			!material_storage->material_is_builtin_standard_3d(p_material_rid) ||
-			material_storage->material_requires_custom_rt_hit_group(p_material_rid);
+	const bool is_builtin_standard = material_storage->material_is_builtin_standard_3d(p_material_rid);
+	mat_data->is_custom_shader = !is_builtin_standard || material_storage->material_requires_custom_rt_hit_group(p_material_rid);
 
 	if (!mat_data->is_custom_shader) {
 		mat_data->rt_sbt_offset = 0;
@@ -1611,6 +1625,9 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 
 		const SceneShaderRaytracing::CustomShaderEntry *cse =
 				SceneShaderRaytracing::get_singleton()->get_custom_shader_entry(mat_data->rt_sbt_offset);
+		if (!is_builtin_standard && (!cse || cse->alpha_texture_buffer_offset == UINT32_MAX)) {
+			mat.flags |= RT_MAT_FLAG_NO_RAY_QUERY_ALPHA;
+		}
 		if (cse && cse->uniform_total_size > 0) {
 			Vector<uint8_t> ubo_data;
 			ubo_data.resize(cse->uniform_total_size);
@@ -2360,6 +2377,9 @@ _FORCE_INLINE_ static uint32_t _rt_indices_to_primitives(RSE::PrimitiveType p_pr
 static uint32_t _rt_surface_mat_flags(const SceneShaderForwardClustered::ShaderData *sd,
 		SceneShaderForwardClustered::ShaderData::RTBlendClass p_class) {
 	uint32_t flags = sd && sd->unshaded ? RT_MAT_FLAG_UNSHADED : 0u;
+	if (sd && sd->fog_disabled) {
+		flags |= RT_MAT_FLAG_FOG_DISABLED;
+	}
 	if (p_class == SceneShaderForwardClustered::ShaderData::RT_BLEND_OPAQUE) {
 		return flags;
 	}
@@ -3396,11 +3416,10 @@ RID RenderRaytracing::update_uniform_set(RTViewportState *p_state, const RenderD
 	{
 		struct {
 			//TODO: I see no reason why we need to pass this as a float array
-			float params[16];
+			float params[SceneShaderRaytracing::RT_PARAM_COUNT];
 			float prev_vp_unjittered[16];
 			float curr_vp_unjittered[16];
 		} rt_ubo = {};
-		static_assert(sizeof(rt_ubo) == 48 * sizeof(float));
 
 		if (p_render_data && p_render_data->environment.is_valid()) {
 			RendererEnvironmentStorage *env_storage = RendererEnvironmentStorage::get_singleton();
@@ -3434,6 +3453,14 @@ RID RenderRaytracing::update_uniform_set(RTViewportState *p_state, const RenderD
 			RendererRD::MaterialStorage::store_camera(curr_vp, rt_ubo.curr_vp_unjittered);
 		}
 
+		Ref<RendererRD::Fog::VolumetricFog> vfog = _rt_get_volumetric_fog(p_render_data);
+		if (vfog.is_valid()) {
+			rt_ubo.params[SceneShaderRaytracing::RT_PARAM_VOLUMETRIC_FOG_INV_LENGTH] = vfog->length > 0.0 ? 1.0 / vfog->length : 1.0;
+			rt_ubo.params[SceneShaderRaytracing::RT_PARAM_VOLUMETRIC_FOG_DETAIL_SPREAD] = vfog->spread > 0.0 ? 1.0 / vfog->spread : 1.0;
+			rt_ubo.params[SceneShaderRaytracing::RT_PARAM_VOLUMETRIC_FOG_SKY_AFFECT] = RendererEnvironmentStorage::get_singleton()->environment_get_volumetric_fog_sky_affect(p_render_data->environment);
+		}
+		rt_ubo.params[SceneShaderRaytracing::RT_PARAM_FOG_USE_LEGACY_BLENDING] = owner->fog_use_legacy_blending_get() ? 1.0 : 0.0;
+
 		// --- Light gathering ---
 		uint32_t rt_light_count = 0;
 		RT_LightData rt_light_data[RT_LIGHTS_MAX] = {};
@@ -3462,6 +3489,15 @@ RID RenderRaytracing::update_uniform_set(RTViewportState *p_state, const RenderD
 		u.binding = 6;
 		u.uniform_type = RD::UNIFORM_TYPE_UNIFORM_BUFFER;
 		u.append_id(p_state->params_buffer);
+		uniforms.push_back(u);
+	}
+
+	{
+		RD::Uniform u;
+		u.binding = 35;
+		u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+		Ref<RendererRD::Fog::VolumetricFog> vfog = _rt_get_volumetric_fog(p_render_data);
+		u.append_id(vfog.is_valid() ? vfog->fog_map : RendererRD::TextureStorage::get_singleton()->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_3D_WHITE));
 		uniforms.push_back(u);
 	}
 
@@ -3673,11 +3709,10 @@ RID RenderRaytracing::update_uniform_set(RTViewportState *p_state, const RenderD
 // Trace-time buffer dependencies
 // ---------------------------------------------------------------------------
 
-void RenderRaytracing::register_raytracing_buffer_dependencies(RD::RaytracingListID p_list, const RTViewportState *p_state) {
-	RD *rd = RD::get_singleton();
+void RenderRaytracing::collect_device_address_buffers(const RTViewportState *p_state, LocalVector<RID> &r_buffers) {
 	ERR_FAIL_NULL(p_state);
 	for (RID buffer : p_state->custom_data_buffers) {
-		rd->raytracing_list_add_buffer_dependency(p_list, buffer, /*p_writable=*/false);
+		r_buffers.push_back(buffer);
 	}
 
 	// The hit shader reads vertex / attribute / index data via BDA stored in
@@ -3689,7 +3724,7 @@ void RenderRaytracing::register_raytracing_buffer_dependencies(RD::RaytracingLis
 
 	// Mat UBO pool buffer dependency.
 	if (mat_ubo_pool_buffer.is_valid()) {
-		rd->raytracing_list_add_buffer_dependency(p_list, mat_ubo_pool_buffer, /*p_writable=*/false);
+		r_buffers.push_back(mat_ubo_pool_buffer);
 	}
 
 	// Deformed surface buffer dependencies.
@@ -3699,10 +3734,10 @@ void RenderRaytracing::register_raytracing_buffer_dependencies(RD::RaytracingLis
 			continue;
 		}
 		if (e->owned_vb_full.is_valid()) {
-			rd->raytracing_list_add_buffer_dependency(p_list, e->owned_vb_full, /*p_writable=*/false);
+			r_buffers.push_back(e->owned_vb_full);
 		}
 		if (e->prev_pos_vb.is_valid()) {
-			rd->raytracing_list_add_buffer_dependency(p_list, e->prev_pos_vb, /*p_writable=*/false);
+			r_buffers.push_back(e->prev_pos_vb);
 		}
 	}
 
@@ -3713,14 +3748,22 @@ void RenderRaytracing::register_raytracing_buffer_dependencies(RD::RaytracingLis
 			continue;
 		}
 		if (e->merged_vtx_buffer.is_valid()) {
-			rd->raytracing_list_add_buffer_dependency(p_list, e->merged_vtx_buffer, /*p_writable=*/false);
+			r_buffers.push_back(e->merged_vtx_buffer);
 		}
 		if (e->merged_attr_buffer.is_valid()) {
-			rd->raytracing_list_add_buffer_dependency(p_list, e->merged_attr_buffer, /*p_writable=*/false);
+			r_buffers.push_back(e->merged_attr_buffer);
 		}
 		if (e->replicated_idx_buffer.is_valid()) {
-			rd->raytracing_list_add_buffer_dependency(p_list, e->replicated_idx_buffer, /*p_writable=*/false);
+			r_buffers.push_back(e->replicated_idx_buffer);
 		}
+	}
+}
+
+void RenderRaytracing::register_raytracing_buffer_dependencies(RD::RaytracingListID p_list, const RTViewportState *p_state) {
+	LocalVector<RID> buffers;
+	collect_device_address_buffers(p_state, buffers);
+	for (const RID &buffer : buffers) {
+		RD::get_singleton()->raytracing_list_add_buffer_dependency(p_list, buffer, /*p_writable=*/false);
 	}
 }
 

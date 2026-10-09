@@ -83,10 +83,7 @@ if ((payload.packed_bounces_flags & PEEL_RAY_FLAG) != 0u) {
 // and reset to their defaults automatically at the start of every invocation.
 light_vertex = vertex;
 #ifdef RT_STAGE_CLOSEST_HIT
-if ((RT_FLAGS & RT_FLAG_FOG_ENABLED) != 0u) {
-	vec4 rt_analytic_fog = fog_process(scene_data_block.data, vertex);
-	volumetric_fog_rt = vec4(rt_analytic_fog.rgb * rt_analytic_fog.a, 1.0 - rt_analytic_fog.a);
-}
+volumetric_fog_rt = rt_fog_at(rt_hit_pos, vertex, get_total_bounces(payload.packed_bounces_flags) == 0u);
 #endif
 
 // A function call, not an inlined block, so a `discard` rewritten to `return`

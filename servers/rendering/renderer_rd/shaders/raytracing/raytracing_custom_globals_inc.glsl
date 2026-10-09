@@ -84,8 +84,8 @@ vec4 transmittance_color = vec4(0.0);
 float transmittance_depth = 0.0;
 float transmittance_boost = 0.0;
 // Raster-only builtins. FOG writes are discarded. VOLUMETRIC_FOG reads see the
-// analytic fog at this hit in the raster froxel convention (rgb = premultiplied
-// inscatter, a = transmittance); neutral no-fog is a = 1.
+// combined analytic and froxel fog at this hit (rgb = premultiplied inscatter,
+// a = transmittance); froxels only apply on camera segments.
 vec4 fog = vec4(0.0);
 vec4 volumetric_fog_rt = vec4(0.0, 0.0, 0.0, 1.0);
 

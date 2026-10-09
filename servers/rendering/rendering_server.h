@@ -1089,6 +1089,8 @@ public:
 
 	virtual void viewport_set_force_motion_vectors(RID p_viewport, bool p_force_motion_vectors) = 0;
 	virtual void viewport_set_shared_viewport(RID p_viewport, RID p_shared_viewport) = 0;
+	// Prefixes this viewport's GPU marker labels (see --gpu-markers).
+	virtual void viewport_set_debug_name(RID p_viewport, const String &p_name) = 0;
 
 	virtual void viewport_set_mesh_lod_threshold(RID p_viewport, float p_pixels) = 0;
 

@@ -6901,6 +6901,26 @@ void RenderingDevice::compute_list_set_push_constant(ComputeListID p_list, const
 #endif
 }
 
+void RenderingDevice::compute_list_add_buffer_dependency(ComputeListID p_list, RID p_buffer, bool p_writable) {
+	ERR_RENDER_THREAD_GUARD();
+
+	ERR_FAIL_COND(p_list != ID_TYPE_COMPUTE_LIST);
+	ERR_FAIL_COND(!compute_list.active);
+
+	Buffer *buffer = _get_buffer_from_owner(p_buffer);
+	ERR_FAIL_NULL_MSG(buffer, "Buffer argument is not a valid buffer of any type.");
+
+	if (_buffer_make_mutable(buffer, p_buffer)) {
+		draw_graph.add_synchronization();
+	}
+
+	if (buffer->draw_tracker != nullptr) {
+		draw_graph.add_compute_list_usage(buffer->draw_tracker, p_writable ? RDG::RESOURCE_USAGE_STORAGE_BUFFER_READ_WRITE : RDG::RESOURCE_USAGE_STORAGE_BUFFER_READ);
+	}
+
+	_check_transfer_worker_buffer(buffer);
+}
+
 void RenderingDevice::compute_list_dispatch(ComputeListID p_list, uint32_t p_x_groups, uint32_t p_y_groups, uint32_t p_z_groups) {
 	ERR_RENDER_THREAD_GUARD();
 
@@ -7911,7 +7931,13 @@ void RenderingDevice::draw_command_begin_label(const Span<char> p_label_name, co
 		return;
 	}
 
-	draw_graph.begin_label(p_label_name, p_color);
+	if (draw_command_label_prefix.is_empty()) {
+		draw_graph.begin_label(p_label_name, p_color);
+		return;
+	}
+
+	const CharString prefixed = (draw_command_label_prefix + " / " + String::utf8(p_label_name)).utf8();
+	draw_graph.begin_label(prefixed.span(), p_color);
 }
 
 #ifndef DISABLE_DEPRECATED
@@ -7924,6 +7950,12 @@ void RenderingDevice::draw_command_end_label() {
 	ERR_RENDER_THREAD_GUARD();
 
 	draw_graph.end_label();
+}
+
+void RenderingDevice::draw_command_set_label_prefix(const String &p_prefix) {
+	ERR_RENDER_THREAD_GUARD();
+
+	draw_command_label_prefix = p_prefix;
 }
 
 String RenderingDevice::get_device_vendor_name() const {

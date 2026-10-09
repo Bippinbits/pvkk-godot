@@ -32,6 +32,7 @@
 
 #include "servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.h"
 #include "servers/rendering/renderer_rd/forward_clustered/render_raytracing.h"
+#include "servers/rendering/renderer_rd/forward_clustered/rt_fog_shadows.h"
 
 namespace RendererSceneRenderImplementation {
 
@@ -43,9 +44,11 @@ class RenderForwardClusteredPT : public RenderForwardClustered {
 	/* Raytracing */
 
 	RenderRaytracing *raytracing = nullptr;
+	RTFogShadows *fog_shadows = nullptr;
 
 	bool _setup_rt();
 	void _age_out_motion_vectors(const RenderDataRD *p_render_data);
+	void _update_pt_volumetric_fog(RenderDataRD *p_render_data, RTViewportState *p_rt_state, uint32_t p_directional_light_count, uint32_t p_positional_light_count);
 
 protected:
 	virtual void _render_scene(RenderDataRD *p_render_data, const Color &p_default_bg_color) override;
@@ -53,6 +56,8 @@ protected:
 	virtual void _free_rt_viewport_state(RenderSceneBuffersRD *p_render_buffers) override;
 
 public:
+	virtual bool pathtracing_is_used(RID p_env, RID p_viewport) const override;
+
 	RenderForwardClusteredPT();
 	~RenderForwardClusteredPT();
 };

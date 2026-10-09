@@ -948,14 +948,16 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 			light_data.projector_rect[3] = 0;
 		}
 
+		const bool ray_query_shadow = p_render_data->shadows_from_ray_queries && p_using_shadows && light->shadow;
 		const bool needs_shadow =
+				!ray_query_shadow &&
 				p_using_shadows &&
 				owns_shadow_atlas(p_shadow_atlas) &&
 				shadow_atlas_owns_light_instance(p_shadow_atlas, light_instance->self) &&
 				light->shadow;
 
 		bool in_shadow_range = true;
-		if (needs_shadow && light->distance_fade) {
+		if ((needs_shadow || ray_query_shadow) && light->distance_fade) {
 			if (distance > light->distance_fade_shadow + light->distance_fade_length) {
 				// Out of range, don't draw shadows to improve performance.
 				in_shadow_range = false;
@@ -1026,6 +1028,14 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 				}
 				light_data.shadow_bias *= light_data.soft_shadow_scale;
 			}
+		} else if (ray_query_shadow && in_shadow_range) {
+			light_data.shadow_opacity = light->param[RS::LIGHT_PARAM_SHADOW_OPACITY] * shadow_opacity_fade;
+			light_data.soft_shadow_scale = 0.0;
+			light_data.soft_shadow_size = 0.0;
+			for (int j = 0; j < 4; j++) {
+				light_data.atlas_rect[j] = 0.0;
+			}
+			RendererRD::MaterialStorage::store_transform(Transform3D(), light_data.shadow_matrix);
 		} else {
 			light_data.shadow_opacity = 0.0;
 		}

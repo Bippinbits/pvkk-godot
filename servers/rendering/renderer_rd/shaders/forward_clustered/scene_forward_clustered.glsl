@@ -1516,6 +1516,14 @@ void fragment_shader(in SceneData scene_data) {
 	fog.a = 1.0 - fog.a;
 #endif //!CUSTOM_FOG_USED
 
+	if (bool(scene_data.flags & (SCENE_DATA_FLAGS_DEBUG_VOLUMETRIC_FOG | SCENE_DATA_FLAGS_DEBUG_VOLUMETRIC_FOG_TRANSMITTANCE))) {
+		vec3 debug_color = vec3(1.0, 0.0, 1.0);
+		if (implementation_data.volumetric_fog_enabled) {
+			debug_color = bool(scene_data.flags & SCENE_DATA_FLAGS_DEBUG_VOLUMETRIC_FOG) ? volumetric_fog.rgb : vec3(volumetric_fog.a);
+		}
+		fog = vec4(debug_color, 0.0);
+	}
+
 	uint fog_rg = packHalf2x16(fog.rg);
 	uint fog_ba = packHalf2x16(fog.ba);
 

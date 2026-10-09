@@ -1,6 +1,6 @@
 // Light sampling and Next Event Estimation (NEE) for raytracing.
 // Requires: raytracing_inc.glsl, brdf_inc.glsl, tlas at binding 1, payload at location 0.
-// Note: ray_query_alpha_test() still requires GL_EXT_ray_query (used by DLSS-RR path or when USE_RAY_QUERY_SHADOWS is defined).
+// Note: raytracing_shadow_query_inc.glsl requires GL_EXT_ray_query.
 
 // ============================================================================
 // Light Types and Constants
@@ -159,37 +159,7 @@ float lights_get_specular_multiplier(float specular_amount, float roughness) {
 	}
 }
 
-// ============================================================================
-// Inline Alpha Test (shared by all ray query proceed loops)
-// ============================================================================
-
-vec4 ray_query_surface(uint geometry_idx, uint primitive_id, vec2 candidate_bary) {
-	vec3 bary = vec3(1.0 - candidate_bary.x - candidate_bary.y, candidate_bary.x, candidate_bary.y);
-
-	GeometryData geom = geometries[geometry_idx];
-	uint i0, i1, i2;
-	get_triangle_indices_ex(geom, primitive_id, i0, i1, i2);
-	vec2 uv = fetch_uv(geom, i0, i1, i2, bary);
-
-	MaterialData mat = materials[geometry_idx];
-	uv = uv * mat.uv1_scale.xy + mat.uv1_offset.xy;
-	vec4 albedo = texture(sampler2D(bindless_textures[nonuniformEXT(mat.albedo_texture_idx)], SAMPLER_LINEAR_WITH_MIPMAPS_REPEAT), uv);
-	albedo *= mat.albedo_color;
-	if ((mat.flags & RT_MAT_BLEND_CLASS_MASK) == RT_BLEND_CLASS_PREMULT && albedo.a > 1e-6) {
-		albedo.rgb /= albedo.a;
-	}
-
-	return clamp(albedo, vec4(0.0), vec4(1.0));
-}
-
-float ray_query_alpha(uint geometry_idx, uint primitive_id, vec2 candidate_bary) {
-	return ray_query_surface(geometry_idx, primitive_id, candidate_bary).a;
-}
-
-/// Inline alpha test for non-transparent ray query candidates.
-bool ray_query_alpha_test(uint geometry_idx, uint primitive_id, vec2 candidate_bary) {
-	return ray_query_alpha(geometry_idx, primitive_id, candidate_bary) >= 0.5;
-}
+#include "raytracing_shadow_query_inc.glsl"
 
 // ============================================================================
 // Shadow Ray (traceRayEXT pipeline)
@@ -203,31 +173,7 @@ vec3 lights_trace_shadow_ray(vec3 origin, vec3 direction, float max_dist, uint p
 #ifdef USE_RAY_QUERY_SHADOWS
 	// Ray queries are faster but approximate custom or animated material outputs
 	// with a direct albedo texture sample.
-	vec3 transmittance = vec3(1.0);
-	rayQueryEXT shadow_rq;
-	rayQueryInitializeEXT(shadow_rq, tlas,
-			gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsNoOpaqueEXT,
-			p_shadow_mask, origin, 0.001, direction, max_dist - 0.001);
-
-	while (rayQueryProceedEXT(shadow_rq)) {
-		if (rayQueryGetIntersectionTypeEXT(shadow_rq, false) == gl_RayQueryCandidateIntersectionTriangleEXT) {
-			uint geometry_idx = rayQueryGetIntersectionInstanceCustomIndexEXT(shadow_rq, false);
-			uint primitive_idx = rayQueryGetIntersectionPrimitiveIndexEXT(shadow_rq, false);
-			vec2 bary = rayQueryGetIntersectionBarycentricsEXT(shadow_rq, false);
-			vec4 surface = ray_query_surface(geometry_idx, primitive_idx, bary);
-			float alpha = surface.a;
-			bool transparent_shadow = (materials[geometry_idx].flags & RT_MAT_FLAG_TRANSPARENT) != 0u;
-			if (transparent_shadow && rand(rng_state) >= alpha) {
-				transmittance *= mix(vec3(1.0), surface.rgb, alpha);
-			} else if (transparent_shadow || alpha >= 0.5) {
-				rayQueryConfirmIntersectionEXT(shadow_rq);
-			}
-		}
-	}
-
-	return rayQueryGetIntersectionTypeEXT(shadow_rq, true) == gl_RayQueryCommittedIntersectionNoneEXT
-			? transmittance
-			: vec3(0.0);
+	return ray_query_shadow_transmittance(origin, direction, 0.001, max_dist - 0.001, p_shadow_mask, 0.0, rng_state);
 #elif defined(USE_SER)
 	PathPayload saved_payload = payload;
 	PathState shadow_ps;

@@ -3252,7 +3252,7 @@
 			Maximum distance in meters that indirect (bounce) ray segments trace for transparent surfaces. Transparent layers beyond this distance are ignored on indirect segments, bounding traversal cost for sky-facing bounces. Primary segments and singular (mirror) reflection chains always use the full range. [code]0[/code] disables the limit. Changes take effect immediately.
 		</member>
 		<member name="rendering/pathtracing/transparency_max_bounce" type="int" setter="" getter="" default="2">
-			Last bounce index at which the path tracer performs transparency handling. Every enabled ray segment receives the budget from [member rendering/pathtracing/max_transparency_layers]. Local lighting is composited deterministically; one indirect continuation is chosen by throughput-weighted reservoir sampling to keep path count bounded. Beyond this bounce, the transparent camera lane is not peeled. Changes take effect immediately.
+			Last bounce index at which the path tracer performs transparency handling. Every enabled ray segment receives the budget from [member rendering/pathtracing/max_transparency_layers]. Local lighting is composited deterministically. Each layer offers an indirect continuation with a probability equal to its alpha, and one continuation is chosen by throughput-weighted reservoir sampling to keep path count bounded. Beyond this bounce, the transparent camera lane is not peeled. Changes take effect immediately.
 		</member>
 		<member name="rendering/pathtracing/use_shader_execution_reordering" type="bool" setter="" getter="" default="true">
 			If [code]true[/code], enables NVIDIA Shader Execution Reordering in the path tracer. SET reorders ray tracing shader invocations at runtime to improve GPU occupancy and reduce divergence between threads executing different materials. This can significantly improve path tracing performance on NVIDIA Ada Lovelace and later GPUs. Has no effect on hardware that does not support SET.
@@ -3260,6 +3260,14 @@
 		<member name="rendering/pathtracing/use_simple_shadows" type="bool" setter="" getter="" default="false">
 			If [code]true[/code], shadow rays use Ray Queries instead of fully traced rays. Ray Queries are significantly cheaper but rely on a quick albedo texture fetch. Both paths use stochastic alpha coverage and tint transmitted light with the transparent material's albedo; generated or animated custom material outputs are more accurate with fully traced shadow rays.
 			[b]Note:[/b] Only has an effect when path tracing is enabled on the active [Environment].
+		</member>
+		<member name="rendering/pathtracing/volumetric_fog_shadows" type="bool" setter="" getter="" default="true">
+			If [code]true[/code], volumetric fog traces ray query shadows for shadowed lights when path tracing. If [code]false[/code], those lights scatter into the fog unoccluded, which is faster and useful to check whether geometry is blocking the fog lighting.
+			[b]Note:[/b] Only has an effect when path tracing and [member Environment.volumetric_fog_enabled] are enabled on the active [Environment].
+		</member>
+		<member name="rendering/pathtracing/volumetric_fog_positional_shadow_rays" type="int" setter="" getter="" default="2">
+			Maximum number of shadow rays traced per volumetric fog froxel for shadowed [OmniLight3D]s and [SpotLight3D]s when path tracing. Lights are picked stochastically by their contribution, so more rays reduce noise in scenes with many overlapping lights. Shadowed [DirectionalLight3D]s always use one additional ray, shared stochastically between them.
+			[b]Note:[/b] Only has an effect when path tracing and [member Environment.volumetric_fog_enabled] are enabled on the active [Environment].
 		</member>
 		<member name="rendering/reflections/reflection_atlas/reflection_count" type="int" setter="" getter="" default="64">
 			Number of cubemaps to store in the reflection atlas. The number of [ReflectionProbe]s in a scene will be limited by this amount. A higher number requires more VRAM.

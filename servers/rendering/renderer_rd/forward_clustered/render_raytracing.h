@@ -192,6 +192,8 @@ enum {
 	RT_MAT_FLAG_ALPHA_SCISSOR = 2048u,
 	RT_MAT_FLAG_PROXIMITY_FADE = 4096u,
 	RT_MAT_FLAG_DISTANCE_FADE = 8192u,
+	RT_MAT_FLAG_FOG_DISABLED = 16384u,
+	RT_MAT_FLAG_NO_RAY_QUERY_ALPHA = 32768u,
 };
 
 // Index format for RT geometry (matches GLSL fetch_indices).
@@ -470,6 +472,9 @@ struct RTViewportState {
 	RID params_buffer;
 	RID scene_uniform_set;
 
+	RID fog_shadows_ubo;
+	RID fog_shadows_uniform_set;
+
 	uint32_t frame_counter = 0;
 
 	// Set per frame: the screen-space sky texture was drawn and primary-ray
@@ -673,11 +678,13 @@ public:
 	RID dlss_rr_get_normal_roughness(RenderSceneBuffersRD *p_render_buffers) const;
 	RID dlss_rr_get_specular_hit_dist(RenderSceneBuffersRD *p_render_buffers) const;
 
+	void collect_device_address_buffers(const RTViewportState *p_state, LocalVector<RID> &r_buffers);
 	void register_raytracing_buffer_dependencies(RD::RaytracingListID p_list, const RTViewportState *p_state);
 
 	SceneShaderRaytracing *get_shader() const { return shader; }
 
 	RID get_bindless_uniform_set() const { return bindless_uniform_set; }
+	BindlessBlock *get_bindless_block() const { return bindless_block; }
 	RID get_mat_ubo_pool_buffer() const { return mat_ubo_pool_buffer; }
 
 	~RenderRaytracing();

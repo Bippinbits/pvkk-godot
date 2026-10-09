@@ -10,6 +10,7 @@ layout(constant_id = 0) const uint RT_FLAGS = 0u;
 #define RT_FLAG_DLSS_RR_ENABLED (1u << 1)
 #define RT_FLAG_FOG_ENABLED (1u << 2)
 #define RT_FLAG_DEPTH_COMPOSITE_ENABLED (1u << 5)
+#define RT_FLAG_VOLUMETRIC_FOG_ENABLED (1u << 7)
 
 // Unified TLAS masks: bit 0 = opaque camera lane, bit 1 = transparent camera
 // lane, bits 2-7 = shadow-caster groups.
@@ -41,7 +42,7 @@ global_shader_uniforms;
 #ifndef RT_STAGE_ANY_HIT
 
 layout(set = 0, binding = 6, std140) uniform RaytracingParams {
-	vec4 rt_params[4];
+	vec4 rt_params[RT_PARAM_COUNT / 4];
 	mat4 prev_vp_unjittered;
 	mat4 curr_vp_unjittered;
 };

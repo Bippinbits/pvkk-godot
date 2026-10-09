@@ -77,6 +77,8 @@ public:
 		RID shared_viewport;
 		uint32_t sharing_to_viewport_count = 0;
 
+		String debug_name;
+
 		RendererSceneRender::CameraData prev_camera_data;
 		uint64_t prev_camera_data_frame = 0;
 
@@ -313,6 +315,8 @@ public:
 	void viewport_set_shared_viewport(RID p_viewport, RID p_shared_viewport);
 	RID viewport_get_shared_viewport(RID p_viewport);
 	uint32_t viewport_get_sharing_to_viewport_count(RID p_viewport) const;
+
+	void viewport_set_debug_name(RID p_viewport, const String &p_name);
 
 	void handle_timestamp(String p_timestamp, uint64_t p_cpu_time, uint64_t p_gpu_time);
 

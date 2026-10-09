@@ -259,6 +259,7 @@ public:
 		bool wireframe = false;
 
 		bool unshaded = false;
+		bool fog_disabled = false;
 		bool uses_vertex = false;
 		bool uses_position = false;
 		bool uses_sss = false;

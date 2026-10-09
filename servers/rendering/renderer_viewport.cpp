@@ -48,6 +48,13 @@
 #include "drivers/streamline/streamline_context.h"
 #endif
 
+// No RenderingDevice exists under the Compatibility renderer.
+static void _set_gpu_label_prefix(const String &p_prefix) {
+	if (RD::get_singleton()) {
+		RD::get_singleton()->draw_command_set_label_prefix(p_prefix);
+	}
+}
+
 static Transform2D _canvas_get_transform(RendererViewport::Viewport *p_viewport, RendererCanvasCull::Canvas *p_canvas, RendererViewport::Viewport::CanvasData *p_canvas_data, const Vector2 &p_vp_size) {
 	Transform2D xf = p_viewport->global_transform;
 
@@ -874,6 +881,7 @@ void RendererViewport::draw_viewports(bool p_swap_buffers) {
 		}
 
 		RENDER_TIMESTAMP("> Render Viewport " + itos(i));
+		_set_gpu_label_prefix(vp->debug_name.is_empty() ? "Viewport " + itos(i) : vp->debug_name);
 
 		RSG::texture_storage->render_target_set_as_unused(vp->render_target);
 #ifndef XR_DISABLED
@@ -960,6 +968,7 @@ void RendererViewport::draw_viewports(bool p_swap_buffers) {
 			vp->update_mode = RS::VIEWPORT_UPDATE_DISABLED;
 		}
 
+		_set_gpu_label_prefix(String());
 		RENDER_TIMESTAMP("< Render Viewport " + itos(i));
 
 		// 3D render info.
@@ -1741,6 +1750,12 @@ uint32_t RendererViewport::viewport_get_sharing_to_viewport_count(RID p_viewport
 	Viewport *viewport = viewport_owner.get_or_null(p_viewport);
 	ERR_FAIL_NULL_V(viewport, 0);
 	return viewport->sharing_to_viewport_count;
+}
+
+void RendererViewport::viewport_set_debug_name(RID p_viewport, const String &p_name) {
+	Viewport *viewport = viewport_owner.get_or_null(p_viewport);
+	ERR_FAIL_NULL(viewport);
+	viewport->debug_name = p_name;
 }
 
 bool RendererViewport::free(RID p_rid) {

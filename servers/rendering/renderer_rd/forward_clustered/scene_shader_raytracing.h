@@ -81,6 +81,7 @@ public:
 		RT_FLAG_RAY_QUERY_SHADOWS_ENABLED = (1 << 4),
 		RT_FLAG_DEPTH_COMPOSITE_ENABLED = (1 << 5),
 		RT_FLAG_TIMING_ENABLED = (1 << 6),
+		RT_FLAG_VOLUMETRIC_FOG_ENABLED = (1 << 7),
 	};
 
 	constexpr static uint32_t RT_SAMPLE_COUNT_SHIFT = 21;
@@ -94,7 +95,11 @@ public:
 	// 2: shadow ray from closest_hit (NEE)
 	constexpr static uint32_t RT_MAX_RECURSION_DEPTH = 2;
 
-	// Pathtracing parameter indices for the float[16] params buffer.
+	// Size of the float params buffer, injected into the RT shaders as RT_PARAM_COUNT.
+	static constexpr int RT_PARAM_COUNT = 16;
+	static_assert(RT_PARAM_COUNT % 4 == 0, "rt_params is a std140 vec4 array.");
+
+	// Pathtracing parameter indices for the params buffer.
 	// Must match RT_PARAM_* defines in raytracing_inc.glsl.
 	static constexpr int RT_PARAM_VIS_MODE = 0;
 	// Must match Environment::RT_DEBUG_TIMING_HEATMAP. Timing uses normal shading.
@@ -108,7 +113,10 @@ public:
 	static constexpr int RT_PARAM_TRANSPARENCY_INDIRECT_RANGE = 7;
 	static constexpr int RT_PARAM_TRANSPARENCY_INDIRECT_FADE = 8;
 	static constexpr int RT_PARAM_SKY_SCREEN_ENABLED = 9;
-	// Indices 10-13 reserved for future use.
+	static constexpr int RT_PARAM_VOLUMETRIC_FOG_INV_LENGTH = 10; // 0 = volumetric fog disabled.
+	static constexpr int RT_PARAM_VOLUMETRIC_FOG_DETAIL_SPREAD = 11;
+	static constexpr int RT_PARAM_VOLUMETRIC_FOG_SKY_AFFECT = 12;
+	static constexpr int RT_PARAM_FOG_USE_LEGACY_BLENDING = 13;
 	static constexpr int RT_PARAM_LIGHT_COUNT = 14;
 	static constexpr int RT_PARAM_FRAME_INDEX = 15;
 
@@ -122,7 +130,7 @@ public:
 
 	// Build the full packed rt_flags from pathtracing environment settings.
 	// `p_environment` may be invalid (RT active with no pathtracing environment).
-	static uint32_t compute_rt_flags(RID p_environment, bool p_fog_enabled);
+	static uint32_t compute_rt_flags(RID p_environment, bool p_fog_enabled, bool p_volumetric_fog_enabled);
 
 	struct ShaderSpecialization {
 		union {

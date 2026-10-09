@@ -3334,8 +3334,7 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 	cull.frustum = Frustum(planes);
 
 	// RT: build wider AABB cull volume for TLAS and light gathering.
-	cull.rt_enabled = p_environment.is_valid() &&
-			scene_render->environment_get_pathtracing_enabled(p_environment);
+	cull.rt_enabled = p_reflection_probe.is_null() && scene_render->pathtracing_is_used(p_environment, p_viewport);
 	if (cull.rt_enabled) {
 		float z_far = p_camera_data->main_projection.get_z_far();
 		Vector3 cam_origin = p_camera_data->main_transform.origin;
@@ -3487,7 +3486,8 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 		for (uint32_t i = 0; i < (uint32_t)scene_cull_result.lights.size(); i++) {
 			Instance *ins = scene_cull_result.lights[i];
 
-			if (!p_shadow_atlas.is_valid()) {
+			// Path tracing never draws the atlas, so don't let it record shadows as up to date.
+			if (!p_shadow_atlas.is_valid() || cull.rt_enabled) {
 				continue;
 			}
 

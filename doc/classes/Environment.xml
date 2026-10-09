@@ -557,6 +557,15 @@
 			Use [member ProjectSettings.rendering/pathtracing/debug_heatmap_max_ticks] to adjust the range and [member ProjectSettings.rendering/pathtracing/debug_heatmap_opacity] to adjust the tint strength. Timings include scheduling and traversal latency; they are relative GPU clock ticks, not portable time units or isolated shader instruction costs.
 			Requires Vulkan [code]VK_KHR_shader_clock[/code] with [code]shaderDeviceClock[/code] support. Unsupported devices render normal path tracing without the overlay. The timing texture is allocated only while this mode is active and is released when another debug mode is selected or path tracing is disabled.
 		</constant>
+		<constant name="RT_DEBUG_VOLUMETRIC_FOG" value="25" enum="PathtracingDebugMode">
+			Displays the volumetric fog in-scattering applied to the primary segment, sampled from the froxel grid at the primary hit (or the far end of the fog volume for sky pixels). When path tracing is disabled, the rasterizer shows the same froxel data at each surface. Magenta means no volumetric fog is bound.
+		</constant>
+		<constant name="RT_DEBUG_VOLUMETRIC_FOG_TRANSMITTANCE" value="26" enum="PathtracingDebugMode">
+			Displays the volumetric fog transmittance of the primary segment. White means no fog attenuation. Also shown by the rasterizer when path tracing is disabled.
+		</constant>
+		<constant name="RT_DEBUG_DIRECTIONAL_SHADOW_BLOCKER" value="27" enum="PathtracingDebugMode">
+			Traces from the primary hit toward the first [DirectionalLight3D] against every shadow caster, as volumetric fog does. White: the light is visible. Yellow: only transparent casters are in the way, darker with lower transmittance. Red: an opaque caster the camera does not see blocks it (the rasterizer ignores such casters). Blue: an opaque caster the camera sees blocks it. Red and blue get darker the farther away the blocker is. Dark gray: the surface faces away from the light. Magenta: no directional light.
+		</constant>
 		<constant name="FOG_MODE_EXPONENTIAL" value="0" enum="FogMode">
 			Use a physically-based fog model defined primarily by fog density.
 		</constant>

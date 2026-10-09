@@ -676,7 +676,7 @@ bool SceneShaderRaytracing::is_hg_ready_in_bundle(uint32_t p_slot_index, uint32_
 	return b.live_ready_mask[p_slot_index];
 }
 
-uint32_t SceneShaderRaytracing::compute_rt_flags(RID p_environment, bool p_fog_enabled) {
+uint32_t SceneShaderRaytracing::compute_rt_flags(RID p_environment, bool p_fog_enabled, bool p_volumetric_fog_enabled) {
 	uint32_t flags = RT_FLAG_NONE;
 	uint32_t sample_count = 1;
 	uint32_t max_bounces = 3;
@@ -708,6 +708,9 @@ uint32_t SceneShaderRaytracing::compute_rt_flags(RID p_environment, bool p_fog_e
 
 	if (p_fog_enabled) {
 		flags |= RT_FLAG_FOG_ENABLED;
+	}
+	if (p_volumetric_fog_enabled) {
+		flags |= RT_FLAG_VOLUMETRIC_FOG_ENABLED;
 	}
 
 	if (GLOBAL_GET("rendering/pathtracing/use_shader_execution_reordering")) {
@@ -1695,7 +1698,6 @@ void SceneShaderRaytracing::init(const String p_defines) {
 		actions.global_buffer_array_variable = "global_shader_uniforms.data";
 		// No raster instance SSBO in RT stages; the offset rides GeometryData.
 		actions.instance_uniform_index_variable = "geometries[gl_InstanceCustomIndexEXT].instance_uniforms_ofs";
-		// No volumetric fog froxels in RT; reads resolve to the zero stub.
 		actions.renames["VOLUMETRIC_FOG"] = "volumetric_fog_rt";
 
 		actions.check_multiview_samplers = RendererCompositorRD::get_singleton()->is_xr_enabled(); // Make sure we check sampling multiview textures.

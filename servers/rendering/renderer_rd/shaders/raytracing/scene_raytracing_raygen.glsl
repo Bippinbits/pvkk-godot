@@ -78,6 +78,25 @@ void continuation_reservoir_add(inout ContinuationReservoir r, PathState candida
 	}
 }
 
+// Russian roulette thresholds on the strongest throughput channel, per bounce; the last entry covers
+// deeper bounces. The first bounce carries most of the visible indirect light, so it is cut least.
+const float RT_RUSSIAN_ROULETTE_THRESHOLDS[2] = float[](0.1, 0.25);
+
+// p_next_bounce is the segment about to be traced, 1 for the first bounce. Survivors are scaled back
+// up to the threshold, never above it, so they cannot become fireflies.
+bool russian_roulette_survives(uint p_next_bounce, inout PathState ps) {
+	uint threshold_idx = min(p_next_bounce, uint(RT_RUSSIAN_ROULETTE_THRESHOLDS.length())) - 1u;
+	float survival = max(ps.throughput.x, max(ps.throughput.y, ps.throughput.z)) / RT_RUSSIAN_ROULETTE_THRESHOLDS[threshold_idx];
+	if (survival >= 1.0) {
+		return true;
+	}
+	if (rand(ps.rng_state) >= survival) {
+		return false;
+	}
+	ps.throughput /= survival;
+	return true;
+}
+
 void main() {
 #ifdef RT_TIMING_ENABLED
 	uvec2 start_clock = clockRealtime2x32EXT();
@@ -288,7 +307,7 @@ void main() {
 #endif
 			}
 
-			if (opaque_terminated) {
+			if (opaque_terminated || !russian_roulette_survives(bounce + 1u, ps)) {
 				break;
 			}
 			// Reconstruct the next ray origin from the current ray + hit distance, apply bias
@@ -347,6 +366,8 @@ void main() {
 #include "../scene_data_inc.glsl"
 #include "brdf_inc.glsl"
 #include "raytracing_common_inc.glsl"
+#include "raytracing_samplers_inc.glsl"
+#include "raytracing_volumetric_fog_inc.glsl"
 // clang-format on
 
 layout(location = 0) rayPayloadInEXT PathPayload payload;
@@ -472,6 +493,11 @@ void main() {
 
 			sky_color = mix(sky_color, fog_color, scene_data_block.data.fog_sky_affect);
 		}
+
+		if (get_total_bounces(ps.packed_bounces_flags) == 0u && rt_volumetric_fog_enabled()) {
+			vec3 far_world = gl_WorldRayOriginEXT + gl_WorldRayDirectionEXT * 10000.0;
+			sky_color = rt_volumetric_fog_apply_sky(sky_color, project_uv(far_world, curr_vp_unjittered));
+		}
 	}
 
 #ifdef DLSS_RR_ENABLED
@@ -492,6 +518,9 @@ void main() {
 		int VIS_MODE = int(get_rt_param(RT_PARAM_VIS_MODE));
 		if (VIS_MODE == 20) {
 			ps.radiance = vec3(1.0);
+		} else if (VIS_MODE == RT_VIS_VOLUMETRIC_FOG || VIS_MODE == RT_VIS_VOLUMETRIC_FOG_TRANSMITTANCE) {
+			vec3 far_world = gl_WorldRayOriginEXT + gl_WorldRayDirectionEXT * 10000.0;
+			ps.radiance = rt_volumetric_fog_debug(VIS_MODE, rt_volumetric_fog_sky_sample(project_uv(far_world, curr_vp_unjittered)));
 		} else if (VIS_MODE == 0) {
 			ps.radiance += ps.throughput * sky_color;
 		} else {

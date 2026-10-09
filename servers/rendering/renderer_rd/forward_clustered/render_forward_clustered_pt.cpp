@@ -53,9 +53,7 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 	}
 	bool is_reflection_probe = p_render_data->reflection_probe.is_valid();
 
-	const bool use_rt = !is_reflection_probe && p_render_data->use_pathtracing && p_render_data->environment.is_valid() &&
-			RendererEnvironmentStorage::get_singleton()->environment_get_pathtracing_enabled(p_render_data->environment) &&
-			_setup_rt();
+	const bool use_rt = !is_reflection_probe && pathtracing_is_used(p_render_data->environment, p_render_data->viewport) && _setup_rt();
 	const bool timing_enabled = use_rt &&
 			RendererEnvironmentStorage::get_singleton()->environment_get_pathtracing_debug_mode(p_render_data->environment) == SceneShaderRaytracing::RT_DEBUG_TIMING_HEATMAP &&
 			RD::get_singleton()->has_feature(RD::SUPPORTS_SHADER_DEVICE_CLOCK);
@@ -193,7 +191,8 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 		RENDER_TIMESTAMP("Build Acceleration Structures");
 		RID rt_environment = p_render_data->environment.is_valid() ? p_render_data->environment : RID();
 		const bool fog_enabled = rt_environment.is_valid() && environment_get_fog_enabled(rt_environment);
-		rt_flags = SceneShaderRaytracing::compute_rt_flags(rt_environment, fog_enabled);
+		const bool volumetric_fog_enabled = rt_environment.is_valid() && environment_get_volumetric_fog_enabled(rt_environment);
+		rt_flags = SceneShaderRaytracing::compute_rt_flags(rt_environment, fog_enabled, volumetric_fog_enabled);
 
 		if (p_render_data->load_color_and_depth) {
 			rt_flags |= SceneShaderRaytracing::RT_FLAG_DEPTH_COMPOSITE_ENABLED;
@@ -234,7 +233,6 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 		if (rt_state) {
 			rt_state->sky_screen_enabled = pt_sky_screen;
 			raytracing->update_scene_ubo(rt_state, p_render_data, screen_size, p_default_bg_color);
-			rt_uniform_set = raytracing->update_uniform_set(rt_state, p_render_data, rt_flags);
 		}
 	} else if (rb_data.is_valid() && raytracing && !p_render_data->skip_post_and_tonemap && raytracing->dlss_rr_has_buffers(rb.ptr())) {
 		// No RT shader available: free DLSS RR buffers so DLSS falls back to SR.
@@ -330,22 +328,6 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 			}
 
 			RD::get_singleton()->draw_command_end_label();
-
-			// Run the sky shader per pixel into its own target. The trace below reads
-			// it for primary-ray misses, so the background matches the raster sky
-			// exactly (and stays inside the denoiser's input, unlike a post-trace
-			// composite). Indirect rays keep using the octmap.
-			if (pt_sky_screen && draw_sky) {
-				RID sky_fb = raytracing->rt_get_sky_framebuffer(rb.ptr());
-				if (sky_fb.is_valid()) {
-					RENDER_TIMESTAMP("Render Sky (Pathtraced Primary Rays)");
-					RD::get_singleton()->draw_command_begin_label("Draw Sky (Pathtraced Primary Rays)");
-					RD::DrawListID sky_draw_list = RD::get_singleton()->draw_list_begin(sky_fb, RD::DRAW_IGNORE_COLOR_ALL);
-					sky.draw_sky(sky_draw_list, rb, p_render_data->environment, sky_fb, time, sky_luminance_multiplier, sky_brightness_multiplier);
-					RD::get_singleton()->draw_list_end();
-					RD::get_singleton()->draw_command_end_label();
-				}
-			}
 		}
 
 		if (bg_mode != RSE::ENV_BG_CLEAR_COLOR && bg_mode != RSE::ENV_BG_COLOR) {
@@ -378,12 +360,37 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 		_process_compositor_effects(RSE::COMPOSITOR_EFFECT_CALLBACK_TYPE_PRE_OPAQUE, p_render_data);
 	}
 
-	// Sky (sun disk) and the remaining raster passes still read the light
-	// UBOs and cluster grid, so this runs even with pathtraced transparency.
+	// Sky (sun disk), volumetric fog and the remaining raster passes still read
+	// the light UBOs and cluster grid, so this runs even with pathtraced transparency.
 	{
+		p_render_data->shadows_from_ray_queries = rt_state != nullptr;
 		uint32_t pt_directional_light_count = 0;
 		uint32_t pt_positional_light_count = 0;
 		_setup_lights_cluster_decals(p_render_data, pt_directional_light_count, pt_positional_light_count);
+
+		RENDER_TIMESTAMP("Update Volumetric Fog");
+		_update_pt_volumetric_fog(p_render_data, rt_state, pt_directional_light_count, pt_positional_light_count);
+	}
+
+	// Built after the fog update, which the trace samples.
+	if (rt_state) {
+		rt_uniform_set = raytracing->update_uniform_set(rt_state, p_render_data, rt_flags);
+	}
+
+	// Run the sky shader per pixel into its own target. The trace below reads
+	// it for primary-ray misses, so the background matches the raster sky
+	// exactly (and stays inside the denoiser's input, unlike a post-trace
+	// composite). Indirect rays keep using the octmap.
+	if (pt_sky_screen && draw_sky) {
+		RID sky_fb = raytracing->rt_get_sky_framebuffer(rb.ptr());
+		if (sky_fb.is_valid()) {
+			RENDER_TIMESTAMP("Render Sky (Pathtraced Primary Rays)");
+			RD::get_singleton()->draw_command_begin_label("Draw Sky (Pathtraced Primary Rays)");
+			RD::DrawListID sky_draw_list = RD::get_singleton()->draw_list_begin(sky_fb, RD::DRAW_IGNORE_COLOR_ALL);
+			sky.draw_sky(sky_draw_list, rb, p_render_data->environment, sky_fb, time, sky_luminance_multiplier, sky_brightness_multiplier);
+			RD::get_singleton()->draw_list_end();
+			RD::get_singleton()->draw_command_end_label();
+		}
 	}
 
 	// Execute raytracing (replaces the opaque + motion vector pass).
@@ -579,6 +586,12 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 
 // Raytracing methods
 
+bool RenderForwardClusteredPT::pathtracing_is_used(RID p_env, RID p_viewport) const {
+	return p_env.is_valid() && environment_get_pathtracing_enabled(p_env) &&
+			(p_viewport.is_null() || RSG::viewport->viewport_get_use_pathtracing(p_viewport)) &&
+			RD::get_singleton()->has_feature(RD::SUPPORTS_RAYTRACING_PIPELINE);
+}
+
 bool RenderForwardClusteredPT::_setup_rt() {
 	if (!RD::get_singleton()->has_feature(RD::SUPPORTS_RAYTRACING_PIPELINE)) {
 		WARN_PRINT_ONCE("Raytracing not supported on this device.");
@@ -592,13 +605,40 @@ bool RenderForwardClusteredPT::_setup_rt() {
 		String rt_defines;
 		rt_defines += "\n#define RT 1\n";
 		rt_defines += "\n#define MAX_ROUGHNESS_LOD " + itos(get_roughness_layers() - 1) + ".0\n";
+		rt_defines += "\n#define RT_PARAM_COUNT " + itos(SceneShaderRaytracing::RT_PARAM_COUNT) + "\n";
 		if (is_using_radiance_octmap_array()) {
 			rt_defines += "\n#define USE_RADIANCE_OCTMAP_ARRAY \n";
 		}
 		raytracing->shader->init(rt_defines);
 	}
 
+	if (!fog_shadows) {
+		fog_shadows = memnew(RTFogShadows);
+		fog_shadows->initialize();
+	}
+
 	return true;
+}
+
+void RenderForwardClusteredPT::_update_pt_volumetric_fog(RenderDataRD *p_render_data, RTViewportState *p_rt_state, uint32_t p_directional_light_count, uint32_t p_positional_light_count) {
+	// Like raster, keep the froxels when fog is off: a shared viewport without fog renders
+	// into the same buffers, and freeing them would reset the temporal history every frame.
+	if (p_render_data->environment.is_null() || !environment_get_volumetric_fog_enabled(p_render_data->environment)) {
+		return;
+	}
+
+	Ref<RenderSceneBuffersRD> rb = p_render_data->render_buffers;
+
+	// Shadow maps aren't rendered when path tracing, so there is no raster fallback.
+	RendererRD::Fog::VolumetricFogRayQueryShadows ray_query_shadows;
+	if (!fog_shadows->prepare(raytracing, p_rt_state, p_render_data, ray_query_shadows)) {
+		rb->set_custom_data(RB_SCOPE_FOG, Ref<RenderBufferCustomDataRD>());
+		return;
+	}
+
+	gi.setup_voxel_gi_instances(p_render_data, rb, p_render_data->scene_data->cam_transform, *p_render_data->voxel_gi_instances, p_render_data->voxel_gi_count);
+
+	_update_volumetric_fog(rb, p_render_data->environment, p_render_data->scene_data->cam_projection, p_render_data->scene_data->cam_transform, p_render_data->scene_data->prev_cam_transform.affine_inverse(), RID(), p_directional_light_count, false, p_positional_light_count, p_render_data->voxel_gi_count, *p_render_data->fog_volumes, &ray_query_shadows);
 }
 
 void RenderForwardClusteredPT::_age_out_motion_vectors(const RenderDataRD *p_render_data) {
@@ -685,6 +725,9 @@ RenderForwardClusteredPT::RenderForwardClusteredPT() {
 }
 
 RenderForwardClusteredPT::~RenderForwardClusteredPT() {
+	if (fog_shadows) {
+		memdelete(fog_shadows);
+	}
 	if (raytracing) {
 		memdelete(raytracing);
 	}

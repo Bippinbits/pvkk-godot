@@ -13,7 +13,7 @@
 // ============================================================================
 // RT_PARAMS INDICES - Must match RT_PARAM_* in scene_shader_raytracing.h
 // ============================================================================
-// rt_params is a vec4[4] uniform buffer (16 floats total)
+// rt_params is a vec4 uniform array of RT_PARAM_COUNT floats, injected from SceneShaderRaytracing
 // Access: rt_params[idx >> 2][idx & 3] or get_rt_param(idx)
 #define RT_PARAM_VIS_MODE 0 // rt_params[0].x - Debug visualization mode (0 = disabled)
 #define RT_PARAM_SAMPLE_COUNT 1 // rt_params[0].y - Samples per pixel
@@ -25,7 +25,10 @@
 #define RT_PARAM_TRANSPARENCY_INDIRECT_RANGE 7 // rt_params[1].w - max peel distance on non-singular bounces (0 = unlimited)
 #define RT_PARAM_TRANSPARENCY_INDIRECT_FADE 8 // rt_params[2].x - fade-out length before that range (0 = hard cutoff)
 #define RT_PARAM_SKY_SCREEN_ENABLED 9 // rt_params[2].y - primary-ray misses read the screen-space sky instead of the octmap
-// Indices 10-13 reserved for future use
+#define RT_PARAM_VOLUMETRIC_FOG_INV_LENGTH 10 // rt_params[2].z - 1 / fog length, 0 = volumetric fog disabled
+#define RT_PARAM_VOLUMETRIC_FOG_DETAIL_SPREAD 11 // rt_params[2].w - 1 / detail spread
+#define RT_PARAM_VOLUMETRIC_FOG_SKY_AFFECT 12 // rt_params[3].x
+#define RT_PARAM_FOG_USE_LEGACY_BLENDING 13 // rt_params[3].y
 #define RT_PARAM_LIGHT_COUNT 14 // rt_params[3].z - Number of active lights in light buffer
 #define RT_PARAM_FRAME_INDEX 15 // rt_params[3].w - Frame counter for temporal variation
 
@@ -199,7 +202,8 @@ uint init_rng(uvec2 pixel, uint frame, uint sample_idx) {
 /// Random float in [0, 1)
 float rand(inout uint state) {
 	state = pcg_hash(state);
-	return float(state) / 4294967296.0;
+	// Keep 24 bits, float(state) would round the top values up to exactly 1.0.
+	return float(state >> 8u) * (1.0 / 16777216.0);
 }
 
 /// Random vec2 in [0, 1)
