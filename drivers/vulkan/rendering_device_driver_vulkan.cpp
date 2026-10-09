@@ -6415,6 +6415,10 @@ uint64_t RenderingDeviceDriverVulkan::api_trait_get(ApiTrait p_trait) {
 			return (uint64_t)MAX((uint64_t)16, physical_device_properties.limits.optimalBufferCopyOffsetAlignment);
 		case API_TRAIT_SHADER_CHANGE_INVALIDATION:
 			return (uint64_t)SHADER_CHANGE_INVALIDATION_INCOMPATIBLE_SETS_PLUS_CASCADE;
+		case API_TRAIT_CAN_USE_SECONDARY_COMMAND_BUFFERS:
+			return true;
+		case API_TRAIT_CAN_SET_SCISSOR_OR_VIEWPORT_IN_SECONDARY_COMMAND_BUFFERS:
+			return true;
 		default:
 			return RenderingDeviceDriver::api_trait_get(p_trait);
 	}

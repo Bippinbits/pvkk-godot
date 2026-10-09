@@ -132,12 +132,6 @@ static uint32_t _get_device_type_score(const RenderingContextDriver::Device &p_d
 
 #define RENDER_GRAPH_FULL_BARRIERS 0
 
-// The command graph can automatically issue secondary command buffers and record them on background threads when they reach an arbitrary
-// size threshold. This can be very beneficial towards reducing the time the main thread takes to record all the rendering commands. However,
-// this setting is not enabled by default as it's been shown to cause some strange issues with certain IHVs that have yet to be understood.
-
-#define SECONDARY_COMMAND_BUFFERS_PER_FRAME 0
-
 RenderingDevice *RenderingDevice::singleton = nullptr;
 
 RenderingDevice *RenderingDevice::get_singleton() {
@@ -4554,9 +4548,6 @@ RenderingDevice::DrawListID RenderingDevice::draw_list_begin_for_screen(DisplayS
 	RDD::RenderPassID render_pass = driver->swap_chain_get_render_pass(sc_it->value);
 	draw_graph.add_draw_list_begin(render_pass, fb_it->value, viewport, RDG::ATTACHMENT_OPERATION_CLEAR, clear_value, RDD::PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, RDD::BreadcrumbMarker::BLIT_PASS, split_swapchain_into_its_own_cmd_buffer);
 
-	draw_graph.add_draw_list_set_viewport(viewport);
-	draw_graph.add_draw_list_set_scissor(viewport);
-
 	return int64_t(ID_TYPE_DRAW_LIST) << ID_BASE_SHIFT;
 }
 
@@ -4676,10 +4667,6 @@ RenderingDevice::DrawListID RenderingDevice::draw_list_begin(RID p_framebuffer, 
 #endif
 	draw_list_current_subpass = 0;
 	draw_list_subpass_count = framebuffer_key.passes.size();
-
-	Rect2i viewport_rect(viewport_offset, viewport_size);
-	draw_graph.add_draw_list_set_viewport(viewport_rect);
-	draw_graph.add_draw_list_set_scissor(viewport_rect);
 
 	return int64_t(ID_TYPE_DRAW_LIST) << ID_BASE_SHIFT;
 }
@@ -7315,7 +7302,7 @@ Error RenderingDevice::initialize(RenderingContextDriver *p_context, DisplayServ
 
 	// Create draw graph and start it initialized as well. Enable breadcrumbs if device lost information is extended.
 	bool device_lost_information_extended = GLOBAL_GET("rendering/rendering_device/device_lost_information/extended");
-	draw_graph.initialize(driver, device, &_render_pass_create_from_graph, frames.size(), main_queue_family, SECONDARY_COMMAND_BUFFERS_PER_FRAME, device_lost_information_extended);
+	draw_graph.initialize(driver, device, &_render_pass_create_from_graph, frames.size(), main_queue_family, device_lost_information_extended);
 	draw_graph.begin();
 
 	for (uint32_t i = 0; i < frames.size(); i++) {
