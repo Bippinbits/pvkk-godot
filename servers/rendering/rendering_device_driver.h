@@ -439,7 +439,7 @@ public:
 
 	virtual CommandBufferID command_buffer_create(CommandPoolID p_cmd_pool) = 0;
 	virtual bool command_buffer_begin(CommandBufferID p_cmd_buffer) = 0;
-	virtual bool command_buffer_begin_secondary(CommandBufferID p_cmd_buffer, RenderPassID p_render_pass, uint32_t p_subpass, FramebufferID p_framebuffer) = 0;
+	virtual bool command_buffer_begin_secondary(CommandBufferID p_cmd_buffer, RenderPassID p_render_pass, uint32_t p_subpass) = 0;
 	virtual void command_buffer_end(CommandBufferID p_cmd_buffer) = 0;
 	virtual void command_buffer_execute_secondary(CommandBufferID p_cmd_buffer, VectorView<CommandBufferID> p_secondary_cmd_buffers) = 0;
 
@@ -809,6 +809,8 @@ public:
 		API_TRAIT_USE_GENERAL_IN_COPY_QUEUES,
 		API_TRAIT_BUFFERS_REQUIRE_TRANSITIONS,
 		API_TRAIT_TEXTURE_OUTPUTS_REQUIRE_CLEARS,
+		API_TRAIT_CAN_USE_SECONDARY_COMMAND_BUFFERS,
+		API_TRAIT_SCISSOR_AND_VIEWPORT_IN_SECONDARY_COMMAND_BUFFERS,
 	};
 
 	enum ShaderChangeInvalidation {

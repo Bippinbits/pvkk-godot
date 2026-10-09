@@ -3178,8 +3178,7 @@ bool RenderingDeviceDriverVulkan::command_buffer_begin(CommandBufferID p_cmd_buf
 	return true;
 }
 
-bool RenderingDeviceDriverVulkan::command_buffer_begin_secondary(CommandBufferID p_cmd_buffer, RenderPassID p_render_pass, uint32_t p_subpass, FramebufferID p_framebuffer) {
-	Framebuffer *framebuffer = (Framebuffer *)(p_framebuffer.id);
+bool RenderingDeviceDriverVulkan::command_buffer_begin_secondary(CommandBufferID p_cmd_buffer, RenderPassID p_render_pass, uint32_t p_subpass) {
 	RenderPassInfo *render_pass = (RenderPassInfo *)(p_render_pass.id);
 	CommandBufferInfo *command_buffer = (CommandBufferInfo *)(p_cmd_buffer.id);
 
@@ -3187,7 +3186,6 @@ bool RenderingDeviceDriverVulkan::command_buffer_begin_secondary(CommandBufferID
 	inheritance_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO;
 	inheritance_info.renderPass = render_pass->vk_render_pass;
 	inheritance_info.subpass = p_subpass;
-	inheritance_info.framebuffer = framebuffer->vk_framebuffer;
 
 	VkCommandBufferBeginInfo cmd_buf_begin_info = {};
 	cmd_buf_begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -6415,6 +6413,10 @@ uint64_t RenderingDeviceDriverVulkan::api_trait_get(ApiTrait p_trait) {
 			return (uint64_t)MAX((uint64_t)16, physical_device_properties.limits.optimalBufferCopyOffsetAlignment);
 		case API_TRAIT_SHADER_CHANGE_INVALIDATION:
 			return (uint64_t)SHADER_CHANGE_INVALIDATION_INCOMPATIBLE_SETS_PLUS_CASCADE;
+		case API_TRAIT_CAN_USE_SECONDARY_COMMAND_BUFFERS:
+			return true;
+		case API_TRAIT_SCISSOR_AND_VIEWPORT_IN_SECONDARY_COMMAND_BUFFERS:
+			return true;
 		default:
 			return RenderingDeviceDriver::api_trait_get(p_trait);
 	}
