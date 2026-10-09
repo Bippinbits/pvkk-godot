@@ -497,7 +497,6 @@ public:
 		BitField<DirtyFlag> dirty = DIRTY_NONE;
 
 		LocalVector<MDUniformSet *> uniform_sets;
-		uint32_t dynamic_offsets = 0;
 		// Bit mask of the uniform sets that are dirty, to prevent redundant binding.
 		uint64_t uniform_set_mask = 0;
 
@@ -608,7 +607,6 @@ public:
 		BitField<DirtyFlag> dirty = DIRTY_NONE;
 
 		LocalVector<MDUniformSet *> uniform_sets;
-		uint32_t dynamic_offsets = 0;
 		// Bit mask of the uniform sets that are dirty, to prevent redundant binding.
 		uint64_t uniform_set_mask = 0;
 
@@ -649,7 +647,7 @@ public:
 
 #pragma mark - Render Commands
 
-	void render_bind_uniform_sets(VectorView<RDD::UniformSetID> p_uniform_sets, RDD::ShaderID p_shader, uint32_t p_first_set_index, uint32_t p_set_count, uint32_t p_dynamic_offsets);
+	void render_bind_uniform_sets(VectorView<RDD::UniformSetID> p_uniform_sets, RDD::ShaderID p_shader, uint32_t p_first_set_index, uint32_t p_set_count);
 	void render_clear_attachments(VectorView<RDD::AttachmentClear> p_attachment_clears, VectorView<Rect2i> p_rects);
 	void render_set_viewport(VectorView<Rect2i> p_viewports);
 	void render_set_scissor(VectorView<Rect2i> p_scissors);
@@ -664,7 +662,7 @@ public:
 			uint32_t p_instance_count,
 			uint32_t p_base_vertex,
 			uint32_t p_first_instance);
-	void render_bind_vertex_buffers(uint32_t p_binding_count, const RDD::BufferID *p_buffers, const uint64_t *p_offsets, uint64_t p_dynamic_offsets);
+	void render_bind_vertex_buffers(uint32_t p_binding_count, const RDD::BufferID *p_buffers, const uint64_t *p_offsets);
 	void render_bind_index_buffer(RDD::BufferID p_buffer, RDD::IndexBufferFormat p_format, uint64_t p_offset);
 
 	void render_draw_indexed(uint32_t p_index_count,
@@ -682,7 +680,7 @@ public:
 
 #pragma mark - Compute Commands
 
-	void compute_bind_uniform_sets(VectorView<RDD::UniformSetID> p_uniform_sets, RDD::ShaderID p_shader, uint32_t p_first_set_index, uint32_t p_set_count, uint32_t p_dynamic_offsets);
+	void compute_bind_uniform_sets(VectorView<RDD::UniformSetID> p_uniform_sets, RDD::ShaderID p_shader, uint32_t p_first_set_index, uint32_t p_set_count);
 	void compute_dispatch(uint32_t p_x_groups, uint32_t p_y_groups, uint32_t p_z_groups);
 	void compute_dispatch_indirect(RDD::BufferID p_indirect_buffer, uint64_t p_offset);
 
@@ -969,9 +967,9 @@ public:
 	ResourceUsageMap usage_to_resources;
 	LocalVector<RDD::BoundUniform> uniforms;
 
-	void bind_uniforms_argument_buffers(MDShader *p_shader, MDCommandBuffer::RenderState &p_state, uint32_t p_set_index, uint32_t p_dynamic_offsets, uint32_t p_frame_idx, uint32_t p_frame_count);
-	void bind_uniforms_argument_buffers(MDShader *p_shader, MDCommandBuffer::ComputeState &p_state, uint32_t p_set_index, uint32_t p_dynamic_offsets, uint32_t p_frame_idx, uint32_t p_frame_count);
-	void bind_uniforms_direct(MDShader *p_shader, DirectEncoder p_enc, uint32_t p_set_index, uint32_t p_dynamic_offsets);
+	void bind_uniforms_argument_buffers(MDShader *p_shader, MDCommandBuffer::RenderState &p_state, uint32_t p_set_index);
+	void bind_uniforms_argument_buffers(MDShader *p_shader, MDCommandBuffer::ComputeState &p_state, uint32_t p_set_index);
+	void bind_uniforms_direct(MDShader *p_shader, DirectEncoder p_enc, uint32_t p_set_index);
 };
 
 class API_AVAILABLE(macos(11.0), ios(14.0), tvos(14.0)) MDPipeline {
