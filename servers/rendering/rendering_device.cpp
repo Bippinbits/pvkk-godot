@@ -376,6 +376,26 @@ RID RenderingDevice::blas_create(Span<AccelerationStructureGeometry> p_geometrie
 					t_out.index_count = 0;
 					t_out.index_format = {};
 				}
+
+				t_out.transform_buffer = RDD::BufferID();
+				t_out.transform_offset = 0;
+				if (t_in.transform_buffer.is_valid()) {
+					Buffer *transform_buffer = storage_buffer_owner.get_or_null(t_in.transform_buffer);
+					ERR_FAIL_NULL_V_MSG(transform_buffer, RID(), "The transform buffer must be a valid storage buffer.");
+					ERR_FAIL_COND_V_MSG((t_in.transform_offset % 16) != 0, RID(), "The transform offset must be 16-byte aligned.");
+					ERR_FAIL_COND_V_MSG((t_in.transform_offset + 12 * sizeof(float)) > transform_buffer->size, RID(), "The specified transform offset is outside the range of the transform buffer.");
+
+					t_out.transform_buffer = transform_buffer->driver_id;
+					t_out.transform_offset = t_in.transform_offset;
+
+					if (transform_buffer->draw_tracker != nullptr) {
+						draw_trackers.push_back(transform_buffer->draw_tracker);
+					} else {
+						untracked_buffers.insert(t_in.transform_buffer);
+					}
+
+					_check_transfer_worker_buffer(transform_buffer);
+				}
 			} break;
 
 			case AccelerationStructureGeometry::TYPE_AABBS: {
@@ -431,6 +451,9 @@ RID RenderingDevice::blas_create(Span<AccelerationStructureGeometry> p_geometrie
 				_add_dependency(id, geometry.geometry.triangles.vertex_buffer);
 				if (geometry.geometry.triangles.index_buffer.is_valid()) {
 					_add_dependency(id, geometry.geometry.triangles.index_buffer);
+				}
+				if (geometry.geometry.triangles.transform_buffer.is_valid()) {
+					_add_dependency(id, geometry.geometry.triangles.transform_buffer);
 				}
 			} break;
 			case AccelerationStructureGeometry::TYPE_AABBS: {

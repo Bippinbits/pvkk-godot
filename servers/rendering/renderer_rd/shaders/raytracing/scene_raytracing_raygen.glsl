@@ -845,7 +845,7 @@ layout(set = 0, binding = 32, std430) readonly buffer MotionTransforms {
 #endif
 
 void main() {
-	uint geometry_idx = gl_InstanceCustomIndexEXT;
+	uint geometry_idx = RT_HIT_GEOMETRY_IDX;
 	GeometryData geom = geometries[geometry_idx];
 	MaterialData mat = materials[geometry_idx];
 	bool transparent = (mat.flags & RT_MAT_FLAG_TRANSPARENT) != 0u;
@@ -1047,7 +1047,7 @@ void main() {
 	global_prev_time = scene_data_block.prev_data.time;
 
 	// Resolve custom material uniforms via BDA (assigns file-scope address).
-	uint rt_geometry_idx = gl_InstanceCustomIndexEXT;
+	uint rt_geometry_idx = RT_HIT_GEOMETRY_IDX;
 	MaterialData rt_mat = materials[rt_geometry_idx];
 	_rt_material_address = rt_mat.uniform_address;
 
@@ -1062,12 +1062,9 @@ void main() {
 		m_AABB_MAX = vec3(aabb_buf.v[base + 3], aabb_buf.v[base + 4], aabb_buf.v[base + 5]);
 	}
 
-	mat4 rt_aabb_xform;
-	mat4 rt_inv_aabb_xform;
-	get_aabb_compression_xforms(rt_geom, rt_aabb_xform, rt_inv_aabb_xform);
-	read_model_matrix = mat4(gl_ObjectToWorldEXT) * rt_inv_aabb_xform;
+	read_model_matrix = mat4(gl_ObjectToWorldEXT);
 	model_normal_matrix = mat3(read_model_matrix);
-	m_INV_MODEL_MATRIX = rt_aabb_xform * mat4(gl_WorldToObjectEXT);
+	m_INV_MODEL_MATRIX = mat4(gl_WorldToObjectEXT);
 
 	/* RT_CUSTOM_INTERSECTION_CODE */
 

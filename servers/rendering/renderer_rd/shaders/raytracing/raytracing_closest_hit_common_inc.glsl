@@ -29,7 +29,7 @@ struct HitData {
 /// Requires hitAttributeEXT HitAttribs and GeometryBuffer/MaterialBuffer bindings.
 HitData compute_hit_data() {
 	HitData h;
-	h.geometry_idx = gl_InstanceCustomIndexEXT;
+	h.geometry_idx = RT_HIT_GEOMETRY_IDX;
 	GeometryData geom = geometries[h.geometry_idx];
 
 	// Custom hit groups may reference vertex color in their fragment code, so
@@ -144,7 +144,7 @@ mat4 decode_prev_object_to_world(int motion_idx) {
 
 /// Uses unjittered VP matrices matching the raster motion_vectors_store convention.
 void rt_store_velocity(vec3 hit_pos) {
-	uint geom_idx = gl_InstanceCustomIndexEXT;
+	uint geom_idx = RT_HIT_GEOMETRY_IDX;
 	int mi = motion_indices[geom_idx];
 
 	// Resolve previous-frame model matrix: compact entry if moved, current transform otherwise.
@@ -290,7 +290,7 @@ bool debug_is_camera_visible(uint p_geometry_idx, vec3 p_origin, vec3 p_directio
 	rayQueryEXT rq;
 	rayQueryInitializeEXT(rq, tlas, gl_RayFlagsNoOpaqueEXT, RT_VIS_MASK, p_origin, max(p_t - 0.01, 0.0), p_direction, p_t + 0.01);
 	while (rayQueryProceedEXT(rq)) {
-		if (rayQueryGetIntersectionInstanceCustomIndexEXT(rq, false) == p_geometry_idx) {
+		if (RT_RQ_GEOMETRY_IDX(rq, false) == p_geometry_idx) {
 			rayQueryConfirmIntersectionEXT(rq);
 		}
 	}
@@ -322,7 +322,7 @@ vec3 debug_directional_shadow_blocker(vec3 p_geometry_normal) {
 	rayQueryEXT rq;
 	rayQueryInitializeEXT(rq, tlas, gl_RayFlagsNoOpaqueEXT, 0xFCu, origin, 0.001, to_sun, 10000.0);
 	while (rayQueryProceedEXT(rq)) {
-		uint geometry_idx = rayQueryGetIntersectionInstanceCustomIndexEXT(rq, false);
+		uint geometry_idx = RT_RQ_GEOMETRY_IDX(rq, false);
 		uint mat_flags = materials[geometry_idx].flags;
 		if ((mat_flags & (RT_MAT_FLAG_TRANSPARENT | RT_MAT_FLAG_ALPHA_SCISSOR)) == 0u) {
 			rayQueryConfirmIntersectionEXT(rq);
@@ -345,7 +345,7 @@ vec3 debug_directional_shadow_blocker(vec3 p_geometry_normal) {
 		return transmittance == vec3(1.0) ? vec3(1.0) : vec3(1.0, 1.0, 0.0) * luminance(transmittance);
 	}
 	float t = rayQueryGetIntersectionTEXT(rq, true);
-	uint blocker = rayQueryGetIntersectionInstanceCustomIndexEXT(rq, true);
+	uint blocker = RT_RQ_GEOMETRY_IDX(rq, true);
 	float brightness = clamp(1.0 - log2(1.0 + t) / 8.0, 0.25, 1.0);
 	vec3 color = debug_is_camera_visible(blocker, origin, to_sun, t) ? vec3(0.0, 0.3, 1.0) : vec3(1.0, 0.0, 0.0);
 	return color * brightness;
@@ -696,7 +696,7 @@ void shade_and_bounce(HitData h, MaterialResult m) {
 					while (rayQueryProceedEXT(spec_rq)) {
 						if (rayQueryGetIntersectionTypeEXT(spec_rq, false) == gl_RayQueryCandidateIntersectionTriangleEXT &&
 								ray_query_alpha_test(
-										rayQueryGetIntersectionInstanceCustomIndexEXT(spec_rq, false),
+										RT_RQ_GEOMETRY_IDX(spec_rq, false),
 										rayQueryGetIntersectionPrimitiveIndexEXT(spec_rq, false),
 										rayQueryGetIntersectionBarycentricsEXT(spec_rq, false))) {
 							rayQueryConfirmIntersectionEXT(spec_rq);
@@ -766,7 +766,7 @@ void shade_and_bounce(HitData h, MaterialResult m) {
 			while (rayQueryProceedEXT(spec_rq)) {
 				if (rayQueryGetIntersectionTypeEXT(spec_rq, false) == gl_RayQueryCandidateIntersectionTriangleEXT) {
 					if (ray_query_alpha_test(
-								rayQueryGetIntersectionInstanceCustomIndexEXT(spec_rq, false),
+								RT_RQ_GEOMETRY_IDX(spec_rq, false),
 								rayQueryGetIntersectionPrimitiveIndexEXT(spec_rq, false),
 								rayQueryGetIntersectionBarycentricsEXT(spec_rq, false))) {
 						rayQueryConfirmIntersectionEXT(spec_rq);

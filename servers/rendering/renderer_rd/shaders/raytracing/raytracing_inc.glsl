@@ -6,6 +6,11 @@
 
 #define MAX_VIEWS 2
 
+// Per-geometry entry (geometries, materials, motion) of a hit. A TLAS instance's custom index is its
+// first entry; multi-geometry BLASes store one entry per geometry, in geometry order.
+#define RT_HIT_GEOMETRY_IDX (gl_InstanceCustomIndexEXT + gl_GeometryIndexEXT)
+#define RT_RQ_GEOMETRY_IDX(m_rq, m_committed) uint(rayQueryGetIntersectionInstanceCustomIndexEXT(m_rq, m_committed) + rayQueryGetIntersectionGeometryIndexEXT(m_rq, m_committed))
+
 #ifndef PI
 #define PI 3.141592653589f
 #endif

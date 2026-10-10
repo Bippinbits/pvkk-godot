@@ -762,6 +762,8 @@ public:
 			uint32_t index_offset;
 			uint32_t index_count;
 			IndexBufferFormat index_format;
+			BufferID transform_buffer; // Optional row-major 3x4 float matrix.
+			uint32_t transform_offset;
 		};
 
 		// Procedural geometry: each AABB is two float3 (min, max), packed

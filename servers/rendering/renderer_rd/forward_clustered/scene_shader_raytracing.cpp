@@ -1697,7 +1697,7 @@ void SceneShaderRaytracing::init(const String p_defines) {
 		actions.default_repeat = ShaderLanguage::REPEAT_ENABLE;
 		actions.global_buffer_array_variable = "global_shader_uniforms.data";
 		// No raster instance SSBO in RT stages; the offset rides GeometryData.
-		actions.instance_uniform_index_variable = "geometries[gl_InstanceCustomIndexEXT].instance_uniforms_ofs";
+		actions.instance_uniform_index_variable = "geometries[RT_HIT_GEOMETRY_IDX].instance_uniforms_ofs";
 		actions.renames["VOLUMETRIC_FOG"] = "volumetric_fog_rt";
 
 		actions.check_multiview_samplers = RendererCompositorRD::get_singleton()->is_xr_enabled(); // Make sure we check sampling multiview textures.

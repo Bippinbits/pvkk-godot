@@ -93,8 +93,7 @@ MaterialUV material_uv_compute(MaterialData mat, vec2 mesh_uv,
 }
 
 /// Ray-tracing stages only carry world-space hit data, so recover the model
-/// space that local triplanar mapping needs (undoing both the instance
-/// transform and any AABB position compression baked into it).
+/// space that local triplanar mapping needs.
 MaterialUV material_uv_from_world(MaterialData mat, GeometryData geom, vec2 mesh_uv,
 		vec3 world_pos, vec3 world_normal) {
 	vec3 object_pos = vec3(0.0);
@@ -103,10 +102,7 @@ MaterialUV material_uv_from_world(MaterialData mat, GeometryData geom, vec2 mesh
 	bool needs_model_space = (mat.flags & RT_MAT_FLAG_TRIPLANAR) != 0u &&
 			(mat.flags & RT_MAT_FLAG_TRIPLANAR_WORLD) == 0u;
 	if (needs_model_space) {
-		mat4 aabb_xform;
-		mat4 inv_aabb_xform;
-		get_aabb_compression_xforms(geom, aabb_xform, inv_aabb_xform);
-		mat4 world_to_model = aabb_xform * mat4(gl_WorldToObjectEXT);
+		mat4 world_to_model = mat4(gl_WorldToObjectEXT);
 		object_pos = (world_to_model * vec4(world_pos, 1.0)).xyz;
 		object_normal = normalize(mat3(world_to_model) * world_normal);
 	}

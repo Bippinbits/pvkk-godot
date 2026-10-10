@@ -81,31 +81,6 @@ void get_triangle_indices(in GeometryData geom, out uint i0, out uint i1, out ui
 }
 #endif
 
-vec3 fetch_position_at(in GeometryData geom, uint index) {
-	if (geom.vertex_address == 0ul) {
-		return vec3(0.0);
-	}
-
-	uint stride_words = geom.position_stride >> 2;
-	if ((geom.flags & FLAG_COMPRESSED) != 0u) {
-		Uint32Buffer vertices = Uint32Buffer(geom.vertex_address);
-		uint xy = vertices.v[index * stride_words];
-		uint zw = vertices.v[index * stride_words + 1u];
-		return vec3(
-				float(xy & 0xFFFFu),
-				float(xy >> 16),
-				float(zw & 0xFFFFu)) /
-				65535.0;
-	}
-
-	FloatBuffer vertices = FloatBuffer(geom.vertex_address);
-	uint offset = index * stride_words;
-	if (geom.position_stride == 8u) {
-		return vec3(vertices.v[offset], vertices.v[offset + 1u], 0.0);
-	}
-	return vec3(vertices.v[offset], vertices.v[offset + 1u], vertices.v[offset + 2u]);
-}
-
 // ============================================================================
 // UV FETCHING
 // ============================================================================

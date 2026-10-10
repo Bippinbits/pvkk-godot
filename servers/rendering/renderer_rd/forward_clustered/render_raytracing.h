@@ -232,11 +232,52 @@ struct RTProceduralState {
 
 struct RTSurfaceData {
 	RID blas;
+	// Owned. Maps compressed positions to mesh space during the BLAS build; invalid when uncompressed.
+	RID blas_transform_buffer;
 	RT_GeometryData geometry = {};
-	Transform3D aabb_transform;
 	bool is_compressed = false;
 	uint64_t blas_size = 0;
 };
+
+/// Identifies a multi-geometry BLAS: a mesh and the subset of its surfaces merged into one TLAS instance.
+struct RTMeshGroupKey {
+	uint64_t mesh_id = 0; ///< Full RID id, so a recycled mesh slot never matches.
+	uint64_t surface_mask = 0; ///< Bit i set when surface i is a member.
+
+	bool operator==(const RTMeshGroupKey &p_other) const {
+		return mesh_id == p_other.mesh_id && surface_mask == p_other.surface_mask;
+	}
+
+	uint32_t hash() const {
+		return hash_fmix32(hash_murmur3_one_64(surface_mask, hash_murmur3_one_64(mesh_id)));
+	}
+};
+
+/// Multi-geometry BLAS shared by every instance that merges the same surfaces of a mesh.
+struct RTMeshGroupEntry {
+	RID blas;
+	RID transform_buffer; ///< Owned. Compression transforms of the compressed members.
+	LocalVector<RT_GeometryData> geometries; ///< In BLAS geometry order (ascending surface index).
+	LocalVector<uint32_t> surface_counters; ///< Per member; any change rebuilds the BLAS.
+	uint64_t last_used = 0; ///< Use stamp; picks the variant to drop when a mesh has too many.
+};
+
+/// TLAS instance state that surfaces must share to be merged into one multi-geometry BLAS.
+struct RTSurfaceGroupKey {
+	uint32_t inst_flags = 0;
+	uint32_t sbt_offset = 0;
+	uint8_t tlas_mask = 0;
+	bool groupable = false; ///< False keeps the surface on the single-surface path.
+
+	bool operator==(const RTSurfaceGroupKey &p_other) const {
+		return groupable && p_other.groupable && inst_flags == p_other.inst_flags &&
+				sbt_offset == p_other.sbt_offset && tlas_mask == p_other.tlas_mask;
+	}
+};
+
+/// For each surface, writes the index of the first surface with an equal key, or its own index when
+/// it has no equal predecessor or is not groupable. Quadratic, meant for the surfaces of one instance.
+void rt_assign_surface_groups(Span<RTSurfaceGroupKey> p_keys, LocalVector<uint32_t> &r_leaders);
 
 /// Inputs for a surface backed by a per-frame-deformed vertex buffer.
 struct RTDeformedGeometrySource {
@@ -259,6 +300,19 @@ struct RTMaterialData {
 	RID normal_texture_rd;
 	RID orm_texture_rd;
 	RID emission_texture_rd;
+};
+
+/// A traced surface of one mesh instance, gathered before grouping.
+struct RTSurfaceRecord {
+	const void *surf = nullptr; ///< RenderForwardClustered::GeometryInstanceSurfaceDataCache.
+	void *mesh_surface = nullptr;
+	RTMaterialData *mat_data = nullptr;
+	RID deformed_vb; ///< Per-frame-deformed vertex buffer; invalid for static surfaces.
+	RTSurfaceGroupKey key;
+	uint32_t surface_index = 0;
+	uint32_t surface_counter = 0;
+	uint32_t material_flags = 0; ///< OR-ed into the material entry.
+	bool transparent = false;
 };
 
 struct RTCacheEntry {
@@ -531,6 +585,21 @@ class RenderRaytracing {
 
 	RTDeformedCacheEntry *_access_deformed_slot(RID &r_handle);
 	RTMergedMMEntry *_access_merged_mm_slot(RID &r_handle);
+
+	// Multi-geometry BLASes of merged mesh surfaces. Not evicted by age: the RT instance set follows the
+	// camera, so aging out would rebuild large BLASes when turning around.
+	HashMap<RTMeshGroupKey, RTMeshGroupEntry> mesh_groups;
+	uint64_t mesh_group_use_counter = 0;
+
+	// Per-instance scratch for build_tlas, kept to avoid per-frame allocations.
+	LocalVector<RTSurfaceRecord> surface_records;
+	LocalVector<RTSurfaceGroupKey> surface_group_keys;
+	LocalVector<uint32_t> surface_group_leaders;
+	LocalVector<uint32_t> surface_group_members;
+
+	RTMeshGroupEntry *_process_mesh_group(RID p_mesh, uint64_t p_surface_mask, Span<uint32_t> p_members, LocalVector<RID> &r_dirty_blas_list);
+	void _trim_mesh_group_variants(uint64_t p_mesh_id);
+	void _evict_dead_mesh_groups();
 
 	LocalVector<uint32_t> material_free_slots;
 	uint32_t next_material_slot = 0;

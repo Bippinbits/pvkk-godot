@@ -1374,6 +1374,8 @@ public:
 			RID index_buffer;
 			uint32_t index_offset = 0;
 			uint32_t index_count = 0;
+			RID transform_buffer;
+			uint32_t transform_offset = 0;
 		};
 
 		// Procedural geometry: buffer of float3 (min, max) AABB pairs.

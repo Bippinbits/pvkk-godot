@@ -39,7 +39,7 @@ vec3 ray_query_shadow_transmittance(vec3 origin, vec3 direction, float t_min, fl
 		if (rayQueryGetIntersectionTypeEXT(shadow_rq, false) != gl_RayQueryCandidateIntersectionTriangleEXT) {
 			continue;
 		}
-		uint geometry_idx = rayQueryGetIntersectionInstanceCustomIndexEXT(shadow_rq, false);
+		uint geometry_idx = RT_RQ_GEOMETRY_IDX(shadow_rq, false);
 		uint mat_flags = materials[geometry_idx].flags;
 		if ((mat_flags & (RT_MAT_FLAG_TRANSPARENT | RT_MAT_FLAG_ALPHA_SCISSOR)) == 0u) {
 			rayQueryConfirmIntersectionEXT(shadow_rq);

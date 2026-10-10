@@ -6289,6 +6289,10 @@ RDD::AccelerationStructureID RenderingDeviceDriverVulkan::blas_create(VectorView
 					vk_geometry.geometry.triangles.indexType = VK_INDEX_TYPE_NONE_KHR;
 					primitive_count = t.vertex_count / 3;
 				}
+
+				if (t.transform_buffer != BufferID()) {
+					vk_geometry.geometry.triangles.transformData.deviceAddress = buffer_get_device_address(t.transform_buffer) + t.transform_offset;
+				}
 			} break;
 
 			case AccelerationStructureGeometry::TYPE_AABBS: {
