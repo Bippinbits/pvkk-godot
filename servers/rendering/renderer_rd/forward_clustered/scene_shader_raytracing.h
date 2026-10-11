@@ -69,9 +69,9 @@ public:
 	};
 
 	// Raytracing specialization constant flags (must match shader RT_FLAG_* defines).
-	// Bits 0-20:  Feature flags
-	// Bits 21-28: Sample count
-	// Bits 29-31: Max bounce count (offset by 1: 0=1 bounce, 7=8 bounces)
+	// Bits 0-25:  Feature flags
+	// Bits 26-27: Sample mode (RaytracingSampleMode)
+	// Bits 28-31: Max bounce count (0 = direct lighting only)
 	enum RaytracingFlags {
 		RT_FLAG_NONE = 0,
 		RT_FLAG_DEBUG_VIS_ENABLED = (1 << 0),
@@ -84,11 +84,26 @@ public:
 		RT_FLAG_VOLUMETRIC_FOG_ENABLED = (1 << 7),
 	};
 
-	constexpr static uint32_t RT_SAMPLE_COUNT_SHIFT = 21;
-	constexpr static uint32_t RT_SAMPLE_COUNT_MASK = 0xFF;
+	// Sample count encoding (must match shader RT_SAMPLE_MODE_* defines).
+	// Fixed modes are compile-time loop counts; DYNAMIC reads RT_PARAM_SAMPLE_COUNT.
+	enum RaytracingSampleMode : uint32_t {
+		RT_SAMPLE_MODE_1 = 0,
+		RT_SAMPLE_MODE_2 = 1,
+		RT_SAMPLE_MODE_4 = 2,
+		RT_SAMPLE_MODE_DYNAMIC = 3,
+	};
 
-	constexpr static uint32_t RT_MAX_BOUNCES_SHIFT = 29;
-	constexpr static uint32_t RT_MAX_BOUNCES_MASK = 0x7;
+	constexpr static uint32_t RT_SAMPLE_MODE_SHIFT = 26;
+	constexpr static uint32_t RT_SAMPLE_MODE_MASK = 0x3;
+
+	constexpr static uint32_t RT_MAX_BOUNCES_SHIFT = 28;
+	constexpr static uint32_t RT_MAX_BOUNCES_MASK = 0xF;
+	// Upper bound exposed by Environment::pathtracing_max_bounces.
+	constexpr static uint32_t RT_MAX_BOUNCES_LIMIT = 8;
+
+	static_assert(RT_SAMPLE_MODE_SHIFT + 2 == RT_MAX_BOUNCES_SHIFT && RT_MAX_BOUNCES_SHIFT + 4 == 32, "Sample mode and bounces occupy the top 6 bits.");
+	static_assert(RT_MAX_BOUNCES_LIMIT <= RT_MAX_BOUNCES_MASK, "Bounce limit must fit the bounce field.");
+	static_assert(uint32_t(RT_FLAG_VOLUMETRIC_FOG_ENABLED) < (1u << RT_SAMPLE_MODE_SHIFT), "Feature flags must stay below the sample mode field; update when adding flags.");
 
 	// RT pipeline limits (must match GLSL payload/hit attribute struct sizes).
 	// 1: primary/bounce from raygen
@@ -119,12 +134,24 @@ public:
 	static constexpr int RT_PARAM_FOG_USE_LEGACY_BLENDING = 13;
 	static constexpr int RT_PARAM_LIGHT_COUNT = 14;
 	static constexpr int RT_PARAM_FRAME_INDEX = 15;
+	static inline RaytracingSampleMode rt_sample_mode_from_count(uint32_t p_sample_count) {
+		switch (p_sample_count) {
+			case 0:
+			case 1:
+				return RT_SAMPLE_MODE_1;
+			case 2:
+				return RT_SAMPLE_MODE_2;
+			case 4:
+				return RT_SAMPLE_MODE_4;
+			default:
+				return RT_SAMPLE_MODE_DYNAMIC;
+		}
+	}
 
 	static inline uint32_t rt_flags_pack(uint32_t p_flags, uint32_t p_sample_count, uint32_t p_max_bounces) {
 		uint32_t result = p_flags;
-		result |= (p_sample_count & RT_SAMPLE_COUNT_MASK) << RT_SAMPLE_COUNT_SHIFT;
-		// Max bounces is offset by 1 (0=1 bounce, 7=8 bounces)
-		result |= (MAX(1u, MIN(8u, p_max_bounces)) - 1u) << RT_MAX_BOUNCES_SHIFT;
+		result |= uint32_t(rt_sample_mode_from_count(p_sample_count)) << RT_SAMPLE_MODE_SHIFT;
+		result |= MIN(p_max_bounces, RT_MAX_BOUNCES_LIMIT) << RT_MAX_BOUNCES_SHIFT;
 		return result;
 	}
 

@@ -131,7 +131,7 @@ void main() {
 		}
 	}
 
-	// Sample count from specialization constant, frame index from uniform
+	// Sample count from specialization constant (or uniform in dynamic mode), frame index from uniform
 	const uint samples_per_pixel = RT_GET_SAMPLE_COUNT();
 	uint frame_index = uint(get_rt_param(RT_PARAM_FRAME_INDEX));
 
@@ -149,11 +149,16 @@ void main() {
 	// we should move it out of the loop
 
 	[[dont_unroll]] for (uint sample_idx = 0u; sample_idx < samples_per_pixel; sample_idx++) {
+		// Every field must be defined: path_pack branches on the octahedral encodes,
+		// and branching on an undefined value lets the driver drop the whole path.
 		PathState ps;
 		ps.radiance = vec3(0.0);
 		ps.throughput = vec3(1.0);
 		ps.packed_bounces_flags = (sample_idx == 0u) ? set_sample_zero(0u) : 0u;
 		ps.rng_state = init_rng(pixel, frame_index, sample_idx);
+		ps.hit_t = -1.0;
+		ps.offset_normal = vec3(0.0, 0.0, 1.0);
+		ps.next_ray_dir = vec3(0.0, 0.0, 1.0);
 
 		vec3 ray_origin = origin.xyz;
 		vec3 ray_dir = direction.xyz;
@@ -343,7 +348,6 @@ void main() {
 	}
 
 	vec3 final_radiance = total_radiance / float(samples_per_pixel);
-
 	imageStore(image, ivec2(pixel), vec4(final_radiance, 1.0));
 #ifdef RT_TIMING_ENABLED
 	store_path_timing(ivec2(pixel), start_clock);
@@ -471,13 +475,7 @@ void main() {
 	if (get_rt_param(RT_PARAM_SKY_SCREEN_ENABLED) > 0.5 && get_total_bounces(ps.packed_bounces_flags) == 0u) {
 		sky_color = texelFetch(sampler2D(sky_screen_texture, radiance_sampler), ivec2(gl_LaunchIDEXT.xy), 0).rgb;
 	} else {
-		mat3 camera_basis = mat3(scene_data_block.data.inv_view_matrix);
-		mat3 world_to_sky = scene_data_block.data.radiance_inverse_xform * camera_basis;
-		vec3 sky_dir = world_to_sky * gl_WorldRayDirectionEXT;
-
-		vec2 border = vec2(scene_data_block.data.radiance_border_size,
-				1.0 - scene_data_block.data.radiance_border_size * 2.0);
-		vec2 sky_uv = vec3_to_oct_with_border(sky_dir, border);
+		vec2 sky_uv = rt_sky_oct_uv(gl_WorldRayDirectionEXT);
 
 		sky_color = radiance_octmap_sample(sky_uv, 0.0);
 		sky_color *= scene_data_block.data.IBL_exposure_normalization;

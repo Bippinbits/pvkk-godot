@@ -230,10 +230,39 @@ struct RTProceduralState {
 	uint32_t aabb_count = 0;
 };
 
+/// Fixed-size pages of row-major 3x4 BLAS build transforms, shared by all BLASes.
+/// Pages are never resized: RD frees a BLAS together with the buffers it was built from.
+class RTBlasTransformPool {
+public:
+	static constexpr uint32_t MATRIX_SIZE = 12 * sizeof(float);
+	static constexpr uint32_t SLOTS_PER_PAGE = 1024;
+
+	/// One matrix inside a page.
+	struct Slot {
+		RID buffer;
+		uint32_t offset = 0; ///< Byte offset of the matrix in `buffer`; 16-byte aligned.
+
+		bool is_valid() const { return buffer.is_valid(); }
+	};
+
+	/// Stores p_matrix (12 floats) in a free slot, adding a page when none is left.
+	Slot allocate(const float *p_matrix);
+	/// Returns r_slot to the pool and invalidates it. Free the BLAS built from it first.
+	void release(Slot &r_slot);
+	/// Frees every page. RD also frees any BLAS still built from them.
+	void clear();
+	/// Pages currently allocated.
+	uint32_t get_page_count() const { return pages.size(); }
+
+private:
+	LocalVector<RID> pages;
+	LocalVector<Slot> free_slots;
+};
+
 struct RTSurfaceData {
 	RID blas;
-	// Owned. Maps compressed positions to mesh space during the BLAS build; invalid when uncompressed.
-	RID blas_transform_buffer;
+	// Maps compressed positions to mesh space during the BLAS build; invalid when uncompressed.
+	RTBlasTransformPool::Slot blas_transform;
 	RT_GeometryData geometry = {};
 	bool is_compressed = false;
 	uint64_t blas_size = 0;
@@ -243,20 +272,21 @@ struct RTSurfaceData {
 struct RTMeshGroupKey {
 	uint64_t mesh_id = 0; ///< Full RID id, so a recycled mesh slot never matches.
 	uint64_t surface_mask = 0; ///< Bit i set when surface i is a member.
+	uint64_t opaque_mask = 0; ///< Bit i set when member i is built with the opaque geometry flag.
 
 	bool operator==(const RTMeshGroupKey &p_other) const {
-		return mesh_id == p_other.mesh_id && surface_mask == p_other.surface_mask;
+		return mesh_id == p_other.mesh_id && surface_mask == p_other.surface_mask && opaque_mask == p_other.opaque_mask;
 	}
 
 	uint32_t hash() const {
-		return hash_fmix32(hash_murmur3_one_64(surface_mask, hash_murmur3_one_64(mesh_id)));
+		return hash_fmix32(hash_murmur3_one_64(opaque_mask, hash_murmur3_one_64(surface_mask, hash_murmur3_one_64(mesh_id))));
 	}
 };
 
 /// Multi-geometry BLAS shared by every instance that merges the same surfaces of a mesh.
 struct RTMeshGroupEntry {
 	RID blas;
-	RID transform_buffer; ///< Owned. Compression transforms of the compressed members.
+	LocalVector<RTBlasTransformPool::Slot> transforms; ///< Per member; invalid for uncompressed members.
 	LocalVector<RT_GeometryData> geometries; ///< In BLAS geometry order (ascending surface index).
 	LocalVector<uint32_t> surface_counters; ///< Per member; any change rebuilds the BLAS.
 	uint64_t last_used = 0; ///< Use stamp; picks the variant to drop when a mesh has too many.
@@ -264,13 +294,14 @@ struct RTMeshGroupEntry {
 
 /// TLAS instance state that surfaces must share to be merged into one multi-geometry BLAS.
 struct RTSurfaceGroupKey {
-	uint32_t inst_flags = 0;
+	uint32_t cull_flags = 0; ///< TLAS instance facing/cull bits.
 	uint32_t sbt_offset = 0;
 	uint8_t tlas_mask = 0;
+	bool opaque = true; ///< No any-hit. Not part of the key: opacity is a per-geometry flag in merged BLASes.
 	bool groupable = false; ///< False keeps the surface on the single-surface path.
 
 	bool operator==(const RTSurfaceGroupKey &p_other) const {
-		return groupable && p_other.groupable && inst_flags == p_other.inst_flags &&
+		return groupable && p_other.groupable && cull_flags == p_other.cull_flags &&
 				sbt_offset == p_other.sbt_offset && tlas_mask == p_other.tlas_mask;
 	}
 };
@@ -597,7 +628,10 @@ class RenderRaytracing {
 	LocalVector<uint32_t> surface_group_leaders;
 	LocalVector<uint32_t> surface_group_members;
 
-	RTMeshGroupEntry *_process_mesh_group(RID p_mesh, uint64_t p_surface_mask, Span<uint32_t> p_members, LocalVector<RID> &r_dirty_blas_list);
+	// Compression transforms of every compressed BLAS. Cleared last in cleanup_caches.
+	RTBlasTransformPool blas_transform_pool;
+
+	RTMeshGroupEntry *_process_mesh_group(const RTMeshGroupKey &p_key, Span<uint32_t> p_members, LocalVector<RID> &r_dirty_blas_list);
 	void _trim_mesh_group_variants(uint64_t p_mesh_id);
 	void _evict_dead_mesh_groups();
 

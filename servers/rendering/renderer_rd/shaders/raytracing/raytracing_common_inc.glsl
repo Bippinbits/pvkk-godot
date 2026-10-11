@@ -2,7 +2,7 @@
 // Include AFTER raytracing_inc.glsl and scene_data_inc.glsl.
 // The includer must set exactly one of RT_STAGE_{RAYGEN,MISS,CLOSEST_HIT,ANY_HIT,INTERSECTION}.
 
-// Specialization constant (bits 0-20: flags, 21-28: samples, 29-31: bounces).
+// Specialization constant (bits 0-25: flags, 26-27: sample mode, 28-31: bounces).
 layout(constant_id = 0) const uint RT_FLAGS = 0u;
 
 #define SHADER_IS_SRGB false
@@ -17,13 +17,18 @@ layout(constant_id = 0) const uint RT_FLAGS = 0u;
 #define RT_VIS_MASK 0x01u
 #define RT_TMASK_TRANSPARENT 0x02u
 
-#define RT_SAMPLE_COUNT_SHIFT 21u
-#define RT_SAMPLE_COUNT_MASK 0xFFu
-#define RT_GET_SAMPLE_COUNT() max(1u, (RT_FLAGS >> RT_SAMPLE_COUNT_SHIFT) & RT_SAMPLE_COUNT_MASK)
+// Sample mode: 0/1/2 = 1/2/4 samples (compile-time), 3 = dynamic (RT_PARAM_SAMPLE_COUNT).
+#define RT_SAMPLE_MODE_SHIFT 26u
+#define RT_SAMPLE_MODE_MASK 0x3u
+#define RT_SAMPLE_MODE_DYNAMIC 3u
+#define RT_GET_SAMPLE_MODE() ((RT_FLAGS >> RT_SAMPLE_MODE_SHIFT) & RT_SAMPLE_MODE_MASK)
+#define RT_GET_SAMPLE_COUNT() (RT_GET_SAMPLE_MODE() == RT_SAMPLE_MODE_DYNAMIC \
+				? max(1u, uint(get_rt_param(RT_PARAM_SAMPLE_COUNT)))       \
+				: (1u << RT_GET_SAMPLE_MODE()))
 
-#define RT_MAX_BOUNCES_SHIFT 29u
-#define RT_MAX_BOUNCES_MASK 0x7u
-#define RT_GET_MAX_BOUNCES() (((RT_FLAGS >> RT_MAX_BOUNCES_SHIFT) & RT_MAX_BOUNCES_MASK) + 1u)
+#define RT_MAX_BOUNCES_SHIFT 28u
+#define RT_MAX_BOUNCES_MASK 0xFu
+#define RT_GET_MAX_BOUNCES() ((RT_FLAGS >> RT_MAX_BOUNCES_SHIFT) & RT_MAX_BOUNCES_MASK)
 
 // Cull back faces by default; double-sided instances override via CULL_DISABLE flag.
 #define RT_RAY_FLAGS gl_RayFlagsCullBackFacingTrianglesEXT
@@ -38,6 +43,14 @@ layout(set = 0, binding = 14, std430) readonly buffer GlobalShaderUniformData {
 	vec4 data[256];
 }
 global_shader_uniforms;
+
+/// Octahedral radiance-map UV (with border) for a world-space direction.
+vec2 rt_sky_oct_uv(vec3 p_world_dir) {
+	mat3 world_to_sky = scene_data_block.data.radiance_inverse_xform * mat3(scene_data_block.data.inv_view_matrix);
+	vec2 border = vec2(scene_data_block.data.radiance_border_size,
+			1.0 - scene_data_block.data.radiance_border_size * 2.0);
+	return vec3_to_oct_with_border(world_to_sky * p_world_dir, border);
+}
 
 #ifndef RT_STAGE_ANY_HIT
 

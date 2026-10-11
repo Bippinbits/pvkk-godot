@@ -232,29 +232,30 @@ vec3 lights_trace_shadow_ray(vec3 origin, vec3 direction, float max_dist, uint p
 // Next Event Estimation (NEE) - Direct Light Sampling
 // ============================================================================
 
-// Evaluate direct lighting using NEE with stochastic light selection.
-// Uses mini-batch reservoir sampling for importance-weighted light selection.
-vec3 lights_evaluate_direct_lighting(
-		vec3 hit_pos,
-		vec3 N,
-		vec3 V,
-		MaterialProperties material,
-		vec3 backlight,
-		inout uint rng_state,
-		bool is_indirect_bounce,
-		uint light_count,
-		uint instance_layers) {
-	if (light_count == 0u) {
-		return vec3(0.0);
+// gather_lights() packs every directional light before the positional ones.
+uint lights_directional_count(uint light_count) {
+	uint count = 0u;
+	while (count < light_count && rt_lights[count].type == RT_LIGHT_TYPE_DIRECTIONAL) {
+		count++;
+	}
+	return count;
+}
+
+// Mini-batch reservoir selection over rt_lights[first, first + count): draws k
+// candidates and keeps one valid light uniformly. Returns false if none is valid.
+bool lights_select(vec3 hit_pos, uint first, uint count, uint instance_layers, inout uint rng_state,
+		out uint r_idx, out float r_select_pdf) {
+	r_idx = first;
+	r_select_pdf = 1.0;
+	if (count == 0u) {
+		return false;
 	}
 
-	// Mini-batch reservoir sampling: sample k lights, pick the best valid one.
-	const uint k = uint(min(RT_LIGHT_RESERVOIR_SIZE, int(light_count)));
+	const uint k = min(uint(RT_LIGHT_RESERVOIR_SIZE), count);
 	uint valid_found = 0u;
-	uint selected_idx = 0u;
 
 	for (uint i = 0u; i < k; i++) {
-		uint idx = min(uint(rand(rng_state) * float(light_count)), light_count - 1u);
+		uint idx = first + min(uint(rand(rng_state) * float(count)), count - 1u);
 		RTLightData test_light = rt_lights[idx];
 
 		// light_cull_mask: the light only affects intersecting layers.
@@ -271,115 +272,174 @@ vec3 lights_evaluate_direct_lighting(
 		if (is_valid) {
 			valid_found++;
 			if (rand(rng_state) < 1.0 / float(valid_found)) {
-				selected_idx = idx;
+				r_idx = idx;
 			}
 		}
 	}
 
 	if (valid_found == 0u) {
-		return vec3(0.0);
+		return false;
 	}
 
 	// Estimate valid count from sample ratio, PDF = 1/validCount.
-	float valid_count_estimate = float(light_count) * (float(valid_found) / float(k));
-	float light_select_pdf = 1.0 / max(valid_count_estimate, 1.0);
+	float valid_count_estimate = float(count) * (float(valid_found) / float(k));
+	r_select_pdf = 1.0 / max(valid_count_estimate, 1.0);
+	return true;
+}
 
-	RTLightData light = rt_lights[selected_idx];
-	vec2 u = rand2(rng_state);
+// Unweighted contribution of one omni or spot light, one shadow ray.
+vec3 lights_evaluate_positional(RTLightData light, vec3 hit_pos, vec3 N, vec3 V, MaterialProperties material,
+		vec3 backlight, inout uint rng_state, bool is_indirect_bounce) {
+	vec3 to_light = light.position - hit_pos;
+	float dist_sq = dot(to_light, to_light);
 
-	// === POSITIONAL LIGHT PATH (omni + spot) ===
-	if (light.type == RT_LIGHT_TYPE_OMNI || light.type == RT_LIGHT_TYPE_SPOT) {
-		vec3 to_light = light.position - hit_pos;
-		float dist_sq = dot(to_light, to_light);
-
-		// Early out: outside max range.
-		if (light.max_range_squared != 0.0 && dist_sq > light.max_range_squared) {
-			return vec3(0.0);
-		}
-
-		float dist = sqrt(dist_sq);
-		vec3 L;
-		float shadow_dist;
-
-		if (light.radius <= 0.01) {
-			// True point light: exact direction.
-			L = to_light / max(dist, 0.0001);
-			shadow_dist = dist;
-		} else {
-			// Sphere light: cone sampling for soft shadows.
-			LightSample ls = lights_prepare_sample(hit_pos, light);
-			float light_pdf;
-			L = lights_sample_cone(ls, u, light_pdf);
-			float t_center = dot(to_light, L);
-			vec3 perp = to_light - t_center * L;
-			float perp_sq = dot(perp, perp);
-			float dt = sqrt(max(0.0, light.radius * light.radius - perp_sq));
-			shadow_dist = max(0.0, t_center - dt);
-		}
-
-		// Spot cone early-out.
-		float spot_atten = 1.0;
-		if (light.type == RT_LIGHT_TYPE_SPOT) {
-			float scos = dot(-L, light.spot_direction);
-			if (scos <= light.cos_spot_angle) {
-				return vec3(0.0);
-			}
-			float spot_rim = max(1e-4, (1.0 - scos) / (1.0 - light.cos_spot_angle));
-			spot_atten = 1.0 - pow(spot_rim, light.inv_spot_attenuation);
-		}
-
-		vec3 shadow_transmittance = lights_trace_shadow_ray(
-				hit_pos, L, shadow_dist, (light.light_masks >> 24u) & 0xFFu, rng_state);
-
-		// Evaluate BRDF (diffuse + specular separately for specular_amount control).
-		vec3 brdf_diffuse, brdf_specular;
-		evalCombinedBRDFSeparate(N, L, V, material, brdf_diffuse, brdf_specular);
-
-		// Backlight/translucency: light "wraps around" from the far side of the
-		// surface. Nonzero exactly where NdotL<=0 would otherwise zero the diffuse
-		// term. Mirrors the rasterizer's (1/PI - diffuse_brdf_NL) * backlight formula.
-		float NdotL = dot(N, L);
-		vec3 backlight_term = backlight * max(0.0, 1.0 - clamp(NdotL, -1.0, 1.0)) * (1.0 / PI);
-
-		// Distance attenuation.
-		LightSample ls_atten;
-		ls_atten.distance_sq = dist_sq;
-		float atten = lights_get_attenuation(ls_atten, light.inv_max_range, light.attenuation) * spot_atten;
-
-		float spec_mul = lights_get_specular_multiplier(light.specular_amount, material.roughness);
-		vec3 brdf_value = brdf_diffuse + brdf_specular * spec_mul + backlight_term;
-
-		float indirect_mul = is_indirect_bounce ? light.indirect_energy : 1.0;
-
-		// NdotL is already included in brdf_value (evalLambertian/evalMicrofacet bake it in).
-		vec3 contribution = brdf_value * light.emission * shadow_transmittance * atten * indirect_mul;
-		return contribution / max(light_select_pdf, 1e-10);
+	// Early out: outside max range.
+	if (light.max_range_squared != 0.0 && dist_sq > light.max_range_squared) {
+		return vec3(0.0);
 	}
-	// === CONE LIGHT PATH (directional) ===
-	else {
+
+	float dist = sqrt(dist_sq);
+	vec3 L;
+	float shadow_dist;
+
+	if (light.radius <= 0.01) {
+		// True point light: exact direction.
+		L = to_light / max(dist, 0.0001);
+		shadow_dist = dist;
+	} else {
+		// Sphere light: cone sampling for soft shadows.
 		LightSample ls = lights_prepare_sample(hit_pos, light);
 		float light_pdf;
-		vec3 L = lights_sample_cone(ls, u, light_pdf);
+		L = lights_sample_cone(ls, rand2(rng_state), light_pdf);
+		float t_center = dot(to_light, L);
+		vec3 perp = to_light - t_center * L;
+		float perp_sq = dot(perp, perp);
+		float dt = sqrt(max(0.0, light.radius * light.radius - perp_sq));
+		shadow_dist = max(0.0, t_center - dt);
+	}
 
-		float NdotL = dot(N, L);
-		bool has_backlight = any(greaterThan(backlight, vec3(0.0)));
-		if (NdotL <= 0.0 && !has_backlight) {
+	// Spot cone early-out.
+	float spot_atten = 1.0;
+	if (light.type == RT_LIGHT_TYPE_SPOT) {
+		float scos = dot(-L, light.spot_direction);
+		if (scos <= light.cos_spot_angle) {
 			return vec3(0.0);
 		}
-
-		vec3 shadow_transmittance = lights_trace_shadow_ray(
-				hit_pos, L, ls.max_distance, (light.light_masks >> 24u) & 0xFFu, rng_state);
-
-		vec3 brdf_diffuse, brdf_specular;
-		evalCombinedBRDFSeparate(N, L, V, material, brdf_diffuse, brdf_specular);
-
-		vec3 backlight_term = has_backlight ? backlight * max(0.0, 1.0 - clamp(NdotL, -1.0, 1.0)) * (1.0 / PI) : vec3(0.0);
-
-		float spec_mul = lights_get_specular_multiplier(light.specular_amount, material.roughness);
-		vec3 brdf_value = brdf_diffuse + brdf_specular * spec_mul + backlight_term;
-
-		float indirect_mul = is_indirect_bounce ? light.indirect_energy : 1.0;
-
-		return brdf_value * light.emission * shadow_transmittance * indirect_mul / max(light_select_pdf, 1e-10);
+		float spot_rim = max(1e-4, (1.0 - scos) / (1.0 - light.cos_spot_angle));
+		spot_atten = 1.0 - pow(spot_rim, light.inv_spot_attenuation);
 	}
+
+	vec3 shadow_transmittance = lights_trace_shadow_ray(
+			hit_pos, L, shadow_dist, (light.light_masks >> 24u) & 0xFFu, rng_state);
+
+	// Evaluate BRDF (diffuse + specular separately for specular_amount control).
+	vec3 brdf_diffuse, brdf_specular;
+	evalCombinedBRDFSeparate(N, L, V, material, brdf_diffuse, brdf_specular);
+
+	// Backlight/translucency: light "wraps around" from the far side of the
+	// surface. Nonzero exactly where NdotL<=0 would otherwise zero the diffuse
+	// term. Mirrors the rasterizer's (1/PI - diffuse_brdf_NL) * backlight formula.
+	float NdotL = dot(N, L);
+	vec3 backlight_term = backlight * max(0.0, 1.0 - clamp(NdotL, -1.0, 1.0)) * (1.0 / PI);
+
+	// Distance attenuation.
+	LightSample ls_atten;
+	ls_atten.distance_sq = dist_sq;
+	float atten = lights_get_attenuation(ls_atten, light.inv_max_range, light.attenuation) * spot_atten;
+
+	float spec_mul = lights_get_specular_multiplier(light.specular_amount, material.roughness);
+	vec3 brdf_value = brdf_diffuse + brdf_specular * spec_mul + backlight_term;
+
+	float indirect_mul = is_indirect_bounce ? light.indirect_energy : 1.0;
+
+	// NdotL is already included in brdf_value (evalLambertian/evalMicrofacet bake it in).
+	return brdf_value * light.emission * shadow_transmittance * atten * indirect_mul;
+}
+
+// Unweighted contribution of one directional light, one shadow ray.
+vec3 lights_evaluate_directional(RTLightData light, vec3 hit_pos, vec3 N, vec3 V, MaterialProperties material,
+		vec3 backlight, inout uint rng_state, bool is_indirect_bounce) {
+	LightSample ls = lights_prepare_sample(hit_pos, light);
+	float light_pdf;
+	vec3 L = lights_sample_cone(ls, rand2(rng_state), light_pdf);
+
+	float NdotL = dot(N, L);
+	bool has_backlight = any(greaterThan(backlight, vec3(0.0)));
+	if (NdotL <= 0.0 && !has_backlight) {
+		return vec3(0.0);
+	}
+
+	vec3 shadow_transmittance = lights_trace_shadow_ray(
+			hit_pos, L, ls.max_distance, (light.light_masks >> 24u) & 0xFFu, rng_state);
+
+	vec3 brdf_diffuse, brdf_specular;
+	evalCombinedBRDFSeparate(N, L, V, material, brdf_diffuse, brdf_specular);
+
+	vec3 backlight_term = has_backlight ? backlight * max(0.0, 1.0 - clamp(NdotL, -1.0, 1.0)) * (1.0 / PI) : vec3(0.0);
+
+	float spec_mul = lights_get_specular_multiplier(light.specular_amount, material.roughness);
+	vec3 brdf_value = brdf_diffuse + brdf_specular * spec_mul + backlight_term;
+
+	float indirect_mul = is_indirect_bounce ? light.indirect_energy : 1.0;
+
+	return brdf_value * light.emission * shadow_transmittance * indirect_mul;
+}
+
+// NEE with one shadow ray to a single light selected among all lights.
+vec3 lights_evaluate_direct_lighting(
+		vec3 hit_pos,
+		vec3 N,
+		vec3 V,
+		MaterialProperties material,
+		vec3 backlight,
+		inout uint rng_state,
+		bool is_indirect_bounce,
+		uint light_count,
+		uint instance_layers) {
+	uint idx;
+	float select_pdf;
+	if (!lights_select(hit_pos, 0u, light_count, instance_layers, rng_state, idx, select_pdf)) {
+		return vec3(0.0);
+	}
+
+	RTLightData light = rt_lights[idx];
+	vec3 contribution;
+	if (light.type == RT_LIGHT_TYPE_DIRECTIONAL) {
+		contribution = lights_evaluate_directional(light, hit_pos, N, V, material, backlight,
+				rng_state, is_indirect_bounce);
+	} else {
+		contribution = lights_evaluate_positional(light, hit_pos, N, V, material, backlight,
+				rng_state, is_indirect_bounce);
+	}
+	return contribution / max(select_pdf, 1e-10);
+}
+
+// NEE with up to two shadow rays: one to a directional light and one to a
+// positional light, each selected within its own group.
+vec3 lights_evaluate_direct_lighting_per_group(
+		vec3 hit_pos,
+		vec3 N,
+		vec3 V,
+		MaterialProperties material,
+		vec3 backlight,
+		inout uint rng_state,
+		bool is_indirect_bounce,
+		uint light_count,
+		uint instance_layers) {
+	vec3 result = vec3(0.0);
+	uint directional_count = lights_directional_count(light_count);
+
+	uint idx;
+	float select_pdf;
+	if (lights_select(hit_pos, 0u, directional_count, instance_layers, rng_state, idx, select_pdf)) {
+		vec3 contribution = lights_evaluate_directional(rt_lights[idx], hit_pos, N, V, material, backlight,
+				rng_state, is_indirect_bounce);
+		result += contribution / max(select_pdf, 1e-10);
+	}
+	if (lights_select(hit_pos, directional_count, light_count - directional_count, instance_layers, rng_state, idx, select_pdf)) {
+		vec3 contribution = lights_evaluate_positional(rt_lights[idx], hit_pos, N, V, material, backlight,
+				rng_state, is_indirect_bounce);
+		result += contribution / max(select_pdf, 1e-10);
+	}
+	return result;
 }

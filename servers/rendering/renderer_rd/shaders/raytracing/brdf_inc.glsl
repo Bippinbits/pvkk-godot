@@ -1157,14 +1157,18 @@ bool evalIndirectCombinedBRDF(float2 u, float3 shadingNormal, float3 geometryNor
 
 // Environment BRDF approximation from https://www.unrealengine.com/fr/blog/physically-based-shading-on-mobile
 // Author: Brian Karis, License: 'Epic Games, Inc. gives you permission to use, copy, modify, and distribute the code samples in this article as you see fit with no attribution required.'
-// Returns specular albedo directly (F0 * scale + bias).
-float3 DLSSRR_envBRDFApprox(float3 specularColor, float roughness, float NdotV) {
+// Returns the split-sum specular albedo (F0 * scale + bias).
+float3 envBRDFApprox(float3 specularColor, float roughness, float NdotV) {
 	const float4 c0 = { -1, -0.0275, -0.572, 0.022 };
 	const float4 c1 = { 1, 0.0425, 1.04, -0.04 };
 	float4 r = roughness * c0 + c1;
 	float a004 = min(r.x * r.x, exp2(-9.28 * NdotV)) * r.x + r.y;
 	float2 AB = float2(-1.04, 1.04) * a004 + r.zw;
-	return (specularColor * AB.x + AB.y) * 2.0f;
+	return specularColor * AB.x + AB.y;
+}
+
+float3 DLSSRR_envBRDFApprox(float3 specularColor, float roughness, float NdotV) {
+	return envBRDFApprox(specularColor, roughness, NdotV) * 2.0f;
 }
 
 float3 DLSSRR_computeDiffuseAlbedo(float3 baseColor, float metalness) {

@@ -700,7 +700,7 @@ uint32_t SceneShaderRaytracing::compute_rt_flags(RID p_environment, bool p_fog_e
 		}
 
 		sample_count = MAX(1, env_storage->environment_get_pathtracing_samples_per_pixel(p_environment));
-		max_bounces = CLAMP(env_storage->environment_get_pathtracing_max_bounces(p_environment), 1, 8);
+		max_bounces = MAX(0, env_storage->environment_get_pathtracing_max_bounces(p_environment));
 		if (env_storage->environment_get_pathtracing_denoiser(p_environment) == RSE::PT_DENOISER_DLSS_RAY_RECONSTRUCTION) {
 			flags |= RT_FLAG_DLSS_RR_ENABLED;
 		}

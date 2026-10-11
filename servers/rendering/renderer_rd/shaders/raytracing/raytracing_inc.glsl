@@ -36,7 +36,6 @@
 #define RT_PARAM_FOG_USE_LEGACY_BLENDING 13 // rt_params[3].y
 #define RT_PARAM_LIGHT_COUNT 14 // rt_params[3].z - Number of active lights in light buffer
 #define RT_PARAM_FRAME_INDEX 15 // rt_params[3].w - Frame counter for temporal variation
-
 // ============================================================================
 // PATHTRACING PAYLOAD (36 bytes, fp16/unorm-packed)
 // ============================================================================

@@ -543,17 +543,59 @@ MaterialProperties material_properties_from_result(MaterialResult m) {
 	return material;
 }
 
+/// Ambient and reflection lighting for max_bounces == 0, which never traces the
+/// sky. Mirrors the rasterizer (scene_forward_clustered.glsl): ambient source,
+/// sky contribution, reflection source and specular occlusion. The DFG lookup
+/// texture is not bound here, so envBRDFApprox stands in for it.
+vec3 ambient_approx(vec3 N, vec3 V, MaterialProperties material) {
+	uint flags = scene_data_block.data.flags;
+	vec4 ambient_color_energy = scene_data_block.data.ambient_light_color_energy;
+	float sky_scale = scene_data_block.data.IBL_exposure_normalization * ambient_color_energy.a;
+	float roughness = material.roughness;
+
+	vec3 ambient = vec3(0.0);
+	if ((flags & SCENE_DATA_FLAGS_USE_AMBIENT_LIGHT) != 0u) {
+		ambient = ambient_color_energy.rgb;
+		if ((flags & SCENE_DATA_FLAGS_USE_AMBIENT_CUBEMAP) != 0u) {
+			vec3 sky_ambient = radiance_octmap_sample(rt_sky_oct_uv(N), 1.0) * sky_scale;
+			ambient = mix(ambient, sky_ambient, scene_data_block.data.ambient_color_sky_mix);
+		}
+	}
+
+	vec3 specular = vec3(0.0);
+	if ((flags & SCENE_DATA_FLAGS_USE_REFLECTION_CUBEMAP) != 0u) {
+		vec3 ref_vec = mix(reflect(-V, N), N, roughness * roughness);
+		float horizon = min(1.0 + dot(ref_vec, N), 1.0);
+		specular = radiance_octmap_sample(rt_sky_oct_uv(ref_vec), sqrt(roughness)) * sky_scale * horizon * horizon;
+
+		float specular_occlusion = min(dot(ambient, vec3(0.3, 0.59, 0.11)) * 8.0, 1.0);
+		float reflective_f = (1.0 - roughness) * material.metalness;
+		specular_occlusion = max(min(reflective_f * specular_occlusion * 10.0, 1.0), specular_occlusion);
+
+		vec3 specular_f0 = baseColorToSpecularF0(material.baseColor, material.metalness, material.dielectricF0);
+		specular *= specular_occlusion * envBRDFApprox(specular_f0, roughness, max(dot(N, V), 1e-4));
+	}
+
+	return baseColorToDiffuseReflectance(material.baseColor, material.metalness) * ambient + specular;
+}
+
 vec3 shade_local_surface(HitData h, MaterialResult m, vec3 N, vec3 V, bool p_is_indirect, inout uint rng_state) {
 	if (surface_is_unshaded(h.geometry_idx)) {
 		return m.albedo + m.emissive;
 	}
 	vec3 lit = m.emissive;
+	MaterialProperties material = material_properties_from_result(m);
 	uint light_count = uint(get_rt_param(RT_PARAM_LIGHT_COUNT));
-	if (light_count > 0u) {
-		MaterialProperties material = material_properties_from_result(m);
-		vec3 hit_pos_offset = offset_ray_origin(h.hit_pos, h.geometry_normal);
+	vec3 hit_pos_offset = offset_ray_origin(h.hit_pos, h.geometry_normal);
+	uint layers = geometries[h.geometry_idx].layers;
+	if (RT_GET_MAX_BOUNCES() == 0u) {
+		// Direct only: one ray per light group, plus the rasterizer's ambient.
+		lit += lights_evaluate_direct_lighting_per_group(hit_pos_offset, N, V, material, m.backlight,
+				rng_state, p_is_indirect, light_count, layers);
+		lit += ambient_approx(N, V, material);
+	} else {
 		lit += lights_evaluate_direct_lighting(hit_pos_offset, N, V, material, m.backlight,
-				rng_state, p_is_indirect, light_count, geometries[h.geometry_idx].layers);
+				rng_state, p_is_indirect, light_count, layers);
 	}
 	return lit;
 }
