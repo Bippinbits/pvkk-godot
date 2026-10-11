@@ -34,6 +34,7 @@
 #include "core/object/script_language.h"
 #include "core/os/main_loop.h"
 #include "core/os/os.h"
+#include "core/os/thread.h"
 #include "core/string/print_string.h"
 #include "core/version.h"
 #include "main/main.h"
@@ -43,6 +44,7 @@
 // Backtrace code based on: https://stackoverflow.com/questions/6205981/windows-c-stack-trace-from-a-running-app
 
 #include <algorithm>
+#include <atomic>
 #include <cstdlib>
 #include <iterator>
 #include <string>
@@ -110,9 +112,7 @@ public:
 		ret.image_name = temp;
 		GetModuleBaseName(process, module, temp, sizeof(temp));
 		ret.module_name = temp;
-		std::vector<char> img(ret.image_name.begin(), ret.image_name.end());
-		std::vector<char> mod(ret.module_name.begin(), ret.module_name.end());
-		SymLoadModule64(process, nullptr, &img[0], &mod[0], (DWORD64)ret.base_address, ret.load_size);
+		SymLoadModule64(process, nullptr, ret.image_name.c_str(), ret.module_name.c_str(), (DWORD64)ret.base_address, ret.load_size);
 		return ret;
 	}
 };
@@ -130,6 +130,13 @@ DWORD CrashHandlerException(EXCEPTION_POINTERS *ep) {
 		return EXCEPTION_CONTINUE_SEARCH;
 	}
 
+	// A main-thread crash reaches both the __except filter in main and the unhandled exception filter;
+	// concurrent crashes on other threads must not interleave their dumps either.
+	static std::atomic_flag dumped = ATOMIC_FLAG_INIT;
+	if (dumped.test_and_set()) {
+		return EXCEPTION_CONTINUE_SEARCH;
+	}
+
 	if (OS::get_singleton()->is_crash_handler_silent()) {
 		std::_Exit(0);
 	}
@@ -140,12 +147,15 @@ DWORD CrashHandlerException(EXCEPTION_POINTERS *ep) {
 	}
 
 	// Tell MainLoop about the crash. This can be handled by users too in Node.
-	if (OS::get_singleton()->get_main_loop()) {
+	// The scene tree can only be notified from the main thread.
+	if (OS::get_singleton()->get_main_loop() && Thread::is_main_thread()) {
 		OS::get_singleton()->get_main_loop()->notification(MainLoop::NOTIFICATION_CRASH);
 	}
 
 	print_error("\n================================================================");
 	print_error(vformat("%s: Program crashed", __FUNCTION__));
+	print_error(vformat("Exception 0x%08X at 0x%016X on %s thread %d", (uint64_t)ep->ExceptionRecord->ExceptionCode,
+			(uint64_t)ep->ExceptionRecord->ExceptionAddress, Thread::is_main_thread() ? "main" : "worker", (int64_t)GetCurrentThreadId()));
 
 	// Print the engine version just before, so that people are reminded to include the version in backtrace reports.
 	if (String(GODOT_VERSION_HASH).is_empty()) {
@@ -212,7 +222,16 @@ DWORD CrashHandlerException(EXCEPTION_POINTERS *ep) {
 				if (SymGetLineFromAddr64(process, frame.AddrPC.Offset, &offset_from_symbol, &line)) {
 					print_error(vformat("[%d] %s (%s:%d)", n, fnName.c_str(), (char *)line.FileName, (int)line.LineNumber));
 				} else {
-					print_error(vformat("[%d] %s", n, fnName.c_str()));
+					// Module and offset still locate frames in modules without symbols (drivers, system DLLs).
+					String location = "?";
+					for (const module_data &m : modules) {
+						const DWORD64 module_base = (DWORD64)m.base_address;
+						if (frame.AddrPC.Offset >= module_base && frame.AddrPC.Offset < module_base + m.load_size) {
+							location = vformat("%s+0x%X", m.module_name.c_str(), (uint64_t)(frame.AddrPC.Offset - module_base));
+							break;
+						}
+					}
+					print_error(vformat("[%d] %s [%s]", n, fnName.c_str(), location));
 				}
 			} else {
 				print_error(vformat("[%d] ???", n));
@@ -242,6 +261,11 @@ DWORD CrashHandlerException(EXCEPTION_POINTERS *ep) {
 	// Pass the exception to the OS
 	return EXCEPTION_CONTINUE_SEARCH;
 }
+
+// The __except block in main only covers the main thread; this catches crashes on every other thread.
+static LONG WINAPI _unhandled_exception_filter(EXCEPTION_POINTERS *ep) {
+	return CrashHandlerException(ep);
+}
 #endif
 
 CrashHandler::CrashHandler() {
@@ -256,8 +280,14 @@ void CrashHandler::disable() {
 		return;
 	}
 
+#ifdef CRASH_HANDLER_EXCEPTION
+	SetUnhandledExceptionFilter(nullptr);
+#endif
 	disabled = true;
 }
 
 void CrashHandler::initialize() {
+#ifdef CRASH_HANDLER_EXCEPTION
+	SetUnhandledExceptionFilter(_unhandled_exception_filter);
+#endif
 }
