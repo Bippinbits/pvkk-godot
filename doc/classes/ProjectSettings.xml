@@ -3224,9 +3224,15 @@
 		<member name="rendering/pathtracing/debug_heatmap_opacity" type="float" setter="" getter="" default="0.35">
 			Opacity of [constant Environment.RT_DEBUG_TIMING_HEATMAP], applied after denoising and tone mapping. Set to [code]0.0[/code] to view the original shading while timing remains enabled, or [code]1.0[/code] for the heatmap alone. Changes take effect immediately.
 		</member>
+		<member name="rendering/pathtracing/decals" type="int" setter="" getter="" default="0">
+			Which path vertices the path tracer projects [Decal]s onto. [b]All Hits[/b] applies them everywhere, matching the rasterizer. [b]Skip After Diffuse[/b] stops once the path has bounced diffusely, where decals rarely change the result. [b]Singular Only[/b] applies them to camera hits and mirror-like reflections and refractions only, excluding rough specular bounces as well. Changes take effect immediately.
+		</member>
 		<member name="rendering/pathtracing/deformed_mesh_cache_ttl_frames" type="int" setter="" getter="" default="60">
 			Number of frames a skinned or vertex-displaced deformed-mesh BLAS is kept alive in the path tracer cache after its last visible frame. Once this threshold is exceeded the BLAS and its associated buffers are freed. Increase this value if deformed meshes flicker back into view after brief occlusion; decrease it to reclaim GPU memory sooner.
 			[b]Note:[/b] Requires a restart to take effect.
+		</member>
+		<member name="rendering/pathtracing/max_decals" type="int" setter="" getter="" default="1024">
+			Maximum number of [Decal]s the path tracer considers per frame, from [code]0[/code] to [code]65536[/code]. Decals around the camera, including those behind it, are gathered and the ones covering the largest solid angle are kept, preferring decals in front of the camera. Up to 4 decals are blended at any point; past that the bottom-most are dropped. Set to [code]0[/code] to compile decals out of the path tracing pipeline entirely. Changing between [code]0[/code] and a non-zero value switches pipelines, which may compile shaders. Changes take effect immediately.
 		</member>
 		<member name="rendering/pathtracing/max_transparency_layers" type="int" setter="" getter="" default="4">
 			Maximum number of transparent layers the path tracer peels per ray segment, from [code]0[/code] to [code]64[/code]. This applies to every blend mode. Peeling also stops when cumulative transmittance falls below [code]1.0 / 256.0[/code]. Layers beyond these limits are ignored. Set to [code]0[/code] to disable path traced transparency. Changes take effect immediately.

@@ -231,6 +231,9 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 
 		rt_state = raytracing->build_tlas(p_render_data, rt_flags);
 		if (rt_state) {
+			if (rt_flags & SceneShaderRaytracing::RT_FLAG_DECALS_ENABLED) {
+				raytracing->build_decal_volumes(rt_state, p_render_data);
+			}
 			rt_state->sky_screen_enabled = pt_sky_screen;
 			raytracing->update_scene_ubo(rt_state, p_render_data, screen_size, p_default_bg_color);
 		}
@@ -366,7 +369,8 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 		p_render_data->shadows_from_ray_queries = rt_state != nullptr;
 		uint32_t pt_directional_light_count = 0;
 		uint32_t pt_positional_light_count = 0;
-		_setup_lights_cluster_decals(p_render_data, pt_directional_light_count, pt_positional_light_count);
+		// Pathtraced transparency leaves no raster surface to receive decals.
+		_setup_lights_cluster_decals(p_render_data, pt_directional_light_count, pt_positional_light_count, !pt_transparency);
 
 		RENDER_TIMESTAMP("Update Volumetric Fog");
 		_update_pt_volumetric_fog(p_render_data, rt_state, pt_directional_light_count, pt_positional_light_count);

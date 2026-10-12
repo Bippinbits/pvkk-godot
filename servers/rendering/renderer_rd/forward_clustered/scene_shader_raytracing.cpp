@@ -712,6 +712,10 @@ uint32_t SceneShaderRaytracing::compute_rt_flags(RID p_environment, bool p_fog_e
 	if (p_volumetric_fog_enabled) {
 		flags |= RT_FLAG_VOLUMETRIC_FOG_ENABLED;
 	}
+	// Keyed on the budget rather than scene content, so decals never trigger a recompile mid-game.
+	if (GLOBAL_GET_CACHED(int, "rendering/pathtracing/max_decals") > 0) {
+		flags |= RT_FLAG_DECALS_ENABLED;
+	}
 
 	if (GLOBAL_GET("rendering/pathtracing/use_shader_execution_reordering")) {
 		flags |= RT_FLAG_SER_ENABLED;
@@ -766,6 +770,9 @@ bool SceneShaderRaytracing::_ensure_variant_compile_context(uint32_t p_rt_flags)
 	}
 	if (p_rt_flags & RT_FLAG_TIMING_ENABLED) {
 		inject_define(sources, "#define RT_TIMING_ENABLED\n");
+	}
+	if (p_rt_flags & RT_FLAG_DECALS_ENABLED) {
+		inject_define(sources, "#define RT_DECALS_ENABLED\n");
 	}
 
 	// Procedural templates come from intersection stage; strip from base HG0 path.

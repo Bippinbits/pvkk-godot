@@ -33,11 +33,14 @@
 #include "core/math/transform_3d.h"
 #include "core/string/string_name.h"
 #include "core/templates/hash_map.h"
+#include "core/templates/hash_set.h"
 #include "core/templates/local_vector.h"
 #include "core/templates/rid_owner.h"
 #include "core/templates/vector.h"
 #include "servers/rendering/renderer_rd/bindless_block.h"
+#include "servers/rendering/renderer_rd/forward_clustered/raytracing_decal_selection.h"
 #include "servers/rendering/renderer_rd/shaders/raytracing/multimesh_merge.glsl.gen.h"
+#include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
 #include "servers/rendering/rendering_device.h"
 
 #define RB_TEX_RAYTRACING SNAME("raytracing")
@@ -216,6 +219,32 @@ enum : uint8_t {
 	RT_VIS_BIT = 0x01,
 	RT_MASK_TRANSPARENT = 0x02,
 };
+
+// Volume TLAS instance masks (matches GLSL RT_VOLUME_MASK_*). Free bits are reserved for light volumes.
+enum : uint8_t {
+	RT_VOLUME_MASK_DECAL = 0x01,
+};
+
+// Bindless index of an unset decal texture (matches GLSL RT_DECAL_NO_TEXTURE).
+static constexpr uint32_t RT_DECAL_NO_TEXTURE = 0xFFFFFFFFu;
+
+// Must match GLSL RTDecalData (std430, 176 bytes). World space.
+struct alignas(16) RT_DecalData {
+	float world_to_box[12]; // Rows of the world to unit box (x/z in [0, 1], y in [-1, 1]) affine transform.
+	float normal_basis[12]; // Columns (xyz, w unused) of the orthonormal decal basis.
+	float normal[3]; // Projection direction (decal +Y).
+	float normal_fade;
+	float modulate[4]; // Linear; alpha includes distance fade.
+	float emission_energy; // Includes distance fade.
+	float albedo_mix;
+	float upper_fade;
+	float lower_fade;
+	uint32_t textures[4]; // Bindless indices, indexed by RS::DecalTexture; RT_DECAL_NO_TEXTURE when unset.
+	uint32_t mask;
+	uint32_t pad[3];
+};
+static_assert(sizeof(RT_DecalData) == 176, "RT_DecalData must be 176 bytes for std430");
+static_assert(RS::DECAL_TEXTURE_MAX == 4, "RT_DecalData::textures must cover every RS::DecalTexture");
 
 /// Per-instance state for procedural RT geometry. Heap-allocated, only exists for procedural instances.
 struct RTProceduralState {
@@ -560,6 +589,14 @@ struct RTViewportState {
 	RID fog_shadows_ubo;
 	RID fog_shadows_uniform_set;
 
+	// Decal volumes: one instance per selected decal, queried inline from closest-hit.
+	RID decal_tlas;
+	uint32_t decal_tlas_max_instances = 0;
+	RID decal_buffer;
+	uint32_t decal_buffer_capacity = 0; // Bytes; grow-only.
+	uint32_t decal_count = 0;
+	HashSet<RID> selected_decals; // Last frame's selection while over budget (hysteresis).
+
 	uint32_t frame_counter = 0;
 
 	// Set per frame: the screen-space sky texture was drawn and primary-ray
@@ -665,6 +702,16 @@ class RenderRaytracing {
 			custom_indices.clear();
 		}
 
+		// Like clear(), but also frees the allocations.
+		void reset() {
+			blass.reset();
+			transforms.reset();
+			flags.reset();
+			masks.reset();
+			sbt_offsets.reset();
+			custom_indices.reset();
+		}
+
 		void push_copy(const RTInstanceArrays &p_src, uint32_t p_index, uint8_t p_mask) {
 			blass.push_back(p_src.blass[p_index]);
 			transforms.push_back(p_src.transforms[p_index]);
@@ -676,6 +723,29 @@ class RenderRaytracing {
 	};
 	RTInstanceArrays tlas_instances;
 	RTInstanceArrays tlas_transparent_instances;
+
+	// Decal volumes. Every instance shares one AABB BLAS spanning the decal's uv_local box.
+	RID decal_box_aabb_buffer;
+	RID decal_box_blas;
+	RTInstanceArrays decal_instances;
+	LocalVector<RendererRD::TextureStorage::DecalSortInfo> decal_infos;
+	LocalVector<RTSelection::DecalCandidate> decal_candidates;
+	LocalVector<RTSelection::DecalCandidate> decal_sort_scratch;
+	LocalVector<RT_DecalData> decal_data;
+
+	// Packed decals without distance fade, indexed by decal instance RID local index.
+	struct DecalCacheEntry {
+		RID instance; // Detects local index reuse.
+		uint64_t version = 0; // DecalSortInfo::version at pack time.
+		uint64_t bindless_version = 0; // BindlessBlock::get_version() at pack time.
+		RT_DecalData data = {};
+		Transform3D box_transform;
+	};
+	LocalVector<DecalCacheEntry> decal_cache;
+
+	void _ensure_decal_box_blas();
+	void _free_decal_box_blas();
+	const DecalCacheEntry &_get_decal_cache_entry(const RendererRD::TextureStorage::DecalSortInfo &p_info);
 
 	// Shared render buffers still get one state per viewport/world.
 	HashMap<RTViewportStateKey, RTViewportState *> viewport_states;
@@ -740,6 +810,7 @@ class RenderRaytracing {
 			LocalVector<RID> &r_dirty_blas_update_list,
 			RTSurfaceData *r_surf_data);
 	void update_procedural_blas(RTProceduralState *p_state, LocalVector<RID> &r_dirty_blas_list);
+	LocalVector<RD::AccelerationStructureInstance> tlas_instance_scratch; // Reused by _build_one_tlas().
 	void _build_one_tlas(RID &r_tlas, uint32_t &r_max_instances, const RTInstanceArrays &p_instances, const String &p_name);
 	void build_acceleration_structures(RTViewportState *p_state, const LocalVector<RID> &p_dirty_blas_list, const LocalVector<RID> &p_dirty_blas_update_list);
 	void finalize_buffers(RTViewportState *p_state);
@@ -751,6 +822,7 @@ public:
 	void cleanup_caches();
 
 	RTViewportState *build_tlas(const RenderDataRD *p_render_data, uint32_t p_rt_flags);
+	void build_decal_volumes(RTViewportState *p_state, const RenderDataRD *p_render_data);
 	uint32_t gather_lights(const RenderDataRD *p_render_data, const RTViewportState *p_state, RT_LightData *r_light_data, uint32_t p_max_lights);
 	void update_scene_ubo(RTViewportState *p_state, const RenderDataRD *p_render_data, const Size2i &p_screen_size, const Color &p_default_bg_color);
 	RID update_uniform_set(RTViewportState *p_state, const RenderDataRD *p_render_data, uint32_t p_rt_flags);

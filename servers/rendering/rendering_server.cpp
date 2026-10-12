@@ -3849,6 +3849,9 @@ void RenderingServer::init() {
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/pathtracing/transparency_indirect_fade", PROPERTY_HINT_RANGE, "0,1000,0.1,or_greater,suffix:m"), 0.0);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/pathtracing/volumetric_fog_positional_shadow_rays", PROPERTY_HINT_RANGE, "1,4,1"), 2);
 	GLOBAL_DEF("rendering/pathtracing/volumetric_fog_shadows", true);
+	// Decal budget; 0 compiles decals out of the RT pipeline. Changing between 0 and non-zero swaps pipelines.
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/pathtracing/max_decals", PROPERTY_HINT_RANGE, "0,65536,1"), 1024);
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/pathtracing/decals", PROPERTY_HINT_ENUM, "All Hits,Skip After Diffuse,Singular Only"), 0);
 	GLOBAL_DEF_RST("rendering/pathtracing/multimesh_cache_cpu_transforms", false);
 	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/pathtracing/deformed_mesh_cache_ttl_frames", PROPERTY_HINT_RANGE, "1,3600,1"), 60);
 	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/pathtracing/multimesh_blas_cache_ttl_frames", PROPERTY_HINT_RANGE, "1,18000,1"), 3600);

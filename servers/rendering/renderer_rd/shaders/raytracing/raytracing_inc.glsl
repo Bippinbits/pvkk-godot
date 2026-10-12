@@ -36,6 +36,8 @@
 #define RT_PARAM_FOG_USE_LEGACY_BLENDING 13 // rt_params[3].y
 #define RT_PARAM_LIGHT_COUNT 14 // rt_params[3].z - Number of active lights in light buffer
 #define RT_PARAM_FRAME_INDEX 15 // rt_params[3].w - Frame counter for temporal variation
+#define RT_PARAM_DECAL_COUNT 16 // rt_params[4].x - decals in the decal volume TLAS
+#define RT_PARAM_DECAL_MODE 17 // rt_params[4].y - RT_DECAL_MODE_*: which path vertices receive decals
 // ============================================================================
 // PATHTRACING PAYLOAD (36 bytes, fp16/unorm-packed)
 // ============================================================================

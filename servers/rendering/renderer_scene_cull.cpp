@@ -3224,6 +3224,8 @@ void RendererSceneCull::_scene_cull(CullData &cull_data, InstanceCullResult &cul
 						uint32_t base_type = idata.flags & InstanceData::FLAG_BASE_TYPE_MASK;
 						if (base_type == RSE::INSTANCE_LIGHT) {
 							cull_result.rt_light_instances.push_back(RID::from_uint64(idata.instance_data_rid));
+						} else if (base_type == RSE::INSTANCE_DECAL) {
+							cull_result.rt_decal_instances.push_back(RID::from_uint64(idata.instance_data_rid));
 						} else if (base_type == RSE::INSTANCE_MESH || base_type == RSE::INSTANCE_MULTIMESH) {
 							// SHADOWS_ONLY instances are included: the trace masks hide
 							// them from camera rays while shadow rays still see them.
@@ -3673,8 +3675,13 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 		skip_post_and_tonemap = RSG::viewport->viewport_get_shared_viewport(p_viewport).is_valid();
 	}
 
+	RendererSceneRender::RTCullData rt_cull;
+	rt_cull.instances = &scene_cull_result.rt_geometry_instances;
+	rt_cull.lights = &scene_cull_result.rt_light_instances;
+	rt_cull.decals = &scene_cull_result.rt_decal_instances;
+
 	RENDER_TIMESTAMP("Render 3D Scene");
-	scene_render->render_scene(p_render_buffers, p_camera_data, prev_camera_data, load_color_and_depth, skip_post_and_tonemap, scene_cull_result.geometry_instances, scene_cull_result.light_instances, scene_cull_result.reflections, scene_cull_result.voxel_gi_instances, scene_cull_result.decals, scene_cull_result.lightmaps, scene_cull_result.fog_volumes, p_environment, camera_attributes, p_compositor, p_shadow_atlas, occluders_tex, p_reflection_probe.is_valid() ? RID() : scenario->reflection_atlas, p_reflection_probe, p_reflection_probe_pass, p_screen_mesh_lod_threshold, render_shadow_data, max_shadows_used, render_sdfgi_data, cull.sdfgi.region_count, 1.0f /* window_output_max_value: SDR default; HDR not backported */, &sdfgi_update_data, r_render_info, &scene_cull_result.rt_geometry_instances, &scene_cull_result.rt_light_instances, p_viewport);
+	scene_render->render_scene(p_render_buffers, p_camera_data, prev_camera_data, load_color_and_depth, skip_post_and_tonemap, scene_cull_result.geometry_instances, scene_cull_result.light_instances, scene_cull_result.reflections, scene_cull_result.voxel_gi_instances, scene_cull_result.decals, scene_cull_result.lightmaps, scene_cull_result.fog_volumes, p_environment, camera_attributes, p_compositor, p_shadow_atlas, occluders_tex, p_reflection_probe.is_valid() ? RID() : scenario->reflection_atlas, p_reflection_probe, p_reflection_probe_pass, p_screen_mesh_lod_threshold, render_shadow_data, max_shadows_used, render_sdfgi_data, cull.sdfgi.region_count, 1.0f /* window_output_max_value: SDR default; HDR not backported */, &sdfgi_update_data, r_render_info, &rt_cull, p_viewport);
 
 	if (p_viewport.is_valid()) {
 		RSG::viewport->viewport_set_prev_camera_data(p_viewport, p_camera_data);

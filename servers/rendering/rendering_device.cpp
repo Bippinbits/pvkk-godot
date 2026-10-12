@@ -623,11 +623,19 @@ Error RenderingDevice::tlas_build(RID p_tlas, Span<AccelerationStructureInstance
 	thread_local LocalVector<RDG::ResourceTracker *> draw_trackers;
 	draw_trackers.clear();
 
-	// Build instances into a CPU-side shadow buffer first then memcpy to the
-	// persistently-mapped (write-combined) GPU buffer in one shot. Scattered
-	// field writes to WC memory are orders of magnitude slower than a bulk copy.
-	LocalVector<uint8_t> shadow_buffer;
-	shadow_buffer.resize(instance_size * p_instances.size());
+	// Build instances into a small stack chunk and memcpy each full chunk to the
+	// persistently-mapped (write-combined) GPU buffer. Scattered field writes to
+	// WC memory are orders of magnitude slower than a bulk copy.
+	constexpr uint32_t CHUNK_BYTES = 16384;
+	alignas(16) uint8_t chunk[CHUNK_BYTES];
+	ERR_FAIL_COND_V(instance_size == 0 || instance_size > CHUNK_BYTES, ERR_BUG);
+	const uint32_t chunk_capacity = CHUNK_BYTES / instance_size;
+	uint32_t chunk_count = 0;
+	uint8_t *instance_dst = instance_buffer.data_ptr + instance_buffer_offset;
+
+	// Instances often share a BLAS (e.g. volume boxes); validate and register each BLAS only once per run.
+	RID last_blas;
+	RDD::AccelerationStructureID last_blas_driver_id;
 
 	for (uint32_t i = 0; i < p_instances.size(); i++) {
 		const AccelerationStructureInstance &rd_instance = p_instances[i];
@@ -639,7 +647,10 @@ Error RenderingDevice::tlas_build(RID p_tlas, Span<AccelerationStructureInstance
 		rdd_instance.hit_sbt_offset = _decode_hit_sbt_range_offset(rd_instance.hit_sbt_range);
 		rdd_instance.flags = rd_instance.flags;
 
-		if (rd_instance.blas.is_valid()) {
+		if (rd_instance.blas.is_valid() && rd_instance.blas == last_blas) {
+			ERR_FAIL_COND_V_MSG(!rd_instance.hit_sbt_range, ERR_INVALID_PARAMETER, "Instance " + itos(i) + " has an invalid hit shader binding table range.");
+			rdd_instance.blas = last_blas_driver_id;
+		} else if (rd_instance.blas.is_valid()) {
 			ERR_FAIL_COND_V_MSG(!rd_instance.hit_sbt_range, ERR_INVALID_PARAMETER, "Instance " + itos(i) + " has an invalid hit shader binding table range.");
 
 			AccelerationStructure *blas = acceleration_structure_owner.get_or_null(rd_instance.blas);
@@ -647,6 +658,8 @@ Error RenderingDevice::tlas_build(RID p_tlas, Span<AccelerationStructureInstance
 			ERR_FAIL_COND_V(blas->type != RDD::ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL, ERR_INVALID_PARAMETER);
 			ERR_FAIL_COND_V_MSG(blas->invalidated, ERR_INVALID_PARAMETER, "BLAS either has not been built yet, or has been invalidated by an operation and needs to be rebuilt.");
 			rdd_instance.blas = blas->driver_id;
+			last_blas = rd_instance.blas;
+			last_blas_driver_id = blas->driver_id;
 
 			if (!tlas->acceleration_structure_dependencies.has(rd_instance.blas)) {
 				tlas->acceleration_structure_dependencies.insert(rd_instance.blas);
@@ -658,10 +671,14 @@ Error RenderingDevice::tlas_build(RID p_tlas, Span<AccelerationStructureInstance
 			}
 		}
 
-		driver->acceleration_structure_instance_write(shadow_buffer.ptr() + (instance_size * i), rdd_instance);
+		driver->acceleration_structure_instance_write(chunk + instance_size * chunk_count, rdd_instance);
+		if (++chunk_count == chunk_capacity) {
+			memcpy(instance_dst, chunk, instance_size * chunk_count);
+			instance_dst += instance_size * chunk_count;
+			chunk_count = 0;
+		}
 	}
-
-	memcpy(instance_buffer.data_ptr + instance_buffer_offset, shadow_buffer.ptr(), instance_size * p_instances.size());
+	memcpy(instance_dst, chunk, instance_size * chunk_count);
 
 	draw_graph.add_tlas_build(tlas->driver_id, tlas->scratch_buffer, instance_buffer.driver_id, instance_buffer_offset, p_instances.size(), tlas->draw_tracker, draw_trackers);
 

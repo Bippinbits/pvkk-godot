@@ -31,9 +31,11 @@
 #include "core/config/project_settings.h"
 #include "core/math/math_funcs.h"
 #include "servers/rendering/renderer_rd/environment/sky.h"
+#include "servers/rendering/renderer_rd/forward_clustered/raytracing_decal_selection.h"
 #include "servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.h"
 #include "servers/rendering/renderer_rd/framebuffer_cache_rd.h"
 #include "servers/rendering/renderer_rd/forward_clustered/scene_shader_raytracing.h"
+#include "servers/rendering/renderer_rd/storage_rd/decal_math.h"
 #include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/mesh_storage.h"
@@ -269,6 +271,12 @@ void RenderRaytracing::_free_viewport_state_internal(RTViewportState *p_state) {
 	}
 	if (p_state->fog_shadows_ubo.is_valid()) {
 		RD::get_singleton()->free_rid(p_state->fog_shadows_ubo);
+	}
+	if (p_state->decal_tlas.is_valid()) {
+		RD::get_singleton()->free_rid(p_state->decal_tlas);
+	}
+	if (p_state->decal_buffer.is_valid()) {
+		RD::get_singleton()->free_rid(p_state->decal_buffer);
 	}
 	memdelete(p_state);
 }
@@ -585,6 +593,14 @@ void RenderRaytracing::cleanup_caches() {
 	}
 	material_chunks.clear();
 
+	_free_decal_box_blas();
+	decal_cache.reset();
+	decal_infos.reset();
+	decal_candidates.reset();
+	decal_sort_scratch.reset();
+	decal_data.reset();
+	decal_instances.reset();
+	tlas_instance_scratch.reset();
 	blas_transform_pool.clear();
 
 	// Reset counters
@@ -2015,10 +2031,9 @@ void RenderRaytracing::_build_one_tlas(RID &r_tlas, uint32_t &r_max_instances, c
 		RD::get_singleton()->set_resource_name(r_tlas, p_name);
 	}
 
-	LocalVector<RD::AccelerationStructureInstance> instances;
-	instances.resize(p_instances.blass.size());
+	tlas_instance_scratch.resize(p_instances.blass.size());
 	for (uint32_t i = 0; i < p_instances.blass.size(); i++) {
-		RD::AccelerationStructureInstance &inst = instances[i];
+		RD::AccelerationStructureInstance &inst = tlas_instance_scratch[i];
 		inst.id = p_instances.custom_indices[i];
 		inst.transform = p_instances.transforms[i];
 		inst.blas = p_instances.blass[i];
@@ -2028,7 +2043,7 @@ void RenderRaytracing::_build_one_tlas(RID &r_tlas, uint32_t &r_max_instances, c
 		inst.hit_sbt_range = RD::HitShaderBindingTableRange((1ULL << 32) | uint64_t(sbt_off));
 	}
 
-	RD::get_singleton()->tlas_build(r_tlas, instances);
+	RD::get_singleton()->tlas_build(r_tlas, tlas_instance_scratch);
 }
 
 void RenderRaytracing::finalize_buffers(RTViewportState *p_state) {
@@ -3228,6 +3243,183 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 }
 
 // ---------------------------------------------------------------------------
+// Decal volumes
+// ---------------------------------------------------------------------------
+
+void RenderRaytracing::_ensure_decal_box_blas() {
+	if (decal_box_blas.is_valid()) {
+		return;
+	}
+	RD *rd = RD::get_singleton();
+
+	// uv_local box of a decal: x/z in [0, 1], y in [-1, 1].
+	const float box[6] = { 0.0f, -1.0f, 0.0f, 1.0f, 1.0f, 1.0f };
+	Vector<uint8_t> bytes;
+	bytes.resize(sizeof(box));
+	memcpy(bytes.ptrw(), box, sizeof(box));
+	decal_box_aabb_buffer = rd->storage_buffer_create(sizeof(box), bytes, 0,
+			RD::BUFFER_CREATION_DEVICE_ADDRESS_BIT | RD::BUFFER_CREATION_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT);
+	ERR_FAIL_COND(!decal_box_aabb_buffer.is_valid());
+	rd->set_resource_name(decal_box_aabb_buffer, "RT Decal Box AABB");
+
+	RD::AccelerationStructureGeometry geom;
+	geom.type = RD::AccelerationStructureGeometry::TYPE_AABBS;
+	geom.geometry.aabbs.buffer = decal_box_aabb_buffer;
+	geom.geometry.aabbs.count = 1;
+	geom.geometry.aabbs.stride = sizeof(box);
+	decal_box_blas = rd->blas_create({ &geom, 1 }, RD::ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT);
+	ERR_FAIL_COND(!decal_box_blas.is_valid());
+	rd->set_resource_name(decal_box_blas, "RT Decal Box BLAS");
+	rd->blas_build(decal_box_blas);
+}
+
+void RenderRaytracing::_free_decal_box_blas() {
+	// The BLAS goes first: freeing its input buffer frees it implicitly.
+	if (decal_box_blas.is_valid()) {
+		RD::get_singleton()->free_rid(decal_box_blas);
+		decal_box_blas = RID();
+	}
+	if (decal_box_aabb_buffer.is_valid()) {
+		RD::get_singleton()->free_rid(decal_box_aabb_buffer);
+		decal_box_aabb_buffer = RID();
+	}
+}
+
+const RenderRaytracing::DecalCacheEntry &RenderRaytracing::_get_decal_cache_entry(const RendererRD::TextureStorage::DecalSortInfo &p_info) {
+	const uint32_t index = p_info.instance.get_local_index();
+	if (index >= decal_cache.size()) {
+		decal_cache.resize(index + 1);
+	}
+	DecalCacheEntry &entry = decal_cache[index];
+	const uint64_t bindless_version = bindless_block ? bindless_block->get_version() : 0;
+	if (entry.instance == p_info.instance && entry.version == p_info.version && entry.bindless_version == bindless_version) {
+		return entry;
+	}
+
+	RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
+	RendererRD::TextureStorage::DecalWorldInfo info;
+	texture_storage->decal_instance_get_world_info(p_info.instance, info);
+
+	RT_DecalData &d = entry.data;
+	RendererRD::MaterialStorage::store_transform_transposed_3x4(info.world_to_box, d.world_to_box);
+	for (int i = 0; i < 3; i++) {
+		const Vector3 column = info.normal_basis.get_column(i);
+		d.normal_basis[i * 4 + 0] = column.x;
+		d.normal_basis[i * 4 + 1] = column.y;
+		d.normal_basis[i * 4 + 2] = column.z;
+		d.normal_basis[i * 4 + 3] = 0.0f;
+		d.normal[i] = info.normal[i];
+	}
+	d.normal_fade = info.normal_fade;
+	d.modulate[0] = info.modulate.r;
+	d.modulate[1] = info.modulate.g;
+	d.modulate[2] = info.modulate.b;
+	d.modulate[3] = info.modulate.a;
+	d.emission_energy = info.emission_energy;
+	d.albedo_mix = info.albedo_mix;
+	d.upper_fade = info.upper_fade;
+	d.lower_fade = info.lower_fade;
+	d.mask = info.cull_mask;
+	for (int i = 0; i < RS::DECAL_TEXTURE_MAX; i++) {
+		const bool srgb = i == RS::DECAL_TEXTURE_ALBEDO || i == RS::DECAL_TEXTURE_EMISSION;
+		const RID rd_texture = info.textures[i].is_valid() ? texture_storage->texture_get_rd_texture(info.textures[i], srgb) : RID();
+		d.textures[i] = (bindless_block && rd_texture.is_valid()) ? bindless_block->add_texture(rd_texture) : RT_DECAL_NO_TEXTURE;
+	}
+
+	entry.instance = p_info.instance;
+	entry.version = p_info.version;
+	// add_texture() may have bumped the version; the indices above stay valid.
+	entry.bindless_version = bindless_block ? bindless_block->get_version() : 0;
+	entry.box_transform = info.box_transform;
+	return entry;
+}
+
+void RenderRaytracing::build_decal_volumes(RTViewportState *p_state, const RenderDataRD *p_render_data) {
+	ERR_FAIL_NULL(p_state);
+	ERR_FAIL_NULL(p_render_data);
+	RENDER_TIMESTAMP("RT Decal Volumes");
+
+	RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
+	const uint32_t budget = (uint32_t)MAX(0, GLOBAL_GET_CACHED(int, "rendering/pathtracing/max_decals"));
+	const Transform3D &cam_xform = p_render_data->scene_data->cam_transform;
+	const Vector3 cam_forward = -cam_xform.basis.get_column(2).normalized();
+
+	const uint32_t source_count = p_render_data->rt_decals ? p_render_data->rt_decals->size() : 0;
+	decal_infos.resize(source_count);
+	uint32_t valid_count = 0;
+	for (uint32_t i = 0; i < source_count; i++) {
+		if (texture_storage->decal_instance_get_sort_info((*p_render_data->rt_decals)[i], cam_xform.origin, decal_infos[valid_count])) {
+			valid_count++;
+		}
+	}
+	decal_infos.resize(valid_count);
+
+	// Scores only matter when the budget drops decals.
+	const bool over_budget = decal_infos.size() > budget;
+	decal_candidates.resize(decal_infos.size());
+	for (uint32_t i = 0; i < decal_infos.size(); i++) {
+		const RendererRD::TextureStorage::DecalSortInfo &info = decal_infos[i];
+		RTSelection::DecalCandidate &candidate = decal_candidates[i];
+		candidate.source = i;
+		candidate.sort_key = info.sort_key;
+		candidate.score = over_budget
+				? RTSelection::decal_score(DecalMath::solid_angle(info.distance, info.radius), info.fade, (info.position - cam_xform.origin).dot(cam_forward), p_state->selected_decals.has(info.instance))
+				: 0.0f;
+	}
+	decal_sort_scratch.resize(MIN(decal_candidates.size(), budget));
+	RTSelection::select_decals(decal_candidates, budget, decal_sort_scratch);
+
+	p_state->selected_decals.clear();
+	if (over_budget) {
+		for (const RTSelection::DecalCandidate &candidate : decal_candidates) {
+			p_state->selected_decals.insert(decal_infos[candidate.source].instance);
+		}
+	}
+
+	_ensure_decal_box_blas();
+
+	const uint32_t count = decal_candidates.size();
+	decal_data.resize(MAX(count, 1u));
+	decal_instances.blass.resize(count);
+	decal_instances.transforms.resize(count);
+	decal_instances.flags.resize(count);
+	decal_instances.masks.resize(count);
+	decal_instances.sbt_offsets.resize(count);
+	decal_instances.custom_indices.resize(count);
+	for (uint32_t i = 0; i < count; i++) {
+		const RendererRD::TextureStorage::DecalSortInfo &info = decal_infos[decal_candidates[i].source];
+		const DecalCacheEntry &entry = _get_decal_cache_entry(info);
+		RT_DecalData &d = decal_data[i];
+		d = entry.data;
+		d.modulate[3] *= info.fade;
+		d.emission_energy *= info.fade;
+		decal_instances.transforms[i] = entry.box_transform;
+		decal_instances.blass[i] = decal_box_blas;
+		decal_instances.flags[i] = 0;
+		decal_instances.masks[i] = RT_VOLUME_MASK_DECAL;
+		decal_instances.sbt_offsets[i] = 0;
+		decal_instances.custom_indices[i] = i;
+	}
+	p_state->decal_count = count;
+
+	const uint32_t buffer_size = decal_data.size() * sizeof(RT_DecalData);
+	if (buffer_size > p_state->decal_buffer_capacity) {
+		if (p_state->decal_buffer.is_valid()) {
+			RD::get_singleton()->free_rid(p_state->decal_buffer);
+		}
+		p_state->decal_buffer_capacity = buffer_size;
+		p_state->decal_buffer = RD::get_singleton()->storage_buffer_create(buffer_size);
+		RD::get_singleton()->set_resource_name(p_state->decal_buffer, "RT Decal Buffer");
+	}
+	if (count > 0) {
+		RD::get_singleton()->buffer_update(p_state->decal_buffer, 0, count * sizeof(RT_DecalData), decal_data.ptr());
+	}
+
+	// Built even when empty so the closest-hit binding stays valid.
+	_build_one_tlas(p_state->decal_tlas, p_state->decal_tlas_max_instances, decal_instances, "RT Decal TLAS");
+}
+
+// ---------------------------------------------------------------------------
 // Light gathering
 // ---------------------------------------------------------------------------
 
@@ -3271,12 +3463,6 @@ uint32_t RenderRaytracing::gather_lights(const RenderDataRD *p_render_data, cons
 
 	LocalVector<LightScore> positional_lights;
 
-	// Lights behind the camera are deprioritized. The penalty ramps in linearly
-	// over BEHIND_FRUSTUM_BUFFER_M so nearby behind-camera lights aren't punished harshly.
-	// At or in front of the camera plane: no penalty. Beyond the buffer: full penalty.
-	static const float BEHIND_FRUSTUM_PENALTY = 0.05f;
-	static const float BEHIND_FRUSTUM_BUFFER_M = 20.0f;
-
 	// Helper: score a positional light and add to candidates.
 	auto score_positional_light = [&](RID light_instance) {
 		RID base = ls->light_instance_get_base_light(light_instance);
@@ -3293,11 +3479,8 @@ uint32_t RenderRaytracing::gather_lights(const RenderDataRD *p_render_data, cons
 		float range = ls->light_get_param(base, RSE::LIGHT_PARAM_RANGE);
 		float range_factor = (range > 0.0f) ? (range * range) : 1.0e12f;
 
-		// Signed depth of the light along the camera forward axis (world units).
-		// Positive = in front, negative = behind. Ramp penalty in over the buffer zone.
-		float forward_depth = to_light.dot(cam_forward);
-		float t = CLAMP((forward_depth + BEHIND_FRUSTUM_BUFFER_M) / BEHIND_FRUSTUM_BUFFER_M, 0.0f, 1.0f);
-		float frustum_factor = Math::lerp(BEHIND_FRUSTUM_PENALTY, 1.0f, t);
+		// Lights behind the camera are deprioritized.
+		float frustum_factor = RTSelection::behind_camera_factor(to_light.dot(cam_forward));
 
 		float score = (energy * lum * range_factor * frustum_factor) / dist_sq;
 
@@ -3575,6 +3758,8 @@ RID RenderRaytracing::update_uniform_set(RTViewportState *p_state, const RenderD
 		rt_ubo.params[SceneShaderRaytracing::RT_PARAM_TRANSPARENCY_INDIRECT_FADE] = (float)GLOBAL_GET_CACHED(double, "rendering/pathtracing/transparency_indirect_fade");
 		rt_ubo.params[SceneShaderRaytracing::RT_PARAM_SKY_SCREEN_ENABLED] = p_state->sky_screen_enabled ? 1.0f : 0.0f;
 		rt_ubo.params[SceneShaderRaytracing::RT_PARAM_FRAME_INDEX] = float(p_state->frame_counter++);
+		rt_ubo.params[SceneShaderRaytracing::RT_PARAM_DECAL_COUNT] = float(p_state->decal_count);
+		rt_ubo.params[SceneShaderRaytracing::RT_PARAM_DECAL_MODE] = float(GLOBAL_GET_CACHED(int, "rendering/pathtracing/decals"));
 
 		// Unjittered VP for motion vectors (matches raster convention).
 		{
@@ -3803,6 +3988,29 @@ RID RenderRaytracing::update_uniform_set(RTViewportState *p_state, const RenderD
 		uniforms.push_back(u);
 	} else if (rb->has_texture(RB_SCOPE_RT_TIMING, RB_TEX_RT_TIMING)) {
 		rb->clear_context(RB_SCOPE_RT_TIMING);
+	}
+
+	// Bindings 36-38: decal volumes, compiled in only with RT_FLAG_DECALS_ENABLED. Textures are bindless (set 1).
+	if (p_rt_flags & SceneShaderRaytracing::RT_FLAG_DECALS_ENABLED) {
+		ERR_FAIL_COND_V(p_state->decal_tlas.is_null() || p_state->decal_buffer.is_null(), RID());
+
+		RD::Uniform u;
+		u.binding = 36;
+		u.uniform_type = RD::UNIFORM_TYPE_ACCELERATION_STRUCTURE;
+		u.append_id(p_state->decal_tlas);
+		uniforms.push_back(u);
+
+		u = RD::Uniform();
+		u.binding = 37;
+		u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
+		u.append_id(p_state->decal_buffer);
+		uniforms.push_back(u);
+
+		u = RD::Uniform();
+		u.binding = 38;
+		u.uniform_type = RD::UNIFORM_TYPE_SAMPLER;
+		u.append_id(owner->decals_get_sampler(RendererRD::MaterialStorage::get_singleton()->samplers_rd_get_default()));
+		uniforms.push_back(u);
 	}
 
 	RID shader_rd = shader ? shader->get_pipeline_shader_rd(p_rt_flags) : RID();

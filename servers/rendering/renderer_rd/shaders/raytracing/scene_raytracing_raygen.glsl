@@ -626,6 +626,7 @@ vec3 radiance_octmap_sample(vec2 p_oct_uv, float p_roughness) {
 // clang-format off
 #include "raytracing_material_eval_inc.glsl"
 #include "raytracing_closest_hit_common_inc.glsl"
+#include "raytracing_decals_inc.glsl"
 // clang-format on
 
 // ============================================================================
@@ -682,6 +683,12 @@ void main() {
 		vec3 mapped = world_tangent * ts_normal.x + world_bitangent * ts_normal.y + m.normal * ts_normal.z;
 		m.normal = normalize(mix(m.normal, mapped, normal_map_depth));
 	}
+
+#ifdef RT_DECALS_ENABLED
+	if (rt_decals_process(h, m)) {
+		return;
+	}
+#endif
 
 #ifdef RT_DEBUG_ENABLED
 	{
@@ -763,6 +770,12 @@ void main() {
 		}
 	}
 
+#ifdef RT_DECALS_ENABLED
+	if (rt_decals_process(h, m)) {
+		return;
+	}
+#endif
+
 #ifdef RT_DEBUG_ENABLED
 	{
 		int VIS_MODE = int(get_rt_param(RT_PARAM_VIS_MODE));
@@ -771,8 +784,8 @@ void main() {
 			vec3 V = -gl_WorldRayDirectionEXT;
 			float NdotV = max(dot(m.normal, V), 0.0001);
 			vec2 debug_uv = muv.triplanar ? muv.triplanar_pos.xy : muv.uv;
-			debug_visualize(VIS_MODE, h.is_front_face, h.geometry_normal, final_normal, tangent_space_normal,
-					h.tangent, h.bitangent, debug_uv, albedo, orm, metalness, roughness, mat.specular, emissive, V, NdotV);
+			debug_visualize(VIS_MODE, h.is_front_face, h.geometry_normal, m.normal, tangent_space_normal,
+					h.tangent, h.bitangent, debug_uv, m.albedo, vec3(orm.r, m.roughness, m.metalness), m.metalness, m.roughness, m.specular, m.emissive, V, NdotV);
 			return;
 		}
 	}

@@ -566,6 +566,9 @@
 		<constant name="RT_DEBUG_DIRECTIONAL_SHADOW_BLOCKER" value="27" enum="PathtracingDebugMode">
 			Traces from the primary hit toward the first [DirectionalLight3D] against every shadow caster, as volumetric fog does. White: the light is visible. Yellow: only transparent casters are in the way, darker with lower transmittance. Red: an opaque caster the camera does not see blocks it (the rasterizer ignores such casters). Blue: an opaque caster the camera sees blocks it. Red and blue get darker the farther away the blocker is. Dark gray: the surface faces away from the light. Magenta: no directional light.
 		</constant>
+		<constant name="RT_DEBUG_DECAL_OVERLAP" value="28" enum="PathtracingDebugMode">
+			Shows how many [Decal]s cover each primary hit. Black: none. Green, yellow, orange and red: 1 to 4 decals. Magenta: more than 4, so the bottom-most decals are dropped. Requires [member ProjectSettings.rendering/pathtracing/max_decals] to be greater than [code]0[/code].
+		</constant>
 		<constant name="FOG_MODE_EXPONENTIAL" value="0" enum="FogMode">
 			Use a physically-based fog model defined primarily by fog density.
 		</constant>
