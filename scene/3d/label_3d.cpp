@@ -30,7 +30,6 @@
 
 #include "label_3d.h"
 
-#include "core/math/geometry_2d.h"
 #include "scene/main/window.h"
 #include "scene/resources/mesh.h"
 #include "scene/resources/theme.h"
@@ -332,95 +331,37 @@ Ref<TriangleMesh> Label3D::generate_triangle_mesh() const {
 
 static constexpr float BLEND_PRIORITY_Z_STEP = 0.1f;
 
-HashMap<Label3D::GlyphHullKey, Label3D::GlyphHull, Label3D::GlyphHullKeyHasher> Label3D::glyph_hull_cache;
-RWLock Label3D::glyph_hull_cache_lock;
+HashMap<Label3D::GlyphHullKey, GlyphHull, Label3D::GlyphHullKeyHasher> Label3D::glyph_hull_cache;
+BinaryMutex Label3D::glyph_hull_cache_mutex;
 
-float Label3D::_glyph_hull_margin(const RID &p_font_rid, int p_font_size, int p_outline_size) {
-	if (TS->font_is_multichannel_signed_distance_field(p_font_rid)) {
-		// Matches BaseMaterial3D's MSDF alpha: the fill ramp is centered on the ink
-		// edge, the outline reaches at most range/2 - 1 source pixels beyond it.
-		double source_to_font = (double)p_font_size / (double)MAX((int64_t)1, TS->font_get_msdf_size(p_font_rid));
-		double range = (double)TS->font_get_msdf_pixel_range(p_font_rid);
-		double source_px = 2.0;
-		if (p_outline_size > 0) {
-			source_px = MAX(MIN((double)p_outline_size, range * 0.5 - 1.0), 0.0) + 1.0;
-		}
-		return (float)(source_px * source_to_font);
-	}
-	return (float)p_outline_size + 1.5f;
-}
+// Atlas texels of slack a hull may add to save vertices.
+static constexpr real_t GLYPH_HULL_TOLERANCE_TEXELS = 1.0;
 
-bool Label3D::_get_glyph_hull(const RID &p_font_rid, int p_font_size, int64_t p_glyph_index, float p_margin_px, GlyphHull &r_hull) {
+const GlyphHull *Label3D::_get_glyph_hull(const Glyph &p_glyph, int p_outline_size, const RID &p_texture, const Rect2 &p_uv_rect) {
+	const bool msdf = TS->font_is_multichannel_signed_distance_field(p_glyph.font_rid);
+	const GlyphHull::AlphaTest test = GlyphHull::make_alpha_test(msdf, msdf ? TS->font_get_msdf_pixel_range(p_glyph.font_rid) : 0.0f, p_outline_size);
+	const Point2i rect_pos = Point2i(p_uv_rect.position.floor());
+
 	GlyphHullKey key;
-	key.font_id = p_font_rid.get_id();
-	key.font_size = p_font_size;
-	key.glyph_index = (int32_t)(p_glyph_index & 0xffffff);
-	key.margin_q = (int32_t)Math::round(p_margin_px * 64.0f);
+	key.texture_id = p_texture.get_id();
+	key.rect = Rect2i(rect_pos, Point2i(p_uv_rect.get_end().ceil()) - rect_pos);
+	key.channel = test.channel;
+	key.threshold = test.threshold;
 
-	{
-		RWLockRead read_lock(glyph_hull_cache_lock);
-		if (const GlyphHull *cached = glyph_hull_cache.getptr(key)) {
-			r_hull = *cached;
-			return !r_hull.indices.is_empty();
+	const GlyphHull *hull = glyph_hull_cache.getptr(key);
+	if (!hull) {
+		const Vector2i size(p_glyph.font_size, p_outline_size);
+		const int64_t texture_idx = TS->font_get_glyph_texture_idx(p_glyph.font_rid, size, p_glyph.index);
+		GlyphHull built;
+		if (texture_idx >= 0) {
+			GlyphHull::build(TS->font_get_texture_image(p_glyph.font_rid, size, texture_idx), key.rect, test, GLYPH_HULL_TOLERANCE_TEXELS, built);
 		}
-	}
-
-	GlyphHull hull;
-	Dictionary contour_data = TS->font_get_glyph_contours(p_font_rid, p_font_size, p_glyph_index);
-	PackedVector3Array points = contour_data.get("points", PackedVector3Array());
-	PackedInt32Array contour_ends = contour_data.get("contours", PackedInt32Array());
-
-	Vector<Vector<Vector2>> contours;
-	int start = 0;
-	for (int i = 0; i < contour_ends.size(); i++) {
-		int end = MIN(contour_ends[i], points.size() - 1);
-		if (end - start >= 2) {
-			Vector<Vector2> contour;
-			contour.resize(end - start + 1);
-			for (int j = start; j <= end; j++) {
-				contour.write[j - start] = Vector2(points[j].x, points[j].y);
-			}
-			contours.push_back(contour);
-		}
-		start = end + 1;
-	}
-
-	if (!contours.is_empty()) {
-		Vector<Vector<Vector2>> outers;
-		Vector<Vector<Vector2>> holes;
-		Geometry2D::merge_many_polygons(contours, outers, holes);
-		bool failed = false;
-		for (int i = 0; i < outers.size() && !failed; i++) {
-			for (const Vector<Vector2> &polygon : Geometry2D::offset_polygon(outers[i], p_margin_px, Geometry2D::JOIN_MITER)) {
-				if (polygon.size() < 3 || Geometry2D::is_polygon_clockwise(polygon)) {
-					continue; // Clockwise polygons are holes in this case, skip them.
-				}
-				Vector<int> triangles = Geometry2D::triangulate_polygon(polygon);
-				if (triangles.is_empty()) {
-					failed = true;
-					break;
-				}
-				int base = hull.points.size();
-				hull.points.append_array(polygon);
-				for (int t : triangles) {
-					hull.indices.push_back(base + t);
-				}
-			}
-		}
-		if (failed) {
-			hull = GlyphHull();
-		}
-	}
-
-	{
-		RWLockWrite write_lock(glyph_hull_cache_lock);
 		if (glyph_hull_cache.size() > 8192) {
 			glyph_hull_cache.clear();
 		}
-		glyph_hull_cache.insert(key, hull);
+		hull = &glyph_hull_cache.insert(key, built)->value;
 	}
-	r_hull = hull;
-	return !hull.indices.is_empty();
+	return hull->indices.is_empty() ? nullptr : hull;
 }
 
 void Label3D::_generate_glyph_surfaces(const Glyph &p_glyph, Vector2 &r_offset, const Color &p_modulate, int p_priority, int p_outline_size) {
@@ -435,8 +376,7 @@ void Label3D::_generate_glyph_surfaces(const Glyph &p_glyph, Vector2 &r_offset, 
 	Rect2 gl_uv;
 	Size2 texs;
 	RID tex;
-	GlyphHull hull;
-	bool has_hull = false;
+	const GlyphHull *hull = nullptr;
 
 	if (p_glyph.font_rid.is_valid()) {
 		tex = TS->font_get_glyph_texture_rid(p_glyph.font_rid, Vector2i(p_glyph.font_size, p_outline_size), p_glyph.index);
@@ -446,7 +386,7 @@ void Label3D::_generate_glyph_surfaces(const Glyph &p_glyph, Vector2 &r_offset, 
 			gl_uv = TS->font_get_glyph_uv_rect(p_glyph.font_rid, Vector2i(p_glyph.font_size, p_outline_size), p_glyph.index);
 			texs = TS->font_get_glyph_texture_size(p_glyph.font_rid, Vector2i(p_glyph.font_size, p_outline_size), p_glyph.index);
 			if (gl_size.x > 0 && gl_size.y > 0) {
-				has_hull = _get_glyph_hull(p_glyph.font_rid, p_glyph.font_size, p_glyph.index, _glyph_hull_margin(p_glyph.font_rid, p_glyph.font_size, p_outline_size), hull);
+				hull = _get_glyph_hull(p_glyph, p_outline_size, tex, gl_uv);
 			}
 		}
 	} else if (((p_glyph.flags & TextServer::GRAPHEME_IS_VIRTUAL) != TextServer::GRAPHEME_IS_VIRTUAL) && ((p_glyph.flags & TextServer::GRAPHEME_IS_EMBEDDED_OBJECT) != TextServer::GRAPHEME_IS_EMBEDDED_OBJECT)) {
@@ -513,7 +453,7 @@ void Label3D::_generate_glyph_surfaces(const Glyph &p_glyph, Vector2 &r_offset, 
 		SurfaceData &s = surfaces[key];
 
 		const Vector2 glyph_shift = Vector2(p_glyph.x_off, p_glyph.y_off);
-		const int base = s.mesh_vertices.size();
+		const int first_vertex = s.mesh_vertices.size();
 		auto add_vertex = [&](const Vector2 &p_px, const Vector2 &p_uv) {
 			s.mesh_vertices.push_back(Vector3(r_offset.x + (p_px.x + glyph_shift.x) * pixel_size, r_offset.y - (p_px.y + glyph_shift.y) * pixel_size, s.z_shift));
 			s.mesh_normals.push_back(Vector3(0.0, 0.0, 1.0));
@@ -525,14 +465,13 @@ void Label3D::_generate_glyph_surfaces(const Glyph &p_glyph, Vector2 &r_offset, 
 			s.mesh_uvs.push_back(p_uv);
 		};
 
-		if (has_hull) {
-			Vector2 uv_scale = Vector2(gl_uv.size.x / gl_size.x, gl_uv.size.y / gl_size.y);
-			for (const Vector2 &p : hull.points) {
-				Vector2 q = p.clamp(gl_pos, gl_pos + gl_size);
-				add_vertex(q, Vector2((gl_uv.position.x + (q.x - gl_pos.x) * uv_scale.x) / texs.x, (gl_uv.position.y + (q.y - gl_pos.y) * uv_scale.y) / texs.y));
+		if (hull) {
+			const Vector2 px_per_texel = gl_size / gl_uv.size;
+			for (const Vector2 &texel : hull->points) {
+				add_vertex(gl_pos + (texel - gl_uv.position) * px_per_texel, texel / texs);
 			}
-			for (int idx : hull.indices) {
-				s.indices.push_back(base + idx);
+			for (int idx : hull->indices) {
+				s.indices.push_back(first_vertex + idx);
 			}
 		} else {
 			Vector2 uv0 = Vector2(gl_uv.position.x / texs.x, gl_uv.position.y / texs.y);
@@ -541,12 +480,12 @@ void Label3D::_generate_glyph_surfaces(const Glyph &p_glyph, Vector2 &r_offset, 
 			add_vertex(Vector2(gl_pos.x + gl_size.x, gl_pos.y), Vector2(uv1.x, uv0.y));
 			add_vertex(gl_pos + gl_size, uv1);
 			add_vertex(Vector2(gl_pos.x, gl_pos.y + gl_size.y), Vector2(uv0.x, uv1.y));
-			s.indices.push_back(base + 0);
-			s.indices.push_back(base + 1);
-			s.indices.push_back(base + 2);
-			s.indices.push_back(base + 0);
-			s.indices.push_back(base + 2);
-			s.indices.push_back(base + 3);
+			s.indices.push_back(first_vertex + 0);
+			s.indices.push_back(first_vertex + 1);
+			s.indices.push_back(first_vertex + 2);
+			s.indices.push_back(first_vertex + 0);
+			s.indices.push_back(first_vertex + 2);
+			s.indices.push_back(first_vertex + 3);
 		}
 
 		r_offset.x += p_glyph.advance * pixel_size;
@@ -684,46 +623,49 @@ void Label3D::_shape() {
 	}
 
 	Vector2 offset = Vector2(0, vbegin + lbl_offset.y * pixel_size);
-	for (int i = 0; i < lines_rid.size(); i++) {
-		const Glyph *glyphs = TS->shaped_text_get_glyphs(lines_rid[i]);
-		int gl_size = TS->shaped_text_get_glyph_count(lines_rid[i]);
-		float line_width = TS->shaped_text_get_width(lines_rid[i]) * pixel_size;
+	{
+		MutexLock hull_cache_lock(glyph_hull_cache_mutex);
+		for (int i = 0; i < lines_rid.size(); i++) {
+			const Glyph *glyphs = TS->shaped_text_get_glyphs(lines_rid[i]);
+			int gl_size = TS->shaped_text_get_glyph_count(lines_rid[i]);
+			float line_width = TS->shaped_text_get_width(lines_rid[i]) * pixel_size;
 
-		switch (horizontal_alignment) {
-			case HORIZONTAL_ALIGNMENT_LEFT:
-				offset.x = 0.0;
-				break;
-			case HORIZONTAL_ALIGNMENT_FILL:
-			case HORIZONTAL_ALIGNMENT_CENTER: {
-				offset.x = -line_width / 2.0;
-			} break;
-			case HORIZONTAL_ALIGNMENT_RIGHT: {
-				offset.x = -line_width;
-			} break;
-		}
-		offset.x += lbl_offset.x * pixel_size;
-		if (aabb == AABB()) {
-			aabb.position = Vector3(offset.x, offset.y, 0);
-			aabb.expand_to(Vector3(offset.x + line_width, offset.y - (TS->shaped_text_get_size(lines_rid[i]).y + line_spacing) * pixel_size, 0));
-		} else {
-			aabb.expand_to(Vector3(offset.x, offset.y, 0));
-			aabb.expand_to(Vector3(offset.x + line_width, offset.y - (TS->shaped_text_get_size(lines_rid[i]).y + line_spacing) * pixel_size, 0));
-		}
-		offset.y -= TS->shaped_text_get_ascent(lines_rid[i]) * pixel_size;
-
-		if (outline_modulate.a != 0.0 && outline_size > 0) {
-			// Outline surfaces.
-			Vector2 ol_offset = offset;
-			for (int j = 0; j < gl_size; j++) {
-				_generate_glyph_surfaces(glyphs[j], ol_offset, outline_modulate, outline_render_priority, outline_size);
+			switch (horizontal_alignment) {
+				case HORIZONTAL_ALIGNMENT_LEFT:
+					offset.x = 0.0;
+					break;
+				case HORIZONTAL_ALIGNMENT_FILL:
+				case HORIZONTAL_ALIGNMENT_CENTER: {
+					offset.x = -line_width / 2.0;
+				} break;
+				case HORIZONTAL_ALIGNMENT_RIGHT: {
+					offset.x = -line_width;
+				} break;
 			}
-		}
+			offset.x += lbl_offset.x * pixel_size;
+			if (aabb == AABB()) {
+				aabb.position = Vector3(offset.x, offset.y, 0);
+				aabb.expand_to(Vector3(offset.x + line_width, offset.y - (TS->shaped_text_get_size(lines_rid[i]).y + line_spacing) * pixel_size, 0));
+			} else {
+				aabb.expand_to(Vector3(offset.x, offset.y, 0));
+				aabb.expand_to(Vector3(offset.x + line_width, offset.y - (TS->shaped_text_get_size(lines_rid[i]).y + line_spacing) * pixel_size, 0));
+			}
+			offset.y -= TS->shaped_text_get_ascent(lines_rid[i]) * pixel_size;
 
-		// Main text surfaces.
-		for (int j = 0; j < gl_size; j++) {
-			_generate_glyph_surfaces(glyphs[j], offset, modulate, render_priority);
+			if (outline_modulate.a != 0.0 && outline_size > 0) {
+				// Outline surfaces.
+				Vector2 ol_offset = offset;
+				for (int j = 0; j < gl_size; j++) {
+					_generate_glyph_surfaces(glyphs[j], ol_offset, outline_modulate, outline_render_priority, outline_size);
+				}
+			}
+
+			// Main text surfaces.
+			for (int j = 0; j < gl_size; j++) {
+				_generate_glyph_surfaces(glyphs[j], offset, modulate, render_priority);
+			}
+			offset.y -= (TS->shaped_text_get_descent(lines_rid[i]) + line_spacing) * pixel_size;
 		}
-		offset.y -= (TS->shaped_text_get_descent(lines_rid[i]) + line_spacing) * pixel_size;
 	}
 
 	switch (get_billboard_mode()) {

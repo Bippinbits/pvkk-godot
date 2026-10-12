@@ -30,7 +30,8 @@
 
 #pragma once
 
-#include "core/os/rw_lock.h"
+#include "core/os/mutex.h"
+#include "scene/3d/glyph_hull.h"
 #include "scene/3d/visual_instance_3d.h"
 #include "scene/resources/font.h"
 
@@ -80,24 +81,18 @@ private:
 		RID material;
 	};
 
-	// Glyph geometry tightly enclosing the visible ink instead of the padded
-	// atlas rect, so neighbouring glyphs don't produce coplanar overlapping
-	// triangles (which the pathtracer can only peel once). Font-pixel units,
-	// y-down, glyph origin at (0, 0).
-	struct GlyphHull {
-		Vector<Vector2> points;
-		Vector<int> indices;
-	};
-
+	// Glyph geometry tightly enclosing every texel the material can draw
+	// instead of the padded atlas rect, so neighbouring glyphs rarely produce
+	// coplanar overlapping triangles (which the pathtracer can only peel once).
+	// Keyed by atlas region and alpha test, as the hull depends on nothing else.
 	struct GlyphHullKey {
-		uint64_t font_id = 0;
-		int32_t font_size = 0;
-		int32_t glyph_index = 0;
-		int32_t margin_q = 0;
-		int32_t pad = 0;
+		uint64_t texture_id = 0;
+		Rect2i rect;
+		uint32_t channel = 0;
+		float threshold = 0.0f;
 
 		bool operator==(const GlyphHullKey &p_b) const {
-			return font_id == p_b.font_id && font_size == p_b.font_size && glyph_index == p_b.glyph_index && margin_q == p_b.margin_q;
+			return texture_id == p_b.texture_id && rect == p_b.rect && channel == p_b.channel && threshold == p_b.threshold;
 		}
 	};
 
@@ -108,10 +103,13 @@ private:
 	};
 
 	static HashMap<GlyphHullKey, GlyphHull, GlyphHullKeyHasher> glyph_hull_cache;
-	static RWLock glyph_hull_cache_lock;
+	// Held once per _shape() rather than per glyph.
+	static BinaryMutex glyph_hull_cache_mutex;
 
-	static float _glyph_hull_margin(const RID &p_font_rid, int p_font_size, int p_outline_size);
-	static bool _get_glyph_hull(const RID &p_font_rid, int p_font_size, int64_t p_glyph_index, float p_margin_px, GlyphHull &r_hull);
+	// Cached hull of a glyph, built on first use, or nullptr if it has none.
+	// The caller holds glyph_hull_cache_mutex; the hull stays valid until the
+	// next call.
+	static const GlyphHull *_get_glyph_hull(const Glyph &p_glyph, int p_outline_size, const RID &p_texture, const Rect2 &p_uv_rect);
 
 	struct SurfaceKey {
 		uint64_t texture_id;
