@@ -3205,8 +3205,8 @@ void RendererSceneCull::_scene_cull(CullData &cull_data, InstanceCullResult &cul
 			// HIDDEN_CLOSE_RANGE (fully faded out), matching the point where raster
 			// switches over. In-frustum children are subject to the same rule.
 			if (cull_data.cull->rt_enabled && (idata.layer_mask & ((1 << 20) - 1))) {
-				// For off-frustum instances, also run VIS_CHECK to match raster gating.
-				bool rt_in_range = in_frustum || (cull_data.scenario->instance_aabbs[i].in_aabb(cull_data.cull->rt_aabb) && VIS_CHECK);
+				// For off-frustum instances, also run LAYER_CHECK and VIS_CHECK to match raster gating.
+				bool rt_in_range = in_frustum || (LAYER_CHECK && cull_data.scenario->instance_aabbs[i].in_aabb(cull_data.cull->rt_aabb) && VIS_CHECK);
 				if (rt_in_range) {
 					// Exclude visibility-parent children while their parent is in the
 					// FADE_CHILDREN cross-fade band. PT is binary: only one LOD at a time.

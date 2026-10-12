@@ -3308,7 +3308,13 @@ bool TextureStorage::decal_instance_get_sort_info(RID p_decal_instance, const Ve
 		return false;
 	}
 	const Decal *decal = decal_owner.get_or_null(decal_instance->decal);
-	if (!decal || (decal->textures[RS::DECAL_TEXTURE_ALBEDO].is_null() && decal->textures[RS::DECAL_TEXTURE_EMISSION].is_null())) {
+	if (!decal) {
+		return false;
+	}
+	// Albedo alpha also gates normal/ORM; emission ignores alpha.
+	const bool albedo_visible = decal->textures[RS::DECAL_TEXTURE_ALBEDO].is_valid() && decal->modulate.a > 0.0f;
+	const bool emission_visible = decal->textures[RS::DECAL_TEXTURE_EMISSION].is_valid() && decal->emission_energy > 0.0f;
+	if (!albedo_visible && !emission_visible) {
 		return false;
 	}
 
