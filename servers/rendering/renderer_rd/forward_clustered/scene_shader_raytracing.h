@@ -31,6 +31,7 @@
 #pragma once
 
 #include "core/templates/local_vector.h"
+#include "servers/rendering/renderer_rd/forward_clustered/render_raytracing_capture.h"
 #include "servers/rendering/renderer_rd/pipeline_hash_map_rd.h"
 #include "servers/rendering/renderer_rd/renderer_scene_render_rd.h" // IWYU pragma: keep
 #include "servers/rendering/renderer_rd/shaders/raytracing/scene_raytracing_raygen.glsl.gen.h"
@@ -120,6 +121,8 @@ public:
 	static constexpr int RT_PARAM_VIS_MODE = 0;
 	// Must match Environment::RT_DEBUG_TIMING_HEATMAP. Timing uses normal shading.
 	static constexpr int RT_DEBUG_TIMING_HEATMAP = 24;
+	// Must match Environment::RT_DEBUG_DYNAMIC_GEOMETRY and RT_VIS_DYNAMIC_GEOMETRY in raytracing_inc.glsl.
+	static constexpr int RT_DEBUG_DYNAMIC_GEOMETRY = 29;
 	static constexpr int RT_PARAM_SAMPLE_COUNT = 1;
 	static constexpr int RT_PARAM_MAX_BOUNCES = 2;
 	static constexpr int RT_PARAM_DENOISER = 3;
@@ -137,6 +140,7 @@ public:
 	static constexpr int RT_PARAM_FRAME_INDEX = 15;
 	static constexpr int RT_PARAM_DECAL_COUNT = 16;
 	static constexpr int RT_PARAM_DECAL_MODE = 17; // RTDecalMode.
+	static constexpr int RT_PARAM_TRANSPARENCY_DOMINANT_LAYER_ALPHA = 18; // 0 = transparent layers never own depth/velocity.
 
 	// Which path vertices receive decals (rendering/pathtracing/decals). Must match RT_DECAL_MODE_* in GLSL.
 	enum RTDecalMode {
@@ -168,6 +172,31 @@ public:
 	// Build the full packed rt_flags from pathtracing environment settings.
 	// `p_environment` may be invalid (RT active with no pathtracing environment).
 	static uint32_t compute_rt_flags(RID p_environment, bool p_fog_enabled, bool p_volumetric_fog_enabled);
+
+	// Inputs read by vertex() of preprocessed spatial shader code, following user function calls. The mask is
+	// RTVertexCapture::DEP_ALL when the code doesn't parse.
+	static RTVertexCapture::VertexDependencies compute_vertex_capture_dependencies(const String &p_code);
+
+	// True when p_uniform is a member of the material uniform buffer, whose offsets are p_uniform_offsets.
+	// Samplers live in their own members, and instance uniforms in the global buffer (their order stays 0).
+	static inline bool is_material_buffer_uniform(const ShaderLanguage::ShaderNode::Uniform &p_uniform, const Vector<uint32_t> &p_uniform_offsets) {
+		return !ShaderLanguage::is_sampler_type(p_uniform.type) && p_uniform.scope != ShaderLanguage::ShaderNode::Uniform::SCOPE_INSTANCE &&
+				p_uniform.order >= 0 && p_uniform.order < (int)p_uniform_offsets.size();
+	}
+
+	// Bytes ShaderCompiler reserves for a material buffer uniform: globals are a uint index, arrays take 16 bytes per element.
+	static inline uint32_t material_buffer_uniform_size(const ShaderLanguage::ShaderNode::Uniform &p_uniform) {
+		if (p_uniform.scope == ShaderLanguage::ShaderNode::Uniform::SCOPE_GLOBAL) {
+			return ShaderLanguage::get_datatype_size(ShaderLanguage::TYPE_UINT);
+		}
+		const uint32_t size = ShaderLanguage::get_datatype_size(p_uniform.type);
+		if (p_uniform.array_size <= 0) {
+			return size;
+		}
+		const uint32_t array_bytes = size * p_uniform.array_size;
+		const uint32_t granule = 16 * p_uniform.array_size;
+		return (array_bytes + granule - 1) / granule * granule;
+	}
 
 	struct ShaderSpecialization {
 		union {
@@ -493,6 +522,7 @@ public:
 	uint32_t get_hit_group_slot_count() const { return hit_group_slots.size(); }
 
 	bool is_hg_ready_in_bundle(uint32_t p_slot_index, uint32_t p_rt_flags) const;
+	bool is_compiling();
 	void drain_completed_compiles();
 	void finalize_custom_shaders();
 

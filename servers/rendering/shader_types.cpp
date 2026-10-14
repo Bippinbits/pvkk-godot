@@ -292,6 +292,13 @@ ShaderTypes::ShaderTypes() {
 		shader_modes[RS::SHADER_SPATIAL].modes.push_back({ PNAME("debug_shadow_splits") });
 		shader_modes[RS::SHADER_SPATIAL].modes.push_back({ PNAME("fog_disabled") });
 		shader_modes[RS::SHADER_SPATIAL].modes.push_back({ PNAME("specular_occlusion_disabled") });
+		// At most one of billboard / billboard_y / billboard_particles (enforced by ShaderLanguage).
+		shader_modes[RS::SHADER_SPATIAL].modes.push_back({ PNAME("billboard") });
+		shader_modes[RS::SHADER_SPATIAL].modes.push_back({ PNAME("billboard_y") });
+		shader_modes[RS::SHADER_SPATIAL].modes.push_back({ PNAME("billboard_particles") });
+		shader_modes[RS::SHADER_SPATIAL].modes.push_back({ PNAME("billboard_keep_scale") });
+		shader_modes[RS::SHADER_SPATIAL].modes.push_back({ PNAME("fixed_size") });
+		shader_modes[RS::SHADER_SPATIAL].modes.push_back({ PNAME("rt_vertex"), { "auto", "dynamic", "static", "frozen" } });
 		shader_modes[RS::SHADER_SPATIAL].stencil_modes.push_back({ PNAME("read") });
 		shader_modes[RS::SHADER_SPATIAL].stencil_modes.push_back({ PNAME("write") });
 		shader_modes[RS::SHADER_SPATIAL].stencil_modes.push_back({ PNAME("write_depth_fail") });

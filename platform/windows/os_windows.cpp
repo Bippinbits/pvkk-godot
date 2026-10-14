@@ -2350,6 +2350,7 @@ void OS_Windows::run() {
 	while (true) {
 		GodotProfileFrameMark;
 		GodotProfileZone("OS_Windows::run");
+		crash_handler.reassert();
 		DisplayServer::get_singleton()->process_events(); // get rid of pending events
 		if (Main::iteration()) {
 			break;

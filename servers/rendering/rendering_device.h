@@ -266,8 +266,24 @@ public:
 	Vector<uint8_t> buffer_get_data(RID p_buffer, uint32_t p_offset = 0, uint32_t p_size = 0); // This causes stall, only use to retrieve large buffers for saving.
 	Error buffer_get_data_async(RID p_buffer, const Callable &p_callback, uint32_t p_offset = 0, uint32_t p_size = 0);
 	uint64_t buffer_get_device_address(RID p_buffer);
+	// True when p_buffer is tracked by the draw graph, which happens once anything but its initial upload wrote it.
+	bool buffer_is_mutable(RID p_buffer);
 	uint8_t *buffer_persistent_map_advance(RID p_buffer);
 	void buffer_flush(RID p_buffer);
+
+#ifdef DEV_ENABLED
+	// A live buffer created with BUFFER_CREATION_DEVICE_ADDRESS_BIT, for CPU-side checks of addresses stored in GPU data.
+	struct BufferAddressRange {
+		RID buffer;
+		uint64_t address = 0;
+		uint64_t size = 0;
+		bool written = false; // A command of the draw graph being recorded writes the buffer.
+
+		bool operator<(const BufferAddressRange &p_other) const { return address < p_other.address; }
+	};
+	// Fills r_ranges with every live buffer that has a device address, sorted by address.
+	void buffer_get_device_address_ranges(LocalVector<BufferAddressRange> &r_ranges);
+#endif
 
 private:
 	/******************/
@@ -1234,6 +1250,8 @@ private:
 
 	bool pipeline_cache_enabled = false;
 	size_t pipeline_cache_size = 0;
+	size_t pipeline_cache_max_size = 0; // Bytes; from rendering/rendering_device/pipeline_cache/max_size_mb.
+	bool pipeline_cache_full = false; // Set once the cache outgrows pipeline_cache_max_size; saving stops.
 	String pipeline_cache_file_path;
 	WorkerThreadPool::TaskID pipeline_cache_save_task = WorkerThreadPool::INVALID_TASK_ID;
 
@@ -1418,8 +1436,16 @@ public:
 	Error blas_build(RID p_blas);
 	Error blas_update(RID p_blas);
 	Error tlas_build(RID p_tlas, Span<AccelerationStructureInstance> p_instances);
+#ifdef DEV_ENABLED
+	// True when p_blas is valid and built, and nothing invalidated it since.
+	bool blas_is_built(RID p_blas);
+	// Appends the buffers p_blas was created from that a command of the draw graph being recorded writes.
+	void blas_get_written_input_buffers(RID p_blas, LocalVector<RID> &r_buffers);
+#endif
 
 private:
+	Error _tlas_validate_instances(Span<AccelerationStructureInstance> p_instances);
+
 	/**********************************/
 	/**** HIT SHADER BINDING TABLE ****/
 	/**********************************/

@@ -2372,6 +2372,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 
 	SceneShaderForwardClustered::ShaderSpecialization base_specialization = scene_shader.default_specialization;
 	base_specialization.use_depth_fog = p_render_data->environment.is_valid() && environment_get_fog_mode(p_render_data->environment) == RS::EnvironmentFogMode::ENV_FOG_MODE_DEPTH;
+	base_specialization.material_debug_mode = p_render_data->environment.is_valid() ? SceneShaderForwardClustered::material_debug_mode_from_environment(environment_get_pathtracing_debug_mode(p_render_data->environment)) : 0u;
 
 	bool using_ssao = depth_pre_pass && !is_reflection_probe && p_render_data->environment.is_valid() && environment_get_ssao_enabled(p_render_data->environment);
 
@@ -4403,6 +4404,7 @@ void RenderForwardClustered::_geometry_instance_add_surface_with_material_chain(
 
 	_geometry_instance_add_surface_with_material(ginstance, p_surface, material, p_mat_src.get_local_index(), material_storage->material_get_shader_id(p_mat_src), p_mesh);
 	ginstance->surface_caches->rt_base_pass = p_rt_base_pass;
+	ginstance->surface_caches->rt_material = p_mat_src;
 
 	while (material->next_pass.is_valid()) {
 		RID next_pass = material->next_pass;
@@ -4937,6 +4939,7 @@ void RenderForwardClustered::_mesh_generate_all_pipelines_for_surface_cache(Geom
 	surface.uses_depth = (p_surface_cache->flags & (GeometryInstanceSurfaceDataCache::FLAG_PASS_DEPTH | GeometryInstanceSurfaceDataCache::FLAG_PASS_OPAQUE | GeometryInstanceSurfaceDataCache::FLAG_PASS_SHADOW)) != 0;
 	surface.can_use_lightmap = p_surface_cache->owner->lightmap_instance.is_valid() || p_surface_cache->owner->lightmap_sh;
 	_mesh_compile_pipelines_for_surface(surface, p_global, RS::PIPELINE_SOURCE_SURFACE);
+	_mesh_generate_extra_pipelines_for_surface_cache(p_surface_cache);
 }
 
 void RenderForwardClustered::_update_dirty_geometry_instances() {
@@ -5300,6 +5303,7 @@ RenderForwardClustered::RenderForwardClustered() {
 		}
 		{
 			defines += "\n#define MATERIAL_UNIFORM_SET " + itos(MATERIAL_UNIFORM_SET) + "\n";
+			defines += "\n#define RT_CAPTURE_UNIFORM_SET " + itos(RT_CAPTURE_UNIFORM_SET) + "\n";
 		}
 #ifdef REAL_T_IS_DOUBLE
 		{

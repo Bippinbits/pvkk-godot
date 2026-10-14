@@ -206,6 +206,9 @@ public:
 		bool in_parent_dirty_list = false;
 		bool write_command_list_enabled = false;
 		bool is_discardable = false;
+#ifdef DEV_ENABLED
+		int64_t last_write_frame = -1; // Tracking frame of the last command with a write usage. Usage transitions don't count.
+#endif
 
 		_FORCE_INLINE_ void reset_if_outdated(int64_t new_command_frame) {
 			if (new_command_frame != command_frame) {
@@ -953,6 +956,12 @@ public:
 	static void resource_tracker_free(ResourceTracker *p_tracker);
 	static FramebufferCache *framebuffer_cache_create();
 	static void framebuffer_cache_free(RDD *p_driver, FramebufferCache *p_cache);
+#ifdef DEV_ENABLED
+	// True when a command of the graph being recorded writes the resource of p_tracker.
+	bool is_written_in_current_graph(const ResourceTracker *p_tracker) const {
+		return p_tracker != nullptr && p_tracker->last_write_frame == tracking_frame;
+	}
+#endif
 };
 
 using RDG = RenderingDeviceGraph;

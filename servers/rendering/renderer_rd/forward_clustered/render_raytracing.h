@@ -39,8 +39,13 @@
 #include "core/templates/vector.h"
 #include "servers/rendering/renderer_rd/bindless_block.h"
 #include "servers/rendering/renderer_rd/forward_clustered/raytracing_decal_selection.h"
+#include "servers/rendering/renderer_rd/forward_clustered/render_raytracing_capture.h"
+#include "servers/rendering/renderer_rd/forward_clustered/render_raytracing_debug.h"
+#include "servers/rendering/renderer_rd/forward_clustered/render_raytracing_scheduler.h"
+#include "servers/rendering/renderer_rd/forward_clustered/render_raytracing_validation.h"
 #include "servers/rendering/renderer_rd/shaders/raytracing/multimesh_merge.glsl.gen.h"
 #include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
+#include "servers/rendering/rendering_billboard.h"
 #include "servers/rendering/rendering_device.h"
 
 #define RB_TEX_RAYTRACING SNAME("raytracing")
@@ -95,12 +100,38 @@ struct alignas(8) RT_GeometryData {
 	uint32_t instance_uniforms_ofs; // Per-instance shader uniforms offset in the global buffer.
 	uint32_t uv2_byte_offset;
 	uint32_t uv2_scale_packed;
-	uint32_t custom_data_primitive_divisor; // Source triangle count for merged instances; 0 for fixed address.
-	uint64_t custom_data_address;
-	uint32_t custom_data_stride; // Low 8 bits: stride in floats; upper 24 bits reserved, zero.
-	uint32_t _pad;
+	uint32_t instance_data_primitive_divisor; // Source triangle count for merged instances; 0 for fixed address.
+	uint64_t instance_data_address; // First float of the instance record; 0 without instance data.
+	uint32_t instance_data_layout; // See rt_pack_instance_data_layout().
+	uint32_t debug_state; // RTDynamicGeometryDebug::pack() while the Dynamic Geometry debug view is active, else 0.
 };
 static_assert(sizeof(RT_GeometryData) == 144, "RT_GeometryData must be 144 bytes for std430");
+
+/// Marks an absent field in RT_GeometryData::instance_data_layout.
+static constexpr uint32_t RT_INSTANCE_DATA_FIELD_NONE = 0xFF;
+
+/// Packs an instance record layout: bits 0-7 stride, 8-15 color offset, 16-23 custom offset, all in floats.
+/// Offsets of UINT32_MAX mean the field is absent. Must match fetch_instance_field() in raytracing_hit_inc.glsl.
+constexpr uint32_t rt_pack_instance_data_layout(uint32_t p_stride, uint32_t p_color_offset, uint32_t p_custom_offset) {
+	return (p_stride & 0xFF) |
+			((p_color_offset == UINT32_MAX ? RT_INSTANCE_DATA_FIELD_NONE : (p_color_offset & 0xFF)) << 8) |
+			((p_custom_offset == UINT32_MAX ? RT_INSTANCE_DATA_FIELD_NONE : (p_custom_offset & 0xFF)) << 16);
+}
+
+/// First touch this frame of a cache entry shared by viewports. Query it up front; commit only once the touch got past
+/// every early return, so an aborted touch can't keep a later viewport from doing the frame's work.
+class RTFrameTouch {
+	uint32_t &stamp;
+	const uint32_t frame;
+
+public:
+	RTFrameTouch(uint32_t &r_stamp, uint32_t p_frame) :
+			stamp(r_stamp), frame(p_frame) {}
+	/// True until a touch of this frame was committed.
+	bool is_first() const { return stamp != frame; }
+	/// Marks the frame's work as done.
+	void commit() { stamp = frame; }
+};
 
 /// Per-instance motion data for velocity computation (matches GLSL InstanceMotionData, 48 bytes).
 struct RT_InstanceMotionData {
@@ -108,11 +139,11 @@ struct RT_InstanceMotionData {
 };
 static_assert(sizeof(RT_InstanceMotionData) == 48, "RT_InstanceMotionData must be 48 bytes");
 
-// Must match GLSL MaterialData (std430, 128 bytes).
+// Must match GLSL MaterialData (std430, 144 bytes).
 struct alignas(16) RT_MaterialData {
 	uint32_t albedo_texture_idx;
 	uint32_t normal_texture_idx;
-	uint32_t orm_texture_idx;
+	uint32_t roughness_texture_idx; // texture_roughness, or texture_orm for ORMMaterial3D.
 	uint32_t emission_texture_idx;
 	float albedo_color[4];
 	float emission_color[3];
@@ -123,17 +154,82 @@ struct alignas(16) RT_MaterialData {
 	float specular; // Dielectric specular [0..1], default 0.5 -> F0 = 0.04.
 	float metallic;
 	float roughness;
-	float ao_strength;
+	uint32_t uv2_scale_xy; // fp16x2. UV2 transform: identity unless triplanar or applied by the vertex stage.
 	uint32_t flags;
 	uint64_t uniform_address; // BDA for custom shader uniform buffer (0 = none).
-	float uv1_blend_sharpness; // Triplanar per-axis blend exponent, default 1.0.
+	uint32_t blend_sharpness; // fp16x2: UV1, UV2 triplanar per-axis blend exponents, default 1.0.
 	float proximity_fade_distance;
 	float distance_fade_min;
 	float distance_fade_max;
-	float _pad0;
-	float _pad1;
+	uint32_t uv2_offset_xy; // fp16x2, modulo 1.
+	uint32_t uv2_scale_offset_z; // fp16x2: scale.z, offset.z (modulo 1).
+	uint32_t metallic_texture_idx; // texture_metallic, or texture_orm for ORMMaterial3D.
+	uint32_t ao_texture_idx; // texture_ambient_occlusion (or texture_orm) when AO is enabled; 0 (white) otherwise.
+	uint32_t texture_channels; // RTTextureChannel per texture, see rt_material_texture_channels().
+	uint32_t pad;
 };
-static_assert(sizeof(RT_MaterialData) == 128, "RT_MaterialData must be 128 bytes for std430");
+static_assert(sizeof(RT_MaterialData) == 144, "RT_MaterialData must be 144 bytes for std430");
+
+/// BaseMaterial3D::TextureChannel values (matches GLSL RT_TEXTURE_CHANNEL_* in raytracing_data_inc.glsl).
+enum RTTextureChannel : uint32_t {
+	RT_TEXTURE_CHANNEL_RED,
+	RT_TEXTURE_CHANNEL_GREEN,
+	RT_TEXTURE_CHANNEL_BLUE,
+	RT_TEXTURE_CHANNEL_ALPHA,
+	RT_TEXTURE_CHANNEL_GRAYSCALE,
+};
+
+/// Packs the channels BaseMaterial3D reads from its roughness, metallic and AO textures (3 bits each).
+constexpr uint32_t rt_material_texture_channels(RTTextureChannel p_roughness, RTTextureChannel p_metallic, RTTextureChannel p_ao) {
+	return uint32_t(p_roughness) | (uint32_t(p_metallic) << 3) | (uint32_t(p_ao) << 6);
+}
+
+/// Inverse of BaseMaterial3D's texture channel masks: one-hot, or thirds for grayscale.
+constexpr RTTextureChannel rt_texture_channel_from_mask(float p_r, float p_g, float p_b, float p_a) {
+	if (p_r > 0.0f && p_g > 0.0f) {
+		return RT_TEXTURE_CHANNEL_GRAYSCALE;
+	}
+	if (p_g > 0.0f) {
+		return RT_TEXTURE_CHANNEL_GREEN;
+	}
+	if (p_b > 0.0f) {
+		return RT_TEXTURE_CHANNEL_BLUE;
+	}
+	return p_a > 0.0f ? RT_TEXTURE_CHANNEL_ALPHA : RT_TEXTURE_CHANNEL_RED;
+}
+
+/// Two floats as GLSL unpackHalf2x16() reads them: p_x in the low half.
+inline uint32_t rt_pack_half2(float p_x, float p_y) {
+	return uint32_t(Math::make_half_float(p_x)) | (uint32_t(Math::make_half_float(p_y)) << 16);
+}
+
+/// Stores the fp16 addressing fields. Material textures always repeat in RT, so the UV2 offset is
+/// reduced modulo 1, which keeps its fp16 error below 2^-11.
+inline void rt_material_set_packed_uv(RT_MaterialData &r_mat, float p_uv1_blend_sharpness,
+		const Vector3 &p_uv2_scale, const Vector3 &p_uv2_offset, float p_uv2_blend_sharpness) {
+	const Vector3 offset = p_uv2_offset - p_uv2_offset.floor();
+	r_mat.uv2_scale_xy = rt_pack_half2(p_uv2_scale.x, p_uv2_scale.y);
+	r_mat.uv2_offset_xy = rt_pack_half2(offset.x, offset.y);
+	r_mat.uv2_scale_offset_z = rt_pack_half2(p_uv2_scale.z, offset.z);
+	r_mat.blend_sharpness = rt_pack_half2(p_uv1_blend_sharpness, p_uv2_blend_sharpness);
+}
+
+/// White, rough, non-emissive dielectric with identity UV transforms and no textures.
+inline RT_MaterialData rt_material_data_default() {
+	RT_MaterialData d = {};
+	for (int i = 0; i < 4; i++) {
+		d.albedo_color[i] = 1.0f;
+	}
+	for (int i = 0; i < 3; i++) {
+		d.uv1_scale[i] = 1.0f;
+	}
+	d.normal_map_depth = 1.0f;
+	d.specular = 0.5f;
+	d.roughness = 1.0f;
+	d.texture_channels = rt_material_texture_channels(RT_TEXTURE_CHANNEL_RED, RT_TEXTURE_CHANNEL_RED, RT_TEXTURE_CHANNEL_RED);
+	rt_material_set_packed_uv(d, 1.0f, Vector3(1, 1, 1), Vector3(), 1.0f);
+	return d;
+}
 
 // Light types for raytracing (matches GLSL RT_LIGHT_TYPE_* defines).
 enum RTLightType : uint32_t {
@@ -157,7 +253,7 @@ struct alignas(16) RT_LightData {
 	float cos_spot_angle;
 	uint32_t light_masks; // Bits 0-19: light_cull_mask (lighting test). Bits 24-31: TLAS mask for shadow rays.
 	float spot_direction[3];
-	uint32_t pad0;
+	float shadow_opacity; // 0 skips the shadow ray; otherwise blends traced transmittance towards 1.
 };
 static_assert(sizeof(RT_LightData) == 80, "RT_LightData must be 80 bytes for std430");
 
@@ -197,7 +293,54 @@ enum {
 	RT_MAT_FLAG_DISTANCE_FADE = 8192u,
 	RT_MAT_FLAG_FOG_DISABLED = 16384u,
 	RT_MAT_FLAG_NO_RAY_QUERY_ALPHA = 32768u,
+	RT_MAT_FLAG_EMISSION_ADD = 65536u,
+	RT_MAT_FLAG_EMISSION_UV2 = 131072u,
+	RT_MAT_FLAG_UV2_TRIPLANAR = 262144u,
+	RT_MAT_FLAG_UV2_TRIPLANAR_WORLD = 524288u,
+	// Diffuse mode (bits 20-21) and specular mode (bits 22-23), matching GODOT_DIFFUSE_* / GODOT_SPECULAR_* in brdf_inc.glsl.
+	RT_MAT_DIFFUSE_MODE_SHIFT = 20u,
+	RT_MAT_SPECULAR_MODE_SHIFT = 22u,
+	RT_MAT_DIFFUSE_LAMBERT = 0u,
+	RT_MAT_DIFFUSE_BURLEY = 1u,
+	RT_MAT_DIFFUSE_LAMBERT_WRAP = 2u,
+	RT_MAT_DIFFUSE_TOON = 3u,
+	RT_MAT_SPECULAR_SCHLICK_GGX = 0u,
+	RT_MAT_SPECULAR_TOON = 1u,
+	RT_MAT_SPECULAR_DISABLED = 2u,
 };
+
+/// Packs an RT_MAT_DIFFUSE_* and an RT_MAT_SPECULAR_* value into material flag bits.
+constexpr uint32_t rt_material_shading_mode_flags(uint32_t p_diffuse_mode, uint32_t p_specular_mode) {
+	return (p_diffuse_mode << RT_MAT_DIFFUSE_MODE_SHIFT) | (p_specular_mode << RT_MAT_SPECULAR_MODE_SHIFT);
+}
+
+/// RT_MAT_FLAG_* emission bits for a BaseMaterial3D. UV2 addressing bits are only set when
+/// emission samples UV2, the one HG0 texture that can.
+constexpr uint32_t rt_material_emission_flags(bool p_add, bool p_on_uv2, bool p_uv2_triplanar, bool p_uv2_world_triplanar) {
+	uint32_t flags = p_add ? RT_MAT_FLAG_EMISSION_ADD : 0u;
+	if (p_on_uv2) {
+		flags |= RT_MAT_FLAG_EMISSION_UV2;
+		if (p_uv2_triplanar) {
+			flags |= RT_MAT_FLAG_UV2_TRIPLANAR;
+			if (p_uv2_world_triplanar) {
+				flags |= RT_MAT_FLAG_UV2_TRIPLANAR_WORLD;
+			}
+		}
+	}
+	return flags;
+}
+
+// True when a surface with these RT_MAT_FLAG_* bits can write the pixel's velocity: opaque surfaces,
+// and transparent ones that can become the dominant peel layer in shade_and_bounce given
+// rendering/pathtracing/transparency_dominant_layer_alpha (0 = never). Add/Sub layers report zero
+// peel alpha, so only depth_draw_always lets them win.
+constexpr bool rt_material_can_own_velocity(uint32_t p_flags, float p_dominant_layer_alpha) {
+	if (!(p_flags & RT_MAT_FLAG_TRANSPARENT) || (p_flags & RT_MAT_FLAG_DEPTH_DRAW_ALWAYS)) {
+		return true;
+	}
+	const uint32_t blend_class = (p_flags >> RT_MAT_BLEND_CLASS_SHIFT) & 7u;
+	return p_dominant_layer_alpha > 0.0f && blend_class != RT_MAT_BLEND_CLASS_ADD && blend_class != RT_MAT_BLEND_CLASS_SUB;
+}
 
 // Index format for RT geometry (matches GLSL fetch_indices).
 enum {
@@ -209,9 +352,39 @@ enum {
 enum {
 	RT_GEOM_FLAG_COMPRESSED = 1u,
 	RT_GEOM_FLAG_PROCEDURAL = 2u,
-	// Set when the BLAS uses a per-frame-deformed vertex buffer.
+	// Set when the BLAS uses a vertex buffer the renderer writes: skinning, blend shapes, vertex capture, merged MultiMesh / particle bakes.
 	RT_GEOM_FLAG_DEFORMED = 4u,
+	// Positions and TBN come from the vertex capture pass; hit shaders must not re-apply vertex() displacement.
+	RT_GEOM_FLAG_CAPTURED = 8u,
+	// UVs in the attribute buffer are unorm16; independent of RT_GEOM_FLAG_COMPRESSED (deformed copies are uncompressed).
+	RT_GEOM_FLAG_COMPRESSED_UV = 16u,
+	// A triangle hit the ray tracer reports as front facing is a raster back face (FRONT_FACING false).
+	RT_GEOM_FLAG_FACING_INVERTED = 32u,
+	// The material flips the normal of back faces, like raster DO_SIDE_CHECK (cull_front and cull_disabled).
+	RT_GEOM_FLAG_SIDE_CHECK = 64u,
 };
+
+/// Facing state of the path traced triangles of one TLAS instance.
+struct RTTriangleFacing {
+	uint32_t instance_flags = 0; ///< TLAS TRIANGLE_FACING_CULL_DISABLE and TRIANGLE_FLIP_FACING bits.
+	uint32_t geometry_flags = 0; ///< RT_GEOM_FLAG_FACING_INVERTED and RT_GEOM_FLAG_SIDE_CHECK.
+};
+
+/// Facing of triangles drawn with p_cull_mode, matching the rasterizer: it culls mirrored instances with the reversed
+/// cull mode, so culling follows the winding in mesh space, while FRONT_FACING follows the winding on screen.
+/// The ray tracer decides facing in BLAS space. p_raster_mirror is the mirror flag the rasterizer culls the instance
+/// with; p_tlas_mirror is true when the TLAS instance transform has a negative determinant.
+constexpr RTTriangleFacing rt_triangle_facing(RS::CullMode p_cull_mode, bool p_raster_mirror, bool p_tlas_mirror) {
+	// Without TRIANGLE_FLIP_FACING, the ray tracer's front face is the rasterizer's back face.
+	const bool cull_front = p_cull_mode == RS::CULL_MODE_FRONT;
+	const bool space_mirrored = p_raster_mirror != p_tlas_mirror;
+	RTTriangleFacing facing;
+	facing.instance_flags = (cull_front == space_mirrored ? uint32_t(RD::ACCELERATION_STRUCTURE_INSTANCE_TRIANGLE_FLIP_FACING_BIT) : 0u) |
+			(p_cull_mode == RS::CULL_MODE_DISABLED ? uint32_t(RD::ACCELERATION_STRUCTURE_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT) : 0u);
+	facing.geometry_flags = (cull_front != p_raster_mirror ? uint32_t(RT_GEOM_FLAG_FACING_INVERTED) : 0u) |
+			(p_cull_mode != RS::CULL_MODE_BACK ? uint32_t(RT_GEOM_FLAG_SIDE_CHECK) : 0u);
+	return facing;
+}
 
 // Unified TLAS instance mask layout: bit 0 = opaque camera lane, bit 1 =
 // transparent camera lane, bits 2-7 = shadow-caster groups.
@@ -288,11 +461,22 @@ private:
 	LocalVector<Slot> free_slots;
 };
 
+// The buffers the device addresses of one RT_GeometryData were taken from, so validation can tell a stale address
+// from one into a live buffer. Set through _rt_buffer_address().
+struct RTGeometrySources {
+	RID vertex;
+	RID attribute;
+	RID index;
+	RID prev_vertex;
+	RID instance_data;
+};
+
 struct RTSurfaceData {
 	RID blas;
 	// Maps compressed positions to mesh space during the BLAS build; invalid when uncompressed.
 	RTBlasTransformPool::Slot blas_transform;
 	RT_GeometryData geometry = {};
+	RTGeometrySources sources;
 	bool is_compressed = false;
 	uint64_t blas_size = 0;
 };
@@ -317,21 +501,23 @@ struct RTMeshGroupEntry {
 	RID blas;
 	LocalVector<RTBlasTransformPool::Slot> transforms; ///< Per member; invalid for uncompressed members.
 	LocalVector<RT_GeometryData> geometries; ///< In BLAS geometry order (ascending surface index).
+	LocalVector<RTGeometrySources> sources; ///< Parallel to `geometries`.
 	LocalVector<uint32_t> surface_counters; ///< Per member; any change rebuilds the BLAS.
 	uint64_t last_used = 0; ///< Use stamp; picks the variant to drop when a mesh has too many.
 };
 
 /// TLAS instance state that surfaces must share to be merged into one multi-geometry BLAS.
 struct RTSurfaceGroupKey {
-	uint32_t cull_flags = 0; ///< TLAS instance facing/cull bits.
+	RS::CullMode cull_mode = RS::CULL_MODE_BACK; ///< Picks the TLAS instance facing bits, see rt_triangle_facing().
 	uint32_t sbt_offset = 0;
 	uint8_t tlas_mask = 0;
+	RenderingBillboard::Settings billboard; ///< Camera-dependent surfaces get their own TLAS transform.
 	bool opaque = true; ///< No any-hit. Not part of the key: opacity is a per-geometry flag in merged BLASes.
 	bool groupable = false; ///< False keeps the surface on the single-surface path.
 
 	bool operator==(const RTSurfaceGroupKey &p_other) const {
-		return groupable && p_other.groupable && cull_flags == p_other.cull_flags &&
-				sbt_offset == p_other.sbt_offset && tlas_mask == p_other.tlas_mask;
+		return groupable && p_other.groupable && cull_mode == p_other.cull_mode &&
+				sbt_offset == p_other.sbt_offset && tlas_mask == p_other.tlas_mask && billboard == p_other.billboard;
 	}
 };
 
@@ -339,14 +525,23 @@ struct RTSurfaceGroupKey {
 /// it has no equal predecessor or is not groupable. Quadratic, meant for the surfaces of one instance.
 void rt_assign_surface_groups(Span<RTSurfaceGroupKey> p_keys, LocalVector<uint32_t> &r_leaders);
 
-/// Inputs for a surface backed by a per-frame-deformed vertex buffer.
+// Inputs for a surface backed by a per-frame-deformed vertex buffer.
 struct RTDeformedGeometrySource {
-	RID current_vb; ///< Vertex buffer (object-space positions) the BLAS is built / refit against.
-	RID prev_vb; ///< Previous-frame positions for motion vectors. Optional.
-	uint64_t change_stamp = 0; ///< Changes when `current_vb` contents change.
-	uint64_t cache_key = 0; ///< Caller-defined cache identity.
-	uint32_t cache_version = 0; ///< Changes when the resource behind `cache_key` is recycled.
-	uint32_t surface_counter = 0; ///< Changes when the underlying mesh surface changes.
+	RID *cache_handle = nullptr; // RTDeformedCacheEntry handle of the surface; a new entry is made when it isn't valid.
+	// Vertex buffer (object-space positions) the BLAS is built / refit against. Invalid for a capture not recorded
+	// this view: its entry already holds the capture, so there is nothing to copy.
+	RID current_vb;
+	uint32_t current_vb_offset = 0; // Byte offset of the surface's positions in `current_vb`.
+	bool captured = false; // Vertex capture output (RT_GEOM_FLAG_CAPTURED). Only `change_stamp` tells captures apart.
+	bool force_rebuild = false; // Rebuild the BLAS even when a refit would do.
+	RID prev_vb; // Previous-frame positions for motion vectors. Optional.
+	uint64_t change_stamp = 0; // Changes when `current_vb` contents change.
+	uint64_t cache_key = 0; // Caller-defined cache identity.
+	uint32_t cache_version = 0; // Changes when the resource behind `cache_key` is recycled.
+	uint32_t surface_counter = 0; // Changes when the underlying mesh surface changes.
+
+	// False for static surfaces, which are traced from their mesh buffers.
+	bool is_deformed() const { return captured || current_vb.is_valid(); }
 };
 
 struct RTMaterialData {
@@ -367,7 +562,7 @@ struct RTSurfaceRecord {
 	const void *surf = nullptr; ///< RenderForwardClustered::GeometryInstanceSurfaceDataCache.
 	void *mesh_surface = nullptr;
 	RTMaterialData *mat_data = nullptr;
-	RID deformed_vb; ///< Per-frame-deformed vertex buffer; invalid for static surfaces.
+	RTDeformedGeometrySource deformed; ///< Per-frame geometry (vertex capture or mesh instance); see is_deformed().
 	RTSurfaceGroupKey key;
 	uint32_t surface_index = 0;
 	uint32_t surface_counter = 0;
@@ -382,6 +577,13 @@ struct RTCacheEntry {
 	uint32_t cached_rid_version = 0;
 	uint8_t failed_attempts = 0;
 	uint64_t size_bytes = 0;
+};
+
+/// Vertex capture held by a cache entry; later viewports of `frame` reuse it instead of recapturing.
+struct RTCaptureState {
+	uint32_t frame = UINT32_MAX; ///< Frame the capture was recorded in.
+	uint64_t stamp = 0; ///< Unique per recorded capture; 0 before the first one.
+	RTVertexCapture::Stamps inputs; ///< Inputs of vertex() when the capture was recorded.
 };
 
 /// BLAS cache entry for a surface driven by a per-frame-deformed vertex buffer.
@@ -408,14 +610,74 @@ struct RTDeformedCacheEntry {
 	uint32_t owned_vb_full_capacity = 0; // Bytes; grow-only.
 	RID prev_pos_vb;
 	uint32_t prev_pos_vb_capacity = 0; // Bytes; grow-only.
+	// Copy of the mesh index buffer: RD frees a BLAS with its input buffers, so the BLAS must not read mesh-owned memory.
+	RID owned_ib;
+	uint32_t owned_ib_index_count = 0;
+	RD::IndexBufferFormat owned_ib_format = RD::INDEX_BUFFER_FORMAT_UINT16;
 	uint32_t cached_vertex_count = 0;
 	uint32_t cached_full_size = 0;
 	bool prev_pos_seeded = false; // False until the first owned->prev copy has run.
+	bool prev_pos_current = false; // prev_pos_vb already equals the positions in owned_vb_full.
+
+	RTCaptureState capture; // Vertex capture held by this entry, for captured mesh surfaces.
+};
+
+/// A surface whose raster vertex() output is captured for the path tracer this frame.
+/// Made by `RenderRaytracing::prepare_vertex_captures`, drawn by the renderer, consumed by `build_tlas`.
+struct RTCaptureRequest {
+	const void *surf = nullptr; ///< RenderForwardClustered::GeometryInstanceSurfaceDataCache.
+	RTVertexCapture::Layout layout; ///< Points and TBN block written by the capture draw.
+	uint32_t arena_offset = 0; ///< Byte offset of the capture in the capture arena.
+	bool recorded = false; ///< Set by the renderer once the capture draw is recorded; unrecorded requests count as pending.
+	bool committed = false; ///< Set by build_tlas once the recorded capture replaced the surface's kept capture.
+};
+
+/// Per-instance records the merge bake reads: a MultiMesh or a 3D particle system.
+struct RTInstanceSource {
+	RID base; ///< MultiMesh or Particles RID.
+	RID gpu_buffer; ///< Records: row-major 3x4 transform, then optional color and custom data.
+	uint32_t count = 0; ///< Instances to bake.
+	uint32_t stride = 0; ///< Floats per record.
+	uint32_t current_offset = 0; ///< First record of this frame, in records (motion vector double buffering).
+	uint32_t prev_offset = 0; ///< First record of the previous frame; equals current_offset when records aren't double buffered.
+	uint32_t color_offset = UINT32_MAX; ///< Float offset of the instance color in a record; UINT32_MAX without colors.
+	uint32_t custom_offset = UINT32_MAX; ///< Float offset of INSTANCE_CUSTOM in a record; UINT32_MAX without custom data.
+	uint32_t trail_steps = 1; ///< Records per particle of a particle system with trails; particle_trails shaders read them all.
+	uint64_t last_change = 0; ///< Changes whenever the records do.
+	Vector3 dead_position; ///< Node-space point dead particles collapse to; keeps BLAS bounds near the emitter.
+	bool particles = false; ///< Particle systems have no triangle cap and no CPU fallback.
+	bool world_space = false; ///< Records are already in world space; the TLAS instance uses identity.
+};
+
+/// One billboard entry of multimesh_merge.glsl (std430 layout). Bases are columns in MultiMesh node space.
+struct RTMergeBillboardParams {
+	float facing[3][4] = {}; ///< Facing basis before particle rotation and scaling.
+	float node_basis[3][4] = {}; ///< Node basis; keep_scale reads world scale from node_basis * instance basis.
+	float fixed_size[4] = {}; ///< fixed_size scale at instance origin o: dot(xyz, o) + w.
+	uint32_t mode = 0; ///< RenderingBillboard::Mode.
+	uint32_t keep_scale = 0; ///< Non-zero to keep the instance world scale.
+	uint32_t fixed_size_enabled = 0; ///< Non-zero to apply fixed_size.
+	uint32_t custom_offset = UINT32_MAX; ///< Float offset of INSTANCE_CUSTOM in an instance record; UINT32_MAX without custom data.
+
+	bool operator==(const RTMergeBillboardParams &p_other) const { return memcmp(this, &p_other, sizeof(*this)) == 0; }
+	bool operator!=(const RTMergeBillboardParams &p_other) const { return !(*this == p_other); }
+};
+static_assert(sizeof(RTMergeBillboardParams) == 128, "Must match BillboardParams in multimesh_merge.glsl.");
+
+/// Per-frame inputs of a merged bake, besides the instance records.
+struct RTMergeBakeInputs {
+	uint32_t billboard_index = UINT32_MAX; ///< Into RTViewportState::merge_billboards; UINT32_MAX when not camera-dependent.
+	uint32_t prev_billboard_index = UINT32_MAX; ///< Same, for the previous camera and node transform.
+	bool bake_motion = false; ///< Also bake previous-frame positions for motion vectors.
+	/// The entry holds vertex() output captured in TLAS instance space instead of transformed mesh vertices.
+	bool captured = false;
+	/// Byte offset of this view's capture in the capture arena; RT_OFFSET_NONE keeps the entry's last bake.
+	uint32_t capture_offset = RT_OFFSET_NONE;
 };
 
 /// Cache entry for a per-(MultiMesh, surface) merged BLAS.
-/// All vertex data (positions, normals, tangents, UVs, colors) is fully baked per-instance
-/// so the hit shader uses the standard code path — no special per-instance lookups.
+/// Vertex data (positions, normals, tangents, mesh attributes) is baked per instance; instance
+/// color and custom data are read from the instance records at hit time.
 struct RTMergedMMEntry {
 	// Merged vertex buffer: [float3 pos × N*V] + [packed TBN × N*V] (if mesh has normals).
 	// The BLAS reads only the position section; the hit shader reads TBN via normal_byte_offset.
@@ -430,6 +692,10 @@ struct RTMergedMMEntry {
 	RID replicated_idx_buffer;
 	uint32_t idx_capacity = 0;
 
+	RID prev_pos_buffer; ///< Previous-frame float3 positions (N*V) for motion vectors.
+	uint32_t prev_pos_capacity_bytes = 0;
+	uint32_t motion_frame = UINT32_MAX; ///< Frame prev_pos_buffer was baked for; stale on any other frame.
+
 	RID blas;
 	uint32_t last_mm_count = 0;
 	uint32_t last_surface_counter = 0;
@@ -437,6 +703,24 @@ struct RTMergedMMEntry {
 	uint64_t cached_mm_last_change = 0;
 	bool blas_built_once = false;
 	bool indexed = false; // selects MODE_INDEXED vs MODE_NON_INDEXED variant
+	RTMergeBillboardParams baked_billboard; ///< Billboard inputs of the last bake (camera-dependent entries only).
+	RTCaptureState capture; ///< Vertex capture held by this entry, for captured MultiMesh and particle surfaces.
+};
+
+/// Surface of one geometry instance of a base resource: a camera-dependent merged MultiMesh surface (the bake
+/// depends on the node transform, so instances sharing a MultiMesh get separate entries), or a captured surface.
+struct RTMMSurfaceKey {
+	uint64_t multimesh_id = 0; ///< Full RID id of the MultiMesh or mesh, so a recycled slot never matches.
+	uint64_t instance_id = 0; ///< Geometry instance identity.
+	uint32_t surface_index = 0; ///< Mesh surface index.
+
+	bool operator==(const RTMMSurfaceKey &p_other) const {
+		return multimesh_id == p_other.multimesh_id && instance_id == p_other.instance_id && surface_index == p_other.surface_index;
+	}
+
+	uint32_t hash() const {
+		return hash_fmix32(hash_murmur3_one_32(surface_index, hash_murmur3_one_64(instance_id, hash_murmur3_one_64(multimesh_id))));
+	}
 };
 
 struct RTMaterialCacheEntry {
@@ -574,13 +858,24 @@ struct RTViewportState {
 
 	RID geometry_buffer;
 	uint32_t geometry_buffer_capacity = 0;
-	LocalVector<RID> custom_data_buffers; // Non-owning BDA read dependencies for this viewport's geometry.
+	LocalVector<RID> instance_data_buffers; // Non-owning BDA read dependencies for this viewport's geometry.
 	RID material_buffer;
 	uint32_t material_buffer_capacity = 0;
 	RID motion_index_buffer;
 	uint32_t motion_index_buffer_capacity = 0;
 	RID motion_transform_buffer;
 	uint32_t motion_transform_buffer_capacity = 0;
+
+	// Camera-dependent merged MultiMesh surfaces, baked against this viewport's camera.
+	HashMap<RTMMSurfaceKey, RID> billboard_mm_entries; // Handles into merged_mm_pool.
+	LocalVector<RTMergeBillboardParams> merge_billboards; // This frame's entries, indexed by the merge push constant.
+	RID merge_billboard_buffer;
+	uint32_t merge_billboard_buffer_capacity = 0;
+
+	// Camera-dependent vertex captures, captured with this viewport's camera. Handles into deformed_pool for
+	// meshes, into merged_mm_pool for MultiMesh and particle surfaces.
+	HashMap<RTMMSurfaceKey, RID> capture_entries;
+	HashMap<RTMMSurfaceKey, RID> captured_mm_entries;
 
 	RID light_buffer;
 	RID params_buffer;
@@ -625,6 +920,11 @@ class RenderRaytracing {
 			MODE_INDEXED = 1,
 			MODE_MAX,
 		};
+		// Matches BAKE_* in multimesh_merge.glsl.
+		enum BakeFlags : uint32_t {
+			BAKE_TBN = 1u, // Bake normals and tangents.
+			BAKE_CAPTURED = 2u, // Copy positions and TBN from a vertex capture instead of transforming mesh vertices.
+		};
 		MultimeshMergeShaderRD shader;
 		RID version;
 		RID version_shader[MODE_MAX];
@@ -648,16 +948,99 @@ class RenderRaytracing {
 	RID_Owner<RTDeformedCacheEntry> deformed_pool;
 	LocalVector<RID> deformed_active_this_frame;
 
+	// Mutable mesh storage buffers of surfaces refreshed this render frame. Region updates (Sprite3D, Label3D) write them
+	// in the draw graph and the trace reads them through device addresses, so every view of the frame declares them.
+	// Buffers only written by their initial upload stay out, so declaring doesn't make them mutable.
+	LocalVector<RID> refreshed_mesh_buffers;
+	uint32_t refreshed_mesh_buffers_frame = UINT32_MAX;
+	void _declare_refreshed_surface_buffers(const RTGeometrySources &p_sources);
+
 	RID_Owner<RTMergedMMEntry> merged_mm_pool;
 	LocalVector<RID> merged_mm_active_this_frame;
 
 	RTDeformedCacheEntry *_access_deformed_slot(RID &r_handle);
+	RTDeformedCacheEntry *_access_capture_entry(RID &r_handle);
 	RTMergedMMEntry *_access_merged_mm_slot(RID &r_handle);
+	RTMergedMMEntry *_access_captured_mm_entry(RID &r_handle);
+	void _free_deformed_entry(RID p_handle);
+
+	// Vertex capture. The arena holds one RTVertexCapture::Layout per request of the current view, the params
+	// buffer one RTVertexCapture::DrawParams per request. Both are freed in cleanup_caches; the params buffer is
+	// grow-only, the arena is sized by _reserve_capture_arena.
+	// Captures are kept in pool entries: camera-independent ones here, camera-dependent ones per viewport.
+	// Mesh surfaces use deformed_pool entries, MultiMesh and particle surfaces merged_mm_pool entries.
+	RID capture_arena;
+	uint32_t capture_arena_capacity = 0;
+	uint64_t capture_arena_window_peak = 0; // Largest view's arena size since capture_arena_window_start.
+	uint64_t capture_arena_window_start = 0; // OS ticks in msec.
+	void _reserve_capture_arena(uint64_t p_size);
+	RID capture_params_buffer;
+	uint32_t capture_params_capacity = 0;
+	uint64_t capture_stamp_counter = 0;
+	int32_t capture_mode = -1; // RTVertexCapture::Mode of the last prepared view; -1 before the first.
+	uint32_t capture_mode_version = 0; // Bumped whenever capture_mode changes.
+	uint32_t capture_code_version_counter = 0; // Source of RTVertexCapture::ShaderTraits::code_version.
+	HashMap<RTMMSurfaceKey, RID> shared_capture_entries; // Handles into deformed_pool.
+	HashMap<RTMMSurfaceKey, RID> shared_captured_mm_entries; // Handles into merged_mm_pool.
+
+	// Capture state of one surface for the current view.
+	struct CaptureBinding {
+		RID entry; // Owned by shared_capture_entries / shared_captured_mm_entries or the viewport's maps.
+		bool merged = false; // `entry` is in merged_mm_pool (MultiMesh or particle surface), else in deformed_pool.
+		uint32_t request = UINT32_MAX; // Capture recorded this view; UINT32_MAX keeps the entry's last capture.
+		bool rebuild = false; // Rebuild the BLAS from the new capture instead of refitting it.
+		RTVertexCapture::Stamps inputs; // Committed to the entry once the request is recorded.
+	};
+	struct CaptureCandidate {
+		const void *surf = nullptr; // RenderForwardClustered::GeometryInstanceSurfaceDataCache.
+		CaptureBinding binding;
+		RTVertexCapture::Layout layout;
+		Transform3D transform; // Capture space to world space.
+		Vector3 dead_position; // Capture-space point culled instances collapse to.
+	};
+	LocalVector<CaptureCandidate> capture_candidates; // Per-view scratch: captured surfaces that are out of date.
+	LocalVector<RTVertexCapture::DrawParams> capture_params; // Per-view scratch.
+	HashMap<const void *, CaptureBinding> capture_bindings; // Per-view scratch, by surface.
+	void _update_capture_mode(RTVertexCapture::Mode p_mode);
+	static RTVertexCapture::Stamps _capture_inputs(const void *p_surface_cache, uint32_t p_dependencies, const RTVertexCapture::Stamps &p_view, const RTVertexCapture::Layout &p_layout, uint64_t p_instances);
+	RTCaptureState *_capture_state(const CaptureBinding &p_binding);
+	void _reset_capture_entry(const CaptureBinding &p_binding);
+	void _free_capture_entry_map(HashMap<RTMMSurfaceKey, RID> &r_map, bool p_merged);
+	bool _surface_hit_group_ready(const void *p_surf, uint32_t p_rt_flags);
+	CaptureBinding *_commit_capture(const void *p_surf, LocalVector<RTCaptureRequest> &r_captures, RTCaptureRequest *&r_recorded);
+	bool _resolve_captured_source(const void *p_surf, LocalVector<RTCaptureRequest> &r_captures, RTDeformedGeometrySource &r_source);
+	bool _resolve_captured_mm(const void *p_surf, LocalVector<RTCaptureRequest> &r_captures, RID &r_entry, RTSchedulerAction &r_action, RTMergeBakeInputs &r_bake);
+	void _snapshot_captured_positions(RTMergedMMEntry &r_entry, uint32_t p_point_count);
+	void _free_merged_mm_entry(RID p_handle);
+	RID &_shared_merged_mm_handle(const RTInstanceSource &p_source, uint32_t p_surface_key);
+
+	// Dynamic BLAS scheduling (particles, camera-dependent MultiMesh, vertex captures). Budgets are shared by all viewports of a frame.
+	RTDynamicScheduler dynamic_scheduler;
+	RTCpuVisibilityEstimator cpu_visibility_estimator;
+	uint64_t dynamic_scheduler_frame = UINT64_MAX;
+	LocalVector<RTSchedulerItem> dynamic_items; // Per-viewport scratch.
+	LocalVector<RTSchedulerAction> dynamic_actions; // Per-viewport scratch.
+	void _begin_dynamic_scheduler_frame();
+	void _schedule_dynamic_items(const RenderDataRD *p_render_data, const RTViewportState *p_state);
+
+	// Dynamic Geometry debug view. Fed only while a viewport uses it; shared by viewports, since a BLAS updated by one is traced by all.
+	RTDynamicGeometryDebug dynamic_geometry_debug;
+	void _annotate_dynamic_geometry(const LocalVector<RID> &p_built, const LocalVector<RID> &p_refit);
+
+	// Unconverged state traced during frame not_ready_frame, accumulated over its viewports.
+	uint64_t not_ready_frame = UINT64_MAX;
+	BitField<RSE::RenderingNotReadyReason> frame_not_ready_reasons;
+	void _flag_not_ready(RSE::RenderingNotReadyReason p_reason);
+
+	// Camera-independent merged particle surfaces, keyed by (particles, 0, surface ordinal).
+	// Particles RIDs come from another allocator than MultiMesh ones, so they can't share mm_handles.
+	HashMap<RTMMSurfaceKey, RID> particle_mm_entries; // Handles into merged_mm_pool.
 
 	// Multi-geometry BLASes of merged mesh surfaces. Not evicted by age: the RT instance set follows the
 	// camera, so aging out would rebuild large BLASes when turning around.
 	HashMap<RTMeshGroupKey, RTMeshGroupEntry> mesh_groups;
 	uint64_t mesh_group_use_counter = 0;
+	uint64_t mesh_group_build_first_use = 0; ///< mesh_group_use_counter when the current build_tlas started; newer variants are already in its TLAS.
 
 	// Per-instance scratch for build_tlas, kept to avoid per-frame allocations.
 	LocalVector<RTSurfaceRecord> surface_records;
@@ -768,6 +1151,11 @@ class RenderRaytracing {
 	void mat_ubo_pool_update(uint32_t p_slot, const void *p_data, uint32_t p_size);
 	uint64_t mat_ubo_pool_get_address(uint32_t p_slot) const;
 
+	// Dedicated uniform buffers of materials that don't fit a pool slot. Shaders only read them through their
+	// address, so every trace declares them; that also makes the frame wait for their initial upload.
+	HashSet<RID> mat_dedicated_buffers;
+	void _mat_free_dedicated_buffer(RTMaterialData *p_mat_data);
+
 	// Cache helpers.
 	static uint32_t get_rid_index(RID p_rid);
 	static uint32_t get_rid_version(RID p_rid);
@@ -783,7 +1171,6 @@ class RenderRaytracing {
 			const Transform3D &p_transform,
 			LocalVector<RID> &r_dirty_blas_list);
 	RTSurfaceData *process_deformed_surface(
-			const void *p_surf,
 			void *p_mesh_surface,
 			const struct RTDeformedGeometrySource &p_source,
 			LocalVector<RID> &r_dirty_blas_list,
@@ -791,6 +1178,7 @@ class RenderRaytracing {
 	void _populate_surface_blas(
 			void *p_mesh_surface,
 			RID p_vertex_buffer_override,
+			RID p_index_buffer_override,
 			bool p_force_uncompressed,
 			bool p_prefer_fast_build,
 			bool p_allow_update,
@@ -799,29 +1187,66 @@ class RenderRaytracing {
 			LocalVector<RID> &r_dirty_blas_list);
 	RTMaterialData *process_material(RID p_material_rid, uint16_t p_material_invalidation_counter);
 	bool _build_merged_mm_blas(
-			RID p_mm_rid,
-			RID p_mm_gpu_buffer,
+			const RTInstanceSource &p_source,
 			void *p_mesh_surface,
-			uint32_t p_mm_count,
-			uint32_t p_surface_index,
 			uint32_t p_surface_counter,
+			RTMergedMMEntry &r_entry,
+			uint32_t p_cache_key,
+			RTViewportState *p_state,
+			const RTMergeBakeInputs &p_inputs,
+			RTSchedulerAction p_action,
 			RD::ComputeListID p_compute_list,
 			LocalVector<RID> &r_dirty_blas_list,
 			LocalVector<RID> &r_dirty_blas_update_list,
 			RTSurfaceData *r_surf_data);
 	void update_procedural_blas(RTProceduralState *p_state, LocalVector<RID> &r_dirty_blas_list);
 	LocalVector<RD::AccelerationStructureInstance> tlas_instance_scratch; // Reused by _build_one_tlas().
-	void _build_one_tlas(RID &r_tlas, uint32_t &r_max_instances, const RTInstanceArrays &p_instances, const String &p_name);
-	void build_acceleration_structures(RTViewportState *p_state, const LocalVector<RID> &p_dirty_blas_list, const LocalVector<RID> &p_dirty_blas_update_list);
+	Error _build_one_tlas(RID &r_tlas, uint32_t &r_max_instances, const RTInstanceArrays &p_instances, const String &p_name);
+	/// Builds the dirty BLASes and both TLASes. On error the TLASes are invalidated and must not be traced this frame.
+	Error build_acceleration_structures(RTViewportState *p_state, const LocalVector<RID> &p_dirty_blas_list, const LocalVector<RID> &p_dirty_blas_update_list);
 	void finalize_buffers(RTViewportState *p_state);
 	void prepare_frame();
+
+#ifdef RT_VALIDATION_ENABLED
+	// Starts validation for the view being built and picks up the strict_validation setting.
+	void _rtv_begin_view();
+	// The buffer the uniform address of p_mat_data was taken from, or a null RID when it has none.
+	RID _rtv_material_source(const RTMaterialData *p_mat_data) const;
+	// Runs the strict checks on the view about to be built; false when the view must not be traced.
+	// p_built_blases and p_refit_blases are the BLASes queued for this view.
+	bool _rtv_validate_view(const RTViewportState *p_state, Span<RID> p_built_blases, Span<RID> p_refit_blases);
+
+	// Strict validation only: parallel to geometry_data and material_data.
+	LocalVector<RTGeometrySources> geometry_sources;
+	LocalVector<RID> material_sources;
+#endif
 
 public:
 	void initialize(RenderForwardClustered *p_owner);
 
 	void cleanup_caches();
 
-	RTViewportState *build_tlas(const RenderDataRD *p_render_data, uint32_t p_rt_flags);
+	/// Value of the rendering/pathtracing/vertex_capture_mode project setting.
+	static RTVertexCapture::Mode read_capture_mode();
+	/// True when p_surf (a RenderForwardClustered::GeometryInstanceSurfaceDataCache) of a mesh, 3D MultiMesh or 3D
+	/// particle system is vertex-captured under p_mode.
+	static bool is_capture_surface(const void *p_surf, RTVertexCapture::Mode p_mode);
+	/// Changes whenever the vertex capture mode does; surfaces eligible for capture change with it.
+	uint32_t get_capture_mode_version() const { return capture_mode_version; }
+
+	/// Collects the captured surfaces of this view whose capture is out of date and whose hit group is ready in
+	/// the p_rt_flags pipeline, lets the dynamic scheduler pick the ones recaptured this frame, assigns their arena
+	/// ranges and uploads their draw parameters.
+	/// Leaves `r_requests` empty when nothing needs capturing, or capture is disabled or unsupported.
+	void prepare_vertex_captures(const RenderDataRD *p_render_data, uint32_t p_rt_flags, LocalVector<RTCaptureRequest> &r_requests);
+	/// Storage buffer of RTVertexCapture::DrawParams, indexed by the capture draw's instance data index.
+	RID get_capture_params_buffer() const { return capture_params_buffer; }
+	/// Storage buffer the capture draws write into.
+	RID get_capture_arena() const { return capture_arena; }
+
+	/// Builds the view's TLAS. `r_captures` are the requests of `prepare_vertex_captures`, after the renderer recorded them;
+	/// the ones traced this view are marked committed.
+	RTViewportState *build_tlas(const RenderDataRD *p_render_data, uint32_t p_rt_flags, LocalVector<RTCaptureRequest> &r_captures);
 	void build_decal_volumes(RTViewportState *p_state, const RenderDataRD *p_render_data);
 	uint32_t gather_lights(const RenderDataRD *p_render_data, const RTViewportState *p_state, RT_LightData *r_light_data, uint32_t p_max_lights);
 	void update_scene_ubo(RTViewportState *p_state, const RenderDataRD *p_render_data, const Size2i &p_screen_size, const Color &p_default_bg_color);
@@ -854,6 +1279,8 @@ public:
 	RID dlss_rr_get_specular_hit_dist(RenderSceneBuffersRD *p_render_buffers) const;
 
 	void collect_device_address_buffers(const RTViewportState *p_state, LocalVector<RID> &r_buffers);
+
+	BitField<RSE::RenderingNotReadyReason> get_not_ready_reasons() const;
 	void register_raytracing_buffer_dependencies(RD::RaytracingListID p_list, const RTViewportState *p_state);
 
 	SceneShaderRaytracing *get_shader() const { return shader; }

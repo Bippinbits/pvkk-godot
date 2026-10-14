@@ -854,6 +854,7 @@ Error RenderingDeviceDriverVulkan::_check_device_capabilities() {
 		VkPhysicalDeviceRayQueryFeaturesKHR ray_query_features = {};
 		VkPhysicalDeviceSynchronization2FeaturesKHR sync_2_features = {};
 		VkPhysicalDeviceRayTracingValidationFeaturesNV raytracing_validation_features = {};
+		VkPhysicalDeviceFaultFeaturesEXT device_fault_features = {};
 
 		const bool use_1_2_features = physical_device_properties.apiVersion >= VK_API_VERSION_1_2;
 		if (use_1_2_features) {
@@ -962,6 +963,12 @@ Error RenderingDeviceDriverVulkan::_check_device_capabilities() {
 			next_features = &sync_2_features;
 		}
 
+		if (enabled_device_extension_names.has(VK_EXT_DEVICE_FAULT_EXTENSION_NAME)) {
+			device_fault_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT;
+			device_fault_features.pNext = next_features;
+			next_features = &device_fault_features;
+		}
+
 		VkPhysicalDeviceFeatures2 device_features_2 = {};
 		device_features_2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
 		device_features_2.pNext = next_features;
@@ -1039,7 +1046,8 @@ Error RenderingDeviceDriverVulkan::_check_device_capabilities() {
 		}
 
 		if (enabled_device_extension_names.has(VK_EXT_DEVICE_FAULT_EXTENSION_NAME)) {
-			device_fault_support = true;
+			// vkGetDeviceFaultInfoEXT is only valid with the deviceFault feature enabled; drivers crash without it.
+			device_fault_support = device_fault_features.deviceFault;
 		}
 #if defined(VK_TRACK_DEVICE_MEMORY)
 		if (enabled_device_extension_names.has(VK_EXT_DEVICE_MEMORY_REPORT_EXTENSION_NAME)) {
@@ -1375,6 +1383,7 @@ Error RenderingDeviceDriverVulkan::_initialize_device(const LocalVector<VkDevice
 	if (device_fault_support) {
 		device_fault_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT;
 		device_fault_features.pNext = create_info_next;
+		device_fault_features.deviceFault = VK_TRUE;
 		create_info_next = &device_fault_features;
 	}
 
@@ -7642,6 +7651,8 @@ bool RenderingDeviceDriverVulkan::has_feature(Features p_feature) {
 			return acceleration_structure_capabilities.acceleration_structure_support && raytracing_capabilities.raytracing_pipeline_support;
 		case SUPPORTS_SHADER_DEVICE_CLOCK:
 			return shader_capabilities.shader_device_clock_is_supported;
+		case SUPPORTS_VERTEX_PIPELINE_STORES:
+			return physical_device_features.vertexPipelineStoresAndAtomics;
 		default:
 			return false;
 	}

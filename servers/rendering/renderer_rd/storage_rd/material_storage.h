@@ -509,6 +509,20 @@ public:
 		return material->rt_invalidation_counter;
 	}
 
+	/// CPU copy of the global uniform buffer, four floats per element; instance uniforms start at their shader_uniforms_offset.
+	_FORCE_INLINE_ Span<const float> global_shader_uniforms_get_values() const {
+		return Span<const float>(&global_shader_uniforms.buffer_values->x, global_shader_uniforms.buffer_size * 4);
+	}
+
+	/// CPU copy of one scalar/vector global shader parameter, four floats per element; empty if not found or a texture.
+	_FORCE_INLINE_ Span<const float> global_shader_uniform_get_values(const StringName &p_name) const {
+		const GlobalShaderUniforms::Variable *variable = global_shader_uniforms.variables.getptr(p_name);
+		if (!variable || variable->buffer_index < 0) {
+			return Span<const float>();
+		}
+		return Span<const float>(&global_shader_uniforms.buffer_values[variable->buffer_index].x, variable->buffer_elements * 4);
+	}
+
 	_FORCE_INLINE_ bool material_is_builtin_standard_3d(RID p_material) const {
 		Material *material = material_owner.get_or_null(p_material);
 		return material && material->shader && material->shader->builtin_standard_3d;

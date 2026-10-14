@@ -31,10 +31,156 @@
 #pragma once
 
 #include "scene/resources/visual_shader.h"
+#include "scene/resources/visual_shader_nodes.h"
 
 #include "tests/test_macros.h"
 
 namespace TestVisualArray {
+
+static Vector<String> get_render_modes(const Ref<VisualShader> &p_shader) {
+	const String code = p_shader->get_code();
+	const int start = code.find("render_mode ");
+	if (start < 0) {
+		return Vector<String>();
+	}
+	const int begin = start + String("render_mode ").length();
+	return code.substr(begin, code.find(";", begin) - begin).split(", ");
+}
+
+static int count_billboard_modes(const Vector<String> &p_modes) {
+	return int(p_modes.has("billboard")) + int(p_modes.has("billboard_y")) + int(p_modes.has("billboard_particles"));
+}
+
+static int find_output_port(const Ref<VisualShader> &p_shader, VisualShader::Type p_type, const String &p_name) {
+	const Ref<VisualShaderNode> output = p_shader->get_node(p_type, VisualShader::NODE_ID_OUTPUT);
+	for (int i = 0; i < output->get_input_port_count(); i++) {
+		if (output->get_input_port_name(i) == p_name) {
+			return i;
+		}
+	}
+	return -1;
+}
+
+static Ref<VisualShaderNodeBillboard> add_billboard_node(const Ref<VisualShader> &p_shader, VisualShaderNodeBillboard::BillboardType p_type, bool p_connect) {
+	Ref<VisualShaderNodeBillboard> node;
+	node.instantiate();
+	node->set_billboard_type(p_type);
+	p_shader->add_node(VisualShader::TYPE_VERTEX, node, Vector2(), 2);
+	if (p_connect) {
+		const int port = find_output_port(p_shader, VisualShader::TYPE_VERTEX, "Model View Matrix");
+		REQUIRE(port >= 0);
+		REQUIRE(p_shader->connect_nodes(VisualShader::TYPE_VERTEX, 2, 0, VisualShader::NODE_ID_OUTPUT, port) == OK);
+	}
+	return node;
+}
+
+TEST_CASE("[SceneTree][VisualShader] Billboard render modes") {
+	SUBCASE("The Billboard dropdown emits exactly one mode") {
+		Ref<VisualShader> vs;
+		vs.instantiate();
+		CHECK(count_billboard_modes(get_render_modes(vs)) == 0);
+
+		const char *expected[] = { "billboard", "billboard_y", "billboard_particles" };
+		for (int i = 0; i < 3; i++) {
+			vs->set("modes/billboard", i + 1);
+			const Vector<String> render_modes = get_render_modes(vs);
+			CHECK(count_billboard_modes(render_modes) == 1);
+			CHECK(render_modes.has(expected[i]));
+		}
+	}
+
+	SUBCASE("Toggles are emitted into render_mode") {
+		Ref<VisualShader> vs;
+		vs.instantiate();
+		vs->set("modes/billboard", 1);
+		vs->set("flags/billboard_keep_scale", true);
+		vs->set("flags/fixed_size", true);
+		const Vector<String> render_modes = get_render_modes(vs);
+		CHECK(render_modes.has("billboard"));
+		CHECK(render_modes.has("billboard_keep_scale"));
+		CHECK(render_modes.has("fixed_size"));
+	}
+
+	SUBCASE("A connected Billboard node reports its render mode") {
+		Ref<VisualShader> vs;
+		vs.instantiate();
+		Ref<VisualShaderNodeBillboard> node = add_billboard_node(vs, VisualShaderNodeBillboard::BILLBOARD_TYPE_PARTICLES, true);
+		node->set_keep_scale_enabled(true);
+		vs->set("modes/billboard", 0); // Force a code update after the node change.
+		const Vector<String> render_modes = get_render_modes(vs);
+		CHECK(render_modes.has("billboard_particles"));
+		CHECK(render_modes.has("billboard_keep_scale"));
+		CHECK(count_billboard_modes(render_modes) == 1);
+		CHECK_MESSAGE(!vs->get_code().contains("INSTANCE_CUSTOM.x"), "The node relies on the render mode instead of rebuilding the matrix.");
+	}
+
+	SUBCASE("A Billboard node that doesn't reach MODELVIEW_MATRIX reports nothing") {
+		Ref<VisualShader> vs;
+		vs.instantiate();
+		add_billboard_node(vs, VisualShaderNodeBillboard::BILLBOARD_TYPE_ENABLED, false);
+		CHECK(count_billboard_modes(get_render_modes(vs)) == 0);
+	}
+
+	SUBCASE("Y-Billboard nodes don't report a fixed-function mode") {
+		Ref<VisualShader> vs;
+		vs.instantiate();
+		add_billboard_node(vs, VisualShaderNodeBillboard::BILLBOARD_TYPE_FIXED_Y, true);
+		const Vector<String> render_modes = get_render_modes(vs);
+		CHECK(count_billboard_modes(render_modes) == 0);
+		CHECK_MESSAGE(render_modes.has("rt_vertex_dynamic"), "The hand-written MODELVIEW_MATRIX needs a vertex capture.");
+	}
+
+	SUBCASE("A node's billboard mode wins over the dropdown") {
+		Ref<VisualShader> vs;
+		vs.instantiate();
+		vs->set("modes/billboard", 2);
+		add_billboard_node(vs, VisualShaderNodeBillboard::BILLBOARD_TYPE_ENABLED, true);
+		ERR_PRINT_OFF;
+		const Vector<String> render_modes = get_render_modes(vs);
+		ERR_PRINT_ON;
+		CHECK(render_modes.has("billboard"));
+		CHECK(count_billboard_modes(render_modes) == 1);
+	}
+}
+
+static int count_rt_vertex_modes(const Vector<String> &p_modes) {
+	return int(p_modes.has("rt_vertex_auto")) + int(p_modes.has("rt_vertex_dynamic")) + int(p_modes.has("rt_vertex_static")) + int(p_modes.has("rt_vertex_frozen"));
+}
+
+TEST_CASE("[SceneTree][VisualShader] RT Vertex render modes") {
+	SUBCASE("Auto is implicit and the dropdown emits the selected mode") {
+		Ref<VisualShader> vs;
+		vs.instantiate();
+		CHECK(count_rt_vertex_modes(get_render_modes(vs)) == 0);
+
+		vs->set("modes/rt_vertex", 1);
+		Vector<String> render_modes = get_render_modes(vs);
+		CHECK(count_rt_vertex_modes(render_modes) == 1);
+		CHECK(render_modes.has("rt_vertex_dynamic"));
+
+		vs->set("modes/rt_vertex", 2);
+		render_modes = get_render_modes(vs);
+		CHECK(count_rt_vertex_modes(render_modes) == 1);
+		CHECK(render_modes.has("rt_vertex_static"));
+
+		vs->set("modes/rt_vertex", 3);
+		render_modes = get_render_modes(vs);
+		CHECK(count_rt_vertex_modes(render_modes) == 1);
+		CHECK(render_modes.has("rt_vertex_frozen"));
+	}
+
+	SUBCASE("A Y-Billboard node's rt_vertex_dynamic wins over the dropdown") {
+		Ref<VisualShader> vs;
+		vs.instantiate();
+		vs->set("modes/rt_vertex", 2);
+		add_billboard_node(vs, VisualShaderNodeBillboard::BILLBOARD_TYPE_FIXED_Y, true);
+		ERR_PRINT_OFF;
+		const Vector<String> render_modes = get_render_modes(vs);
+		ERR_PRINT_ON;
+		CHECK(render_modes.has("rt_vertex_dynamic"));
+		CHECK(count_rt_vertex_modes(render_modes) == 1);
+	}
+}
 
 TEST_CASE("[SceneTree][VisualShader] Object creation and parameter") {
 	Ref<VisualShader> vs = memnew(VisualShader);

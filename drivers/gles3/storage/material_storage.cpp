@@ -1395,6 +1395,11 @@ MaterialStorage::MaterialStorage() {
 		actions.render_mode_defines["cull_disabled"] = "#define DO_SIDE_CHECK\n";
 		actions.render_mode_defines["particle_trails"] = "#define USE_PARTICLE_TRAILS\n";
 		actions.render_mode_defines["depth_prepass_alpha"] = "#define USE_OPAQUE_PREPASS\n";
+		actions.render_mode_defines["billboard"] = "#define BILLBOARD_ENABLED\n";
+		actions.render_mode_defines["billboard_y"] = "#define BILLBOARD_FIXED_Y\n";
+		actions.render_mode_defines["billboard_particles"] = "#define BILLBOARD_PARTICLES\n";
+		actions.render_mode_defines["billboard_keep_scale"] = "#define BILLBOARD_KEEP_SCALE\n";
+		actions.render_mode_defines["fixed_size"] = "#define FIXED_SIZE_USED\n";
 
 		bool force_lambert = GLOBAL_GET("rendering/shading/overrides/force_lambert_over_burley");
 
@@ -2951,6 +2956,7 @@ void SceneShaderData::set_code(const String &p_code) {
 	uses_fragment_time = false;
 	writes_modelview_or_projection = false;
 	uses_world_coordinates = false;
+	uses_billboard_transform = false;
 	uses_tangent = false;
 	uses_color = false;
 	uses_uv = false;
@@ -3011,6 +3017,9 @@ void SceneShaderData::set_code(const String &p_code) {
 	actions.render_mode_flags["wireframe"] = &wireframe;
 	actions.render_mode_flags["particle_trails"] = &uses_particle_trails;
 	actions.render_mode_flags["world_vertex_coords"] = &uses_world_coordinates;
+	for (const char *mode : { "billboard", "billboard_y", "billboard_particles", "fixed_size" }) {
+		actions.render_mode_flags[mode] = &uses_billboard_transform;
+	}
 
 	actions.usage_flag_pointers["ALPHA"] = &uses_alpha;
 	actions.usage_flag_pointers["ALPHA_SCISSOR_THRESHOLD"] = &uses_alpha_clip;

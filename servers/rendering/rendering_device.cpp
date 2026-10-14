@@ -302,6 +302,27 @@ void RenderingDevice::_tlas_remove_blas_dependencies(AccelerationStructure *p_tl
 	p_tlas->acceleration_structure_dependencies.clear();
 }
 
+Error RenderingDevice::_tlas_validate_instances(Span<AccelerationStructureInstance> p_instances) {
+	RID last_blas;
+	for (uint32_t i = 0; i < p_instances.size(); i++) {
+		const AccelerationStructureInstance &instance = p_instances[i];
+		if (!instance.blas.is_valid()) {
+			continue;
+		}
+		ERR_FAIL_COND_V_MSG(!instance.hit_sbt_range, ERR_INVALID_PARAMETER, "Instance " + itos(i) + " has an invalid hit shader binding table range.");
+		if (instance.blas == last_blas) {
+			continue;
+		}
+
+		const AccelerationStructure *blas = acceleration_structure_owner.get_or_null(instance.blas);
+		ERR_FAIL_NULL_V_MSG(blas, ERR_INVALID_PARAMETER, "Instance " + itos(i) + " references a BLAS that is not valid.");
+		ERR_FAIL_COND_V(blas->type != RDD::ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL, ERR_INVALID_PARAMETER);
+		ERR_FAIL_COND_V_MSG(blas->invalidated, ERR_INVALID_PARAMETER, "BLAS either has not been built yet, or has been invalidated by an operation and needs to be rebuilt.");
+		last_blas = instance.blas;
+	}
+	return OK;
+}
+
 RID RenderingDevice::blas_create(Span<AccelerationStructureGeometry> p_geometries, BitField<AccelerationStructureFlagBits> p_flags) {
 	ERR_FAIL_COND_V_MSG(!has_feature(SUPPORTS_RAYTRACING_PIPELINE) && !has_feature(SUPPORTS_RAY_QUERY), RID(), "The current rendering device has neither raytracing pipeline nor ray query support.");
 
@@ -543,6 +564,8 @@ Error RenderingDevice::blas_update(RID p_blas) {
 
 	AccelerationStructure *blas = acceleration_structure_owner.get_or_null(p_blas);
 	ERR_FAIL_NULL_V_MSG(blas, ERR_INVALID_PARAMETER, "BLAS argument is not valid.");
+	// A refit reads the previous build; refitting a BLAS that never built would traverse uninitialized memory.
+	ERR_FAIL_COND_V_MSG(blas->invalidated, ERR_INVALID_PARAMETER, "BLAS has never been built; build it before updating it.");
 
 	Error err = _acceleration_structure_scratch_buffer_create(blas);
 	ERR_FAIL_COND_V(err != OK, err);
@@ -555,6 +578,31 @@ Error RenderingDevice::blas_update(RID p_blas) {
 	return OK;
 }
 
+#ifdef DEV_ENABLED
+bool RenderingDevice::blas_is_built(RID p_blas) {
+	ERR_RENDER_THREAD_GUARD_V(false);
+
+	const AccelerationStructure *blas = acceleration_structure_owner.get_or_null(p_blas);
+	return blas && blas->type == RDD::ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL && !blas->invalidated;
+}
+
+void RenderingDevice::blas_get_written_input_buffers(RID p_blas, LocalVector<RID> &r_buffers) {
+	ERR_RENDER_THREAD_GUARD();
+
+	_THREAD_SAFE_METHOD_
+	const HashSet<RID> *inputs = reverse_dependency_map.getptr(p_blas);
+	if (!inputs) {
+		return;
+	}
+	for (const RID &input : *inputs) {
+		const Buffer *buffer = _get_buffer_from_owner(input);
+		if (buffer && draw_graph.is_written_in_current_graph(buffer->draw_tracker)) {
+			r_buffers.push_back(input);
+		}
+	}
+}
+#endif
+
 Error RenderingDevice::tlas_build(RID p_tlas, Span<AccelerationStructureInstance> p_instances) {
 	ERR_RENDER_THREAD_GUARD_V(ERR_UNAVAILABLE);
 
@@ -566,8 +614,16 @@ Error RenderingDevice::tlas_build(RID p_tlas, Span<AccelerationStructureInstance
 	ERR_FAIL_NULL_V_MSG(tlas, ERR_INVALID_PARAMETER, "TLAS argument is not valid.");
 	ERR_FAIL_COND_V_MSG(p_instances.size() > tlas->max_instance_count, ERR_INVALID_PARAMETER, "Exceeded the maximum amount of instances allowed in the TLAS.");
 
-	Error err = _acceleration_structure_scratch_buffer_create(tlas);
-	ERR_FAIL_COND_V(err != OK, err);
+	// Nothing may change before validation passes: a rejected build leaves the TLAS invalidated,
+	// so binding it is refused instead of tracing last frame's instances against this frame's data.
+	Error err = _tlas_validate_instances(p_instances);
+	if (err == OK) {
+		err = _acceleration_structure_scratch_buffer_create(tlas);
+	}
+	if (err != OK) {
+		tlas->invalidated = true;
+		return err;
+	}
 
 	uint32_t instance_size = driver->api_trait_get(RDD::API_TRAIT_ACCELERATION_STRUCTURE_INSTANCE_SIZE);
 	uint32_t instance_buffer_size = instance_size * tlas->max_instance_count;
@@ -648,15 +704,10 @@ Error RenderingDevice::tlas_build(RID p_tlas, Span<AccelerationStructureInstance
 		rdd_instance.flags = rd_instance.flags;
 
 		if (rd_instance.blas.is_valid() && rd_instance.blas == last_blas) {
-			ERR_FAIL_COND_V_MSG(!rd_instance.hit_sbt_range, ERR_INVALID_PARAMETER, "Instance " + itos(i) + " has an invalid hit shader binding table range.");
 			rdd_instance.blas = last_blas_driver_id;
 		} else if (rd_instance.blas.is_valid()) {
-			ERR_FAIL_COND_V_MSG(!rd_instance.hit_sbt_range, ERR_INVALID_PARAMETER, "Instance " + itos(i) + " has an invalid hit shader binding table range.");
-
+			// Validated by _tlas_validate_instances().
 			AccelerationStructure *blas = acceleration_structure_owner.get_or_null(rd_instance.blas);
-			ERR_FAIL_NULL_V(blas, ERR_INVALID_PARAMETER);
-			ERR_FAIL_COND_V(blas->type != RDD::ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL, ERR_INVALID_PARAMETER);
-			ERR_FAIL_COND_V_MSG(blas->invalidated, ERR_INVALID_PARAMETER, "BLAS either has not been built yet, or has been invalidated by an operation and needs to be rebuilt.");
 			rdd_instance.blas = blas->driver_id;
 			last_blas = rd_instance.blas;
 			last_blas_driver_id = blas->driver_id;
@@ -1545,6 +1596,36 @@ uint64_t RenderingDevice::buffer_get_device_address(RID p_buffer) {
 
 	return driver->buffer_get_device_address(buffer->driver_id);
 }
+
+bool RenderingDevice::buffer_is_mutable(RID p_buffer) {
+	ERR_RENDER_THREAD_GUARD_V(false);
+
+	const Buffer *buffer = _get_buffer_from_owner(p_buffer);
+	ERR_FAIL_NULL_V_MSG(buffer, false, "Buffer argument is not a valid buffer of any type.");
+	return buffer->draw_tracker != nullptr;
+}
+
+#ifdef DEV_ENABLED
+void RenderingDevice::buffer_get_device_address_ranges(LocalVector<BufferAddressRange> &r_ranges) {
+	ERR_RENDER_THREAD_GUARD();
+
+	r_ranges.clear();
+	const auto append = [&](auto &p_owner) {
+		for (const RID &rid : p_owner.get_owned_list()) {
+			const Buffer *buffer = p_owner.get_or_null(rid);
+			if (buffer && buffer->usage.has_flag(RDD::BUFFER_USAGE_DEVICE_ADDRESS_BIT)) {
+				r_ranges.push_back({ rid, driver->buffer_get_device_address(buffer->driver_id), buffer->size, draw_graph.is_written_in_current_graph(buffer->draw_tracker) });
+			}
+		}
+	};
+	append(vertex_buffer_owner);
+	append(index_buffer_owner);
+	append(uniform_buffer_owner);
+	append(storage_buffer_owner);
+	append(texture_buffer_owner);
+	r_ranges.sort();
+}
+#endif
 
 uint8_t *RenderingDevice::buffer_persistent_map_advance(RID p_buffer) {
 	ERR_RENDER_THREAD_GUARD_V(0);
@@ -8900,6 +8981,7 @@ Error RenderingDevice::initialize(RenderingContextDriver *p_context, DisplayServ
 			pipeline_cache_file_path += ".editor";
 		}
 		pipeline_cache_file_path += ".cache";
+		pipeline_cache_max_size = size_t(int(GLOBAL_GET("rendering/rendering_device/pipeline_cache/max_size_mb"))) * 1024 * 1024;
 
 		Vector<uint8_t> cache_data = _load_pipeline_cache();
 		pipeline_cache_enabled = driver->pipeline_cache_create(cache_data);
@@ -8919,6 +9001,15 @@ Vector<uint8_t> RenderingDevice::_load_pipeline_cache() {
 	DirAccess::make_dir_recursive_absolute(pipeline_cache_file_path.get_base_dir());
 
 	if (FileAccess::exists(pipeline_cache_file_path)) {
+		Ref<FileAccess> f = FileAccess::open(pipeline_cache_file_path, FileAccess::READ);
+		const uint64_t file_size = f.is_valid() ? f->get_length() : 0;
+		f.unref();
+		if (file_size > pipeline_cache_max_size) {
+			WARN_PRINT(vformat("Pipeline cache (%.1f MiB) exceeds rendering/rendering_device/pipeline_cache/max_size_mb; discarding it.", file_size / (1024.0f * 1024.0f)));
+			DirAccess::remove_absolute(pipeline_cache_file_path);
+			return Vector<uint8_t>();
+		}
+
 		Error file_error;
 		Vector<uint8_t> file_data = FileAccess::get_file_as_bytes(pipeline_cache_file_path, &file_error);
 		return file_data;
@@ -8943,9 +9034,19 @@ void RenderingDevice::update_pipeline_cache(bool p_closing) {
 		}
 	}
 
+	if (pipeline_cache_full) {
+		return;
+	}
+
 	{
 		size_t new_pipelines_cache_size = driver->pipeline_cache_query_size();
 		ERR_FAIL_COND(!new_pipelines_cache_size);
+		if (new_pipelines_cache_size > pipeline_cache_max_size) {
+			// The driver cache is never pruned; serializing past 2 GiB overflows the cache format.
+			pipeline_cache_full = true;
+			WARN_PRINT(vformat("Pipeline cache (%.1f MiB) exceeds rendering/rendering_device/pipeline_cache/max_size_mb; no longer saving it.", new_pipelines_cache_size / (1024.0f * 1024.0f)));
+			return;
+		}
 		size_t difference = new_pipelines_cache_size - pipeline_cache_size;
 
 		bool must_save = false;
@@ -10087,6 +10188,7 @@ void RenderingDevice::_bind_methods() {
 	BIND_ENUM_CONSTANT(SUPPORTS_RAY_QUERY);
 	BIND_ENUM_CONSTANT(SUPPORTS_RAYTRACING_PIPELINE);
 	BIND_ENUM_CONSTANT(SUPPORTS_SHADER_DEVICE_CLOCK);
+	BIND_ENUM_CONSTANT(SUPPORTS_VERTEX_PIPELINE_STORES);
 
 	BIND_ENUM_CONSTANT(LIMIT_MAX_BOUND_UNIFORM_SETS);
 	BIND_ENUM_CONSTANT(LIMIT_MAX_FRAMEBUFFER_COLOR_ATTACHMENTS);

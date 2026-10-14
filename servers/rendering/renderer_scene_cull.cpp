@@ -1611,6 +1611,10 @@ uint32_t RendererSceneCull::get_pipeline_compilations(RS::PipelineSource p_sourc
 	return scene_render->get_pipeline_compilations(p_source);
 }
 
+BitField<RS::RenderingNotReadyReason> RendererSceneCull::get_not_ready_reasons() {
+	return scene_render->get_not_ready_reasons();
+}
+
 void RendererSceneCull::instance_geometry_get_shader_parameter_list(RID p_instance, List<PropertyInfo> *p_parameters) const {
 	ERR_FAIL_NULL(p_parameters);
 	const Instance *instance = instance_owner.get_or_null(p_instance);
@@ -2877,6 +2881,7 @@ void RendererSceneCull::_scene_cull(CullData &cull_data, InstanceCullResult &cul
 	for (uint64_t i = p_from; i < p_to; i++) {
 		bool mesh_visible = false;
 		bool in_frustum = false;
+		bool particles_requested = false;
 
 		InstanceData &idata = cull_data.scenario->instance_data[i];
 		uint32_t visibility_flags = idata.flags & (InstanceData::FLAG_VISIBILITY_DEPENDENCY_HIDDEN_CLOSE_RANGE | InstanceData::FLAG_VISIBILITY_DEPENDENCY_HIDDEN | InstanceData::FLAG_VISIBILITY_DEPENDENCY_FADE_CHILDREN);
@@ -2956,19 +2961,8 @@ void RendererSceneCull::_scene_cull(CullData &cull_data, InstanceCullResult &cul
 					if (base_type == RS::INSTANCE_MESH) {
 						mesh_visible = true;
 					} else if (base_type == RS::INSTANCE_PARTICLES) {
-						//particles visible? process them
-						if (RSG::particles_storage->particles_is_inactive(idata.base_rid)) {
-							//but if nothing is going on, don't do it.
-							keep = false;
-						} else {
-							cull_data.cull->lock.lock();
-							RSG::particles_storage->particles_request_process(idata.base_rid);
-							cull_data.cull->lock.unlock();
-
-							RS::get_singleton()->call_on_render_thread(callable_mp_static(&RendererSceneCull::_scene_particles_set_view_axis).bind(idata.base_rid, -cull_data.cam_transform.basis.get_column(2).normalized(), cull_data.cam_transform.basis.get_column(1).normalized()));
-							//particles visible? request redraw
-							RenderingServerDefault::redraw_request();
-						}
+						keep = _scene_particles_request_process(cull_data, idata.base_rid);
+						particles_requested = true;
 					}
 
 					if (idata.parent_array_index != -1) {
@@ -3231,6 +3225,11 @@ void RendererSceneCull::_scene_cull(CullData &cull_data, InstanceCullResult &cul
 							// them from camera rays while shadow rays still see them.
 							cull_result.rt_geometry_instances.push_back(idata.instance_geometry);
 							mesh_visible = true; // For skinned/deformed meshes..
+						} else if (base_type == RSE::INSTANCE_PARTICLES) {
+							// Systems only rays can see still simulate, or reflections would freeze.
+							if (particles_requested ? !RSG::particles_storage->particles_is_inactive(idata.base_rid) : _scene_particles_request_process(cull_data, idata.base_rid)) {
+								cull_result.rt_geometry_instances.push_back(idata.instance_geometry);
+							}
 						}
 					}
 				}
@@ -3271,6 +3270,19 @@ void RendererSceneCull::_scene_cull(CullData &cull_data, InstanceCullResult &cul
 			cull_result.mesh_instances.push_back(cull_data.scenario->instance_data[i].instance->mesh_instance);
 		}
 	}
+}
+
+bool RendererSceneCull::_scene_particles_request_process(CullData &p_cull_data, RID p_particles) {
+	if (RSG::particles_storage->particles_is_inactive(p_particles)) {
+		return false;
+	}
+	p_cull_data.cull->lock.lock();
+	RSG::particles_storage->particles_request_process(p_particles);
+	p_cull_data.cull->lock.unlock();
+
+	RS::get_singleton()->call_on_render_thread(callable_mp_static(&RendererSceneCull::_scene_particles_set_view_axis).bind(p_particles, -p_cull_data.cam_transform.basis.get_column(2).normalized(), p_cull_data.cam_transform.basis.get_column(1).normalized()));
+	RenderingServerDefault::redraw_request();
+	return true;
 }
 
 void RendererSceneCull::_scene_particles_set_view_axis(RID p_particles, const Vector3 &p_axis, const Vector3 &p_up_axis) {

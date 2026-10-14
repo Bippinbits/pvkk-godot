@@ -73,6 +73,7 @@ protected:
 		RENDER_PASS_UNIFORM_SET = 1,
 		TRANSFORMS_UNIFORM_SET = 2,
 		MATERIAL_UNIFORM_SET = 3,
+		RT_CAPTURE_UNIFORM_SET = 4, // Path tracer vertex capture params and output, see rt_capture_inc.glsl.
 	};
 
 	enum {
@@ -579,6 +580,8 @@ protected:
 
 		// Set on the surface's own material pass. next_pass and overlay passes reuse the surface but are not traced.
 		bool rt_base_pass = false;
+		// Material the surface was added with (override, surface or mesh material, or the default).
+		RID rt_material;
 
 		mutable RID rt_deformed_handle;
 
@@ -875,6 +878,8 @@ protected:
 	Scale3DMode _resolve_scale_3d_mode(Ref<RenderSceneBuffersRD> p_render_buffers) const;
 	void _render_3d_upscaling(const RenderDataRD *p_render_data, Scale3DMode p_scale_type, bool p_using_taa, double p_time_step, const DLSSRRGuideBuffers &p_dlss_rr);
 	virtual void _free_rt_viewport_state(RenderSceneBuffersRD *p_render_buffers);
+	// Compiles pipelines a subclass draws the surface with, after the surface cache's own were queued.
+	virtual void _mesh_generate_extra_pipelines_for_surface_cache(GeometryInstanceSurfaceDataCache *p_surface_cache) {}
 
 	virtual void _render_material(const Transform3D &p_cam_transform, const Projection &p_cam_projection, bool p_cam_orthogonal, const PagedArray<RenderGeometryInstance *> &p_instances, RID p_framebuffer, const Rect2i &p_region, float p_exposure_normalization) override;
 	virtual void _render_uv2(const PagedArray<RenderGeometryInstance *> &p_instances, RID p_framebuffer, const Rect2i &p_region) override;

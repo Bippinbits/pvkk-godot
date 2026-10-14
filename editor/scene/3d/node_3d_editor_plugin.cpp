@@ -3484,16 +3484,30 @@ void Node3DEditorViewport::_notification(int p_what) {
 				text += vformat(TTR("Primitives: %d"), viewport->get_render_info(Viewport::RENDER_INFO_TYPE_VISIBLE, Viewport::RENDER_INFO_PRIMITIVES_IN_FRAME)) + "\n";
 				text += vformat(TTR("Draw Calls: %d"), viewport->get_render_info(Viewport::RENDER_INFO_TYPE_VISIBLE, Viewport::RENDER_INFO_DRAW_CALLS_IN_FRAME));
 
-				int rt_tlas = viewport->get_render_info(Viewport::RENDER_INFO_TYPE_VISIBLE, Viewport::RENDER_INFO_RT_TLAS_INSTANCES);
+				auto rt_info = [&](Viewport::RenderInfo p_info) {
+					return viewport->get_render_info(Viewport::RENDER_INFO_TYPE_VISIBLE, p_info);
+				};
+				const int rt_tlas = rt_info(Viewport::RENDER_INFO_RT_TLAS_INSTANCES);
 				if (rt_tlas > 0) {
-					int rt_blas_builds = viewport->get_render_info(Viewport::RENDER_INFO_TYPE_VISIBLE, Viewport::RENDER_INFO_RT_BLAS_BUILDS);
-					int rt_blas_refits = viewport->get_render_info(Viewport::RENDER_INFO_TYPE_VISIBLE, Viewport::RENDER_INFO_RT_BLAS_REFITS);
-					int rt_tris_built = viewport->get_render_info(Viewport::RENDER_INFO_TYPE_VISIBLE, Viewport::RENDER_INFO_RT_TRIANGLES_BUILT);
-					int rt_tris_refit = viewport->get_render_info(Viewport::RENDER_INFO_TYPE_VISIBLE, Viewport::RENDER_INFO_RT_TRIANGLES_REFIT);
 					text += "\n";
 					text += "\n" + vformat(TTR("RT TLAS Instances: %d"), rt_tlas) + "\n";
-					text += vformat(TTR("RT BLAS Builds: %d (%d tris)"), rt_blas_builds, rt_tris_built) + "\n";
-					text += vformat(TTR("RT BLAS Refits: %d (%d tris)"), rt_blas_refits, rt_tris_refit);
+					text += vformat(TTR("RT BLAS Builds: %d (%d tris)"), rt_info(Viewport::RENDER_INFO_RT_BLAS_BUILDS), rt_info(Viewport::RENDER_INFO_RT_TRIANGLES_BUILT)) + "\n";
+					text += vformat(TTR("RT BLAS Refits: %d (%d tris)"), rt_info(Viewport::RENDER_INFO_RT_BLAS_REFITS), rt_info(Viewport::RENDER_INFO_RT_TRIANGLES_REFIT));
+
+					const int rt_updated = rt_info(Viewport::RENDER_INFO_RT_DYNAMIC_UPDATED);
+					const int rt_held = rt_info(Viewport::RENDER_INFO_RT_DYNAMIC_HELD);
+					const int rt_limited = rt_info(Viewport::RENDER_INFO_RT_DYNAMIC_BUDGET_LIMITED);
+					if (rt_updated + rt_held + rt_limited > 0) {
+						text += "\n" + vformat(TTR("RT Dynamic: %d updated, %d held, %d budget-limited"), rt_updated, rt_held, rt_limited);
+					}
+					const int rt_rebakes = rt_info(Viewport::RENDER_INFO_RT_DYNAMIC_REBAKES);
+					if (rt_rebakes > 0) {
+						text += "\n" + vformat(TTR("RT Rebakes: %d (%d verts)"), rt_rebakes, rt_info(Viewport::RENDER_INFO_RT_DYNAMIC_REBAKE_VERTICES));
+					}
+					const int rt_captured = rt_info(Viewport::RENDER_INFO_RT_CAPTURED_MESHES);
+					if (rt_captured > 0) {
+						text += "\n" + vformat(TTR("RT Captures: %d (%d verts)"), rt_captured, rt_info(Viewport::RENDER_INFO_RT_CAPTURED_VERTICES));
+					}
 				}
 
 				info_label->set_text(text);

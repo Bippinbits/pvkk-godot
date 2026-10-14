@@ -10,6 +10,8 @@
 /* Include our forward mobile UBOs definitions etc. */
 #include "scene_forward_mobile_inc.glsl"
 
+#include "../billboard_inc.glsl"
+
 #define SHADER_IS_SRGB false
 #define SHADER_SPACE_FAR 0.0
 
@@ -469,6 +471,10 @@ void vertex_shader(in vec3 vertex,
 
 #ifdef POINT_SIZE_USED
 	float point_size = 1.0;
+#endif
+
+#ifdef BILLBOARD_RENDER_MODE_USED
+	billboard_apply_render_modes(modelview, modelview_normal, read_view_matrix, scene_data.main_cam_inv_view_matrix, inv_view_matrix, projection_matrix, instance_custom, OUTPUT_IS_MULTIVIEW);
 #endif
 
 	{

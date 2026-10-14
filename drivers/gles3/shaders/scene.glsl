@@ -62,6 +62,8 @@ RENDER_MOTION_VECTORS = false
 
 #include "stdlib_inc.glsl"
 
+#include "../../../servers/rendering/renderer_rd/shaders/billboard_inc.glsl"
+
 #if !defined(MODE_RENDER_DEPTH) || defined(TANGENT_USED) || defined(NORMAL_MAP_USED) || defined(LIGHT_ANISOTROPY_USED) ||defined(LIGHT_CLEARCOAT_USED)
 #ifndef NORMAL_USED
 #define NORMAL_USED
@@ -703,6 +705,10 @@ void vertex_shader(vec4 vertex_angle_attrib_input,
 	highp mat3 modelview_normal = mat3(scene_data_input.view_matrix) * model_normal_matrix;
 
 	float point_size = 1.0;
+
+#ifdef BILLBOARD_RENDER_MODE_USED
+	billboard_apply_render_modes(modelview, modelview_normal, scene_data_input.view_matrix, scene_data_input.main_cam_inv_view_matrix, scene_data_input.inv_view_matrix, projection_matrix, instance_custom, OUTPUT_IS_MULTIVIEW);
+#endif
 
 	{
 #CODE : VERTEX

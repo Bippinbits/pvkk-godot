@@ -38,6 +38,16 @@
 #define RT_PARAM_FRAME_INDEX 15 // rt_params[3].w - Frame counter for temporal variation
 #define RT_PARAM_DECAL_COUNT 16 // rt_params[4].x - decals in the decal volume TLAS
 #define RT_PARAM_DECAL_MODE 17 // rt_params[4].y - RT_DECAL_MODE_*: which path vertices receive decals
+#define RT_PARAM_TRANSPARENCY_DOMINANT_LAYER_ALPHA 18 // rt_params[4].z - min alpha of the first peel layer to own depth/velocity (0 = never)
+
+// RT_PARAM_VIS_MODE values. Must match Environment::PathtracingDebugMode.
+#define RT_VIS_TRANSPARENCY_LAYERS 23
+#define RT_VIS_DYNAMIC_GEOMETRY 29
+
+/// True when p_vis_mode traces transparency peels: normal shading, and the debug views that show transparent layers.
+bool rt_debug_keeps_transparency(int p_vis_mode) {
+	return p_vis_mode == 0 || p_vis_mode == RT_VIS_TRANSPARENCY_LAYERS || p_vis_mode == RT_VIS_DYNAMIC_GEOMETRY;
+}
 // ============================================================================
 // PATHTRACING PAYLOAD (36 bytes, fp16/unorm-packed)
 // ============================================================================
@@ -186,6 +196,14 @@ const uint FLAG_COMPRESSED = 1u;
 const uint FLAG_PROCEDURAL = 2u;
 // Set when the BLAS uses a per-frame-deformed vertex buffer.
 const uint FLAG_DEFORMED = 4u;
+// Positions and TBN come from the vertex capture pass.
+const uint FLAG_CAPTURED = 8u;
+// UVs in the attribute buffer are unorm16, independent of FLAG_COMPRESSED.
+const uint FLAG_COMPRESSED_UV = 16u;
+// A triangle hit reported as front facing is a raster back face.
+const uint FLAG_FACING_INVERTED = 32u;
+// Back faces flip the normal, like raster DO_SIDE_CHECK.
+const uint FLAG_SIDE_CHECK = 64u;
 
 // ============================================================================
 // RANDOM NUMBER GENERATION - PCG (Permuted Congruential Generator)

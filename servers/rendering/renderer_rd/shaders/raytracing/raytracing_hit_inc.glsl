@@ -3,16 +3,25 @@
 
 #include "raytracing_data_inc.glsl"
 
-vec4 fetch_instance_custom(GeometryData geom, uint primitive_id) {
-	if (geom.custom_data_address == 0ul) {
-		return vec4(0.0);
+// Reads the vec4 at bit `shift` of instance_data_layout from the hit instance's record.
+vec4 fetch_instance_field(GeometryData geom, uint primitive_id, uint shift, vec4 fallback) {
+	uint offset = (geom.instance_data_layout >> shift) & 0xffu;
+	if (geom.instance_data_address == 0ul || offset == 0xffu) {
+		return fallback;
 	}
-	uint divisor = geom.custom_data_primitive_divisor;
+	uint divisor = geom.instance_data_primitive_divisor;
 	uint instance = divisor == 0u ? 0u : primitive_id / divisor;
-	uint stride_bytes = (geom.custom_data_stride & 0xffu) * 4u;
-	uint64_t address = geom.custom_data_address + uint64_t(instance) * uint64_t(stride_bytes);
-	FloatBuffer data = FloatBuffer(address);
+	uint stride = geom.instance_data_layout & 0xffu;
+	FloatBuffer data = FloatBuffer(geom.instance_data_address + uint64_t(instance * stride + offset) * 4ul);
 	return vec4(data.v[0], data.v[1], data.v[2], data.v[3]);
+}
+
+vec4 fetch_instance_color(GeometryData geom, uint primitive_id) {
+	return fetch_instance_field(geom, primitive_id, 8u, vec4(1.0));
+}
+
+vec4 fetch_instance_custom(GeometryData geom, uint primitive_id) {
+	return fetch_instance_field(geom, primitive_id, 16u, vec4(0.0));
 }
 
 // ============================================================================
@@ -82,13 +91,28 @@ void get_triangle_indices(in GeometryData geom, out uint i0, out uint i1, out ui
 #endif
 
 // ============================================================================
+// FACING
+// ============================================================================
+#if defined(RT_STAGE_CLOSEST_HIT) || defined(RT_STAGE_ANY_HIT)
+/// Raster FRONT_FACING of a triangle hit: the winding of the triangle vertex() output, as seen from the ray origin.
+bool rt_triangle_front_facing(in GeometryData geom) {
+	return (gl_HitKindEXT == gl_HitKindFrontFacingTriangleEXT) != ((geom.flags & FLAG_FACING_INVERTED) != 0u);
+}
+#endif
+
+/// The shading normal p_normal, flipped on back faces of materials raster flips it for (DO_SIDE_CHECK).
+vec3 rt_side_checked_normal(in GeometryData geom, vec3 p_normal, bool p_front_facing) {
+	return (!p_front_facing && (geom.flags & FLAG_SIDE_CHECK) != 0u) ? -p_normal : p_normal;
+}
+
+// ============================================================================
 // UV FETCHING
 // ============================================================================
 vec2 fetch_uv_vertex(in GeometryData geom, uint byte_offset, uint scale_packed, uint index) {
 	uint stride_words = geom.attribute_stride >> 2;
 	uint uv_word_offset = byte_offset >> 2;
 
-	if ((geom.flags & FLAG_COMPRESSED) != 0u) {
+	if ((geom.flags & FLAG_COMPRESSED_UV) != 0u) {
 		Uint32Buffer attributes = Uint32Buffer(geom.attribute_address);
 		uint packed_uv = attributes.v[index * stride_words + uv_word_offset];
 		vec2 uv = vec2(float(packed_uv & 0xFFFFu), float(packed_uv >> 16)) / 65535.0;

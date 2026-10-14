@@ -6,7 +6,7 @@
 //
 // Required bindings (before this file):
 //   tlas, payload, scene_data_block, geometries[], motion_indices[], materials[], motion_transforms[], bindless_textures[],
-//   SAMPLER_* (12 material samplers), rt_params, rt_depth_image,
+//   SAMPLER_* (12 material samplers), rt_params, rt_depth_image, rt_prefiltered_dfg() (rt_dfg),
 //   DLSS-RR images (ifdef DLSS_RR_ENABLED)
 
 // ============================================================================
@@ -15,7 +15,7 @@
 
 struct HitData {
 	vec3 hit_pos;
-	vec3 geometry_normal; // World space, flipped for back-face hits.
+	vec3 geometry_normal; // World space, flipped on back faces of cull_front / cull_disabled materials (raster DO_SIDE_CHECK).
 	vec3 tangent; // World space.
 	vec3 bitangent; // World space.
 	vec2 uv; // Raw UV (no material scale/offset applied).
@@ -37,7 +37,8 @@ HitData compute_hit_data() {
 #ifdef RT_CUSTOM_HIT_GROUP
 	VertexAttributes attrs = fetch_vertex_attributes(geom, attribs, FETCH_ALL);
 #else
-	VertexAttributes attrs = fetch_vertex_attributes(geom, attribs, FETCH_UV | FETCH_TBN);
+	uint uv2_fetch = (materials[h.geometry_idx].flags & RT_MAT_FLAG_EMISSION_UV2) != 0u ? FETCH_UV2 : 0u;
+	VertexAttributes attrs = fetch_vertex_attributes(geom, attribs, FETCH_UV | FETCH_TBN | uv2_fetch);
 #endif
 	h.uv = attrs.uv;
 	h.uv2 = attrs.uv2;
@@ -72,10 +73,8 @@ HitData compute_hit_data() {
 		h.tangent = normalize(normal_matrix * attrs.tangent);
 		h.bitangent = cross(h.geometry_normal, h.tangent) * attrs.bitangent_sign;
 
-		h.is_front_face = (dot(h.geometry_normal, -gl_WorldRayDirectionEXT) > 0.0);
-		if (!h.is_front_face) {
-			h.geometry_normal = -h.geometry_normal;
-		}
+		h.is_front_face = rt_triangle_front_facing(geom);
+		h.geometry_normal = rt_side_checked_normal(geom, h.geometry_normal, h.is_front_face);
 	}
 
 	h.hit_pos = gl_WorldRayOriginEXT + gl_WorldRayDirectionEXT * gl_HitTEXT;
@@ -274,9 +273,36 @@ void apply_segment_fog(float segment_dist, uint mat_flags, bool camera_segment, 
 	throughput *= fog.a;
 }
 
-/// Converts specular parameter [0..1] to dielectric F0.
-float specular_to_f0(float specular) {
-	return 0.16 * specular * specular;
+// ============================================================================
+// BRDF MATERIAL SETUP
+// ============================================================================
+
+/// BRDF inputs for a surface. 'p_mat_flags' supplies the Godot light model and
+/// 'p_NdotV' the rasterizer's DFG energy compensation.
+MaterialProperties material_properties(vec3 p_albedo, float p_metallic, float p_roughness, float p_specular,
+		vec3 p_backlight, uint p_mat_flags, float p_NdotV) {
+	MaterialProperties material;
+	material.baseColor = p_albedo;
+	material.metalness = p_metallic;
+	material.roughness = p_roughness;
+	material.dielectricF0 = material_specular_to_f0(p_specular);
+	material.emissive = vec3(0.0);
+	material.transmissivness = 0.0;
+	material.opacity = 1.0;
+	vec3 f0 = baseColorToSpecularF0(p_albedo, p_metallic, material.dielectricF0);
+	float dfg_y = rt_prefiltered_dfg(p_roughness, clamp(p_NdotV, 0.0001, 1.0)).y;
+	material.energyCompensation = 1.0 + f0 * (1.0 / dfg_y - 1.0);
+	material.backlight = p_backlight;
+	material.diffuseMode = (p_mat_flags >> RT_MAT_DIFFUSE_MODE_SHIFT) & RT_MAT_SHADING_MODE_MASK;
+	material.specularMode = (p_mat_flags >> RT_MAT_SPECULAR_MODE_SHIFT) & RT_MAT_SHADING_MODE_MASK;
+	return material;
+}
+
+MaterialProperties material_properties_from_result(HitData h, MaterialResult m, vec3 N, vec3 V) {
+	MaterialProperties material = material_properties(m.albedo, m.metalness, m.roughness, m.specular, m.backlight,
+			materials[h.geometry_idx].flags, dot(N, V));
+	material.emissive = m.emissive;
+	return material;
 }
 
 // ============================================================================
@@ -351,66 +377,95 @@ vec3 debug_directional_shadow_blocker(vec3 p_geometry_normal) {
 	return color * brightness;
 }
 
-void debug_visualize(
-		int vis_mode,
-		bool is_front_face,
-		vec3 geometry_normal,
-		vec3 final_normal,
-		vec3 tangent_space_normal,
-		vec3 world_tangent,
-		vec3 world_bitangent,
-		vec2 uv,
-		vec3 albedo,
-		vec3 orm,
-		float metalness,
-		float roughness,
-		float specular,
-		vec3 emissive,
-		vec3 V,
-		float NdotV) {
-	PathState ps = path_unpack(payload);
+// Must match RTDynamicGeometryDebug.
+#define RT_DYNAMIC_GEOMETRY_CATEGORY_MAX 7u
+#define RT_DYNAMIC_GEOMETRY_CATEGORY_MASK 15u
+#define RT_DYNAMIC_GEOMETRY_REST_SHIFT 4u
+#define RT_DYNAMIC_GEOMETRY_AGE_SHIFT 8u
+#define RT_DYNAMIC_GEOMETRY_FADE_FRAMES 60.0
 
-	if (vis_mode == 1) {
+// Indexed by RTDynamicGeometryDebug::Category: static, moved, refit, build, captured refit, captured build,
+// built idle, captured built idle.
+const vec3 RT_DYNAMIC_GEOMETRY_COLORS[8] = vec3[](vec3(0.0), vec3(0.0, 1.0, 0.0), vec3(1.0, 1.0, 0.0), vec3(1.0, 0.0, 0.0), vec3(0.05, 0.15, 1.0), vec3(1.0, 0.0, 1.0),
+		vec3(0.25, 0.015, 0.015), vec3(0.22, 0.015, 0.22));
+const float RT_DYNAMIC_GEOMETRY_STRENGTH[8] = float[](0.0, 0.4, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0);
+
+// Category color of the packed category at p_shift, over p_base.
+vec3 debug_dynamic_geometry_tint(uint p_state, uint p_shift, vec3 p_base, float p_recency) {
+	uint category = min((p_state >> p_shift) & RT_DYNAMIC_GEOMETRY_CATEGORY_MASK, RT_DYNAMIC_GEOMETRY_CATEGORY_MAX);
+	return mix(p_base, RT_DYNAMIC_GEOMETRY_COLORS[category], RT_DYNAMIC_GEOMETRY_STRENGTH[category] * p_recency);
+}
+
+// Category color over the rest category's color, itself over dim grayscale shading. Work done this frame
+// (age 0) is opaque; earlier work starts well below that and fades out over RT_DYNAMIC_GEOMETRY_FADE_FRAMES.
+vec3 debug_dynamic_geometry(uint p_state, vec3 p_albedo, float p_NdotV) {
+	uint age = p_state >> RT_DYNAMIC_GEOMETRY_AGE_SHIFT;
+	vec3 gray = vec3((0.02 + 0.13 * luminance(p_albedo)) * (0.3 + 0.7 * p_NdotV));
+	vec3 rest = debug_dynamic_geometry_tint(p_state, RT_DYNAMIC_GEOMETRY_REST_SHIFT, gray, 1.0);
+	float recency = age == 0u ? 1.0 : mix(0.6, 0.1, float(age) / RT_DYNAMIC_GEOMETRY_FADE_FRAMES);
+	return debug_dynamic_geometry_tint(p_state, 0u, rest, recency);
+}
+
+// Opacity range of transparent layers: faint particles stay visible, near-opaque ones still show what's behind.
+#define RT_DYNAMIC_GEOMETRY_MIN_OPACITY 0.35
+#define RT_DYNAMIC_GEOMETRY_MAX_OPACITY 0.75
+
+// Reports a transparency peel layer of p_color, like shade_and_bounce does: raygen composites it over what's behind.
+void debug_dynamic_geometry_peel(inout PathState r_ps, vec3 p_color, float p_alpha) {
+	float opacity = clamp(p_alpha, RT_DYNAMIC_GEOMETRY_MIN_OPACITY, RT_DYNAMIC_GEOMETRY_MAX_OPACITY);
+	r_ps.hit_t = gl_HitTEXT;
+	r_ps.radiance += r_ps.throughput * opacity * p_color;
+	r_ps.packed_bounces_flags = set_peel_alpha(r_ps.packed_bounces_flags, opacity) & ~PEEL_HAS_CONTINUATION_FLAG;
+	path_pack(payload, r_ps);
+}
+
+/// Debug inputs of a closest hit. p_tangent_space_normal is the unpacked normal map sample.
+MaterialDebugInputs debug_material_inputs(HitData p_h, MaterialResult p_m, vec3 p_tangent_space_normal, vec3 p_tangent, vec3 p_bitangent, vec2 p_uv, float p_ao) {
+	MaterialDebugInputs inputs;
+	inputs.geometry_normal = p_h.geometry_normal;
+	inputs.normal = p_m.normal;
+	inputs.view_normal = normalize(mat3(scene_data_block.data.inv_view_matrix) * p_m.normal);
+	inputs.tangent_space_normal = p_tangent_space_normal;
+	inputs.tangent = p_tangent;
+	inputs.bitangent = p_bitangent;
+	inputs.uv = p_uv;
+	inputs.albedo = p_m.albedo;
+	inputs.ao = p_ao;
+	inputs.roughness = p_m.roughness;
+	inputs.metallic = p_m.metalness;
+	inputs.specular = p_m.specular;
+	inputs.emission = p_m.emissive;
+	inputs.NdotV = max(dot(p_m.normal, -gl_WorldRayDirectionEXT), 0.0001);
+	inputs.front_facing = p_h.is_front_face;
+	inputs.depth = gl_HitTEXT / (scene_data_block.data.z_far - scene_data_block.data.z_near);
+	return inputs;
+}
+
+void debug_visualize(int vis_mode, MaterialDebugInputs dbg, float alpha) {
+	PathState ps = path_unpack(payload);
+	vec3 V = -gl_WorldRayDirectionEXT;
+
+	if (material_debug_is_material_mode(vis_mode)) {
+		ps.radiance = material_debug_color(vis_mode, dbg);
+	} else if (vis_mode == 1) {
 		if (get_total_bounces(ps.packed_bounces_flags) == 0u) {
 			ps.packed_bounces_flags = inc_total_bounce(ps.packed_bounces_flags);
 			ps.hit_t = gl_HitTEXT;
-			ps.offset_normal = geometry_normal;
-			ps.next_ray_dir = reflect(gl_WorldRayDirectionEXT, geometry_normal);
+			ps.offset_normal = dbg.geometry_normal;
+			ps.next_ray_dir = reflect(gl_WorldRayDirectionEXT, dbg.geometry_normal);
 			path_pack(payload, ps);
 			return;
 		} else {
-			ps.radiance = geometry_normal * 0.5 + 0.5;
+			ps.radiance = dbg.geometry_normal * 0.5 + 0.5;
 		}
-	} else if (vis_mode == 2) {
-		ps.radiance = geometry_normal * 0.5 + 0.5;
-	} else if (vis_mode == 3) {
-		ps.radiance = final_normal * 0.5 + 0.5;
-	} else if (vis_mode == 4) {
-		ps.radiance = tangent_space_normal * 0.5 + 0.5;
-	} else if (vis_mode == 5) {
-		ps.radiance = world_tangent * 0.5 + 0.5;
-	} else if (vis_mode == 6) {
-		ps.radiance = world_bitangent * 0.5 + 0.5;
-	} else if (vis_mode == 7) {
-		ps.radiance = vec3(fract(uv), 0.0);
-	} else if (vis_mode == 8) {
-		ps.radiance = albedo;
-	} else if (vis_mode == 9) {
-		ps.radiance = orm;
-	} else if (vis_mode == 10) {
-		ps.radiance = DLSSRR_computeDiffuseAlbedo(albedo, metalness);
-	} else if (vis_mode == 11) {
-		ps.radiance = DLSSRR_computeSpecularAlbedo(albedo, metalness, specular_to_f0(specular), roughness, NdotV);
-	} else if (vis_mode == 12) {
-		ps.radiance = (final_normal * 0.5 + 0.5) * (1.0 - roughness * 0.5);
 	} else if (vis_mode == 13) {
 		if (get_total_bounces(ps.packed_bounces_flags) == 0u) {
-			if (roughness < MAX_DENOISER_SPECULAR_HIT_THRESHOLD) {
+			if (dbg.roughness < MAX_DENOISER_SPECULAR_HIT_THRESHOLD) {
 				ps.packed_bounces_flags = inc_total_bounce(ps.packed_bounces_flags);
 				ps.radiance = vec3(0.1, 0.1, 0.4);
 				ps.hit_t = gl_HitTEXT;
-				ps.offset_normal = final_normal;
-				ps.next_ray_dir = reflect(gl_WorldRayDirectionEXT, final_normal);
+				ps.offset_normal = dbg.normal;
+				ps.next_ray_dir = reflect(gl_WorldRayDirectionEXT, dbg.normal);
 				path_pack(payload, ps);
 				return;
 			} else {
@@ -429,29 +484,15 @@ void debug_visualize(
 			}
 			ps.radiance = color;
 		}
-	} else if (vis_mode == 14) {
-		ps.radiance = vec3(metalness);
-	} else if (vis_mode == 15) {
-		ps.radiance = vec3(roughness);
-	} else if (vis_mode == 16) {
-		mat3 world_to_view = mat3(scene_data_block.data.inv_view_matrix);
-		ps.radiance = normalize(world_to_view * final_normal) * 0.5 + 0.5;
-	} else if (vis_mode == 17) {
-		vec3 diffuse_albedo = DLSSRR_computeDiffuseAlbedo(albedo, metalness);
-		vec3 specular_albedo = DLSSRR_computeSpecularAlbedo(albedo, metalness, specular_to_f0(specular), roughness, NdotV);
-		ps.radiance = mix(diffuse_albedo, specular_albedo, metalness);
-	} else if (vis_mode == 18) {
-		ps.radiance = baseColorToSpecularF0(albedo, metalness, specular_to_f0(specular));
-	} else if (vis_mode == 19) {
-		ps.radiance = is_front_face ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
-	} else if (vis_mode == 20) {
-		float depth_range = scene_data_block.data.z_far - scene_data_block.data.z_near;
-		float d = clamp(gl_HitTEXT / depth_range, 0.0, 1.0);
-		ps.radiance = vec3(d);
-	} else if (vis_mode == 21) {
-		ps.radiance = emissive;
 	} else if (vis_mode == RT_VIS_DIRECTIONAL_SHADOW_BLOCKER) {
-		ps.radiance = debug_directional_shadow_blocker(geometry_normal);
+		ps.radiance = debug_directional_shadow_blocker(dbg.geometry_normal);
+	} else if (vis_mode == RT_VIS_DYNAMIC_GEOMETRY) {
+		vec3 color = debug_dynamic_geometry(geometries[RT_HIT_GEOMETRY_IDX].debug_state, dbg.albedo, dbg.NdotV);
+		if ((ps.packed_bounces_flags & PEEL_RAY_FLAG) != 0u) {
+			debug_dynamic_geometry_peel(ps, color, alpha);
+			return;
+		}
+		ps.radiance = color;
 	} else if (vis_mode == RT_VIS_VOLUMETRIC_FOG || vis_mode == RT_VIS_VOLUMETRIC_FOG_TRANSMITTANCE) {
 		vec3 world_hit = gl_WorldRayOriginEXT + gl_WorldRayDirectionEXT * gl_HitTEXT;
 		ps.radiance = rt_volumetric_fog_debug(vis_mode, rt_volumetric_fog_at(world_hit, rt_world_to_view(world_hit)));
@@ -474,14 +515,10 @@ void debug_visualize(
 		// where the cheaper Layer-1 clamp could not catch the bump and the
 		// biased Layer-2 mirror had to step in. Raise
 		// RT_SHADING_NORMAL_CLAMP_THRESHOLD if yellow/red dominate.
-		MaterialProperties dbg_mat;
-		dbg_mat.baseColor = albedo;
-		dbg_mat.metalness = metalness;
-		dbg_mat.roughness = roughness;
-		dbg_mat.dielectricF0 = specular_to_f0(specular);
-		dbg_mat.emissive = vec3(0.0);
-		dbg_mat.transmissivness = 0.0;
-		dbg_mat.opacity = 1.0;
+		vec3 final_normal = dbg.normal;
+		vec3 geometry_normal = dbg.geometry_normal;
+		MaterialProperties dbg_mat = material_properties(dbg.albedo, dbg.metallic, dbg.roughness, dbg.specular,
+				vec3(0.0), materials[RT_HIT_GEOMETRY_IDX].flags, dbg.NdotV);
 
 		vec3 dbg_dir;
 		vec3 dbg_weight;
@@ -531,23 +568,10 @@ bool surface_is_unshaded(uint geometry_idx) {
 #endif
 }
 
-MaterialProperties material_properties_from_result(MaterialResult m) {
-	MaterialProperties material;
-	material.baseColor = m.albedo;
-	material.metalness = m.metalness;
-	material.roughness = m.roughness;
-	material.dielectricF0 = specular_to_f0(m.specular);
-	material.emissive = m.emissive;
-	material.transmissivness = 0.0;
-	material.opacity = 1.0;
-	return material;
-}
-
 /// Ambient and reflection lighting for max_bounces == 0, which never traces the
 /// sky. Mirrors the rasterizer (scene_forward_clustered.glsl): ambient source,
-/// sky contribution, reflection source and specular occlusion. The DFG lookup
-/// texture is not bound here, so envBRDFApprox stands in for it.
-vec3 ambient_approx(vec3 N, vec3 V, MaterialProperties material) {
+/// sky contribution, reflection source, specular occlusion and DFG weighting.
+vec3 ambient_approx(vec3 N, vec3 V, MaterialResult m, MaterialProperties material) {
 	uint flags = scene_data_block.data.flags;
 	vec4 ambient_color_energy = scene_data_block.data.ambient_light_color_energy;
 	float sky_scale = scene_data_block.data.IBL_exposure_normalization * ambient_color_energy.a;
@@ -572,8 +596,15 @@ vec3 ambient_approx(vec3 N, vec3 V, MaterialProperties material) {
 		float reflective_f = (1.0 - roughness) * material.metalness;
 		specular_occlusion = max(min(reflective_f * specular_occlusion * 10.0, 1.0), specular_occlusion);
 
-		vec3 specular_f0 = baseColorToSpecularF0(material.baseColor, material.metalness, material.dielectricF0);
-		specular *= specular_occlusion * envBRDFApprox(specular_f0, roughness, max(dot(N, V), 1e-4));
+		specular *= specular_occlusion;
+		if (material.diffuseMode == GODOT_DIFFUSE_TOON) {
+			specular *= m.specular * material.metalness * material.baseColor * 2.0;
+		} else {
+			vec3 f0 = baseColorToSpecularF0(material.baseColor, material.metalness, material.dielectricF0);
+			vec2 env_brdf = rt_prefiltered_dfg(roughness, clamp(dot(N, V), 0.0001, 1.0));
+			float f90 = clamp(50.0 * f0.g, material.metalness, 1.0);
+			specular *= material.energyCompensation * ((f90 - f0) * env_brdf.x + f0 * env_brdf.y);
+		}
 	}
 
 	return baseColorToDiffuseReflectance(material.baseColor, material.metalness) * ambient + specular;
@@ -584,17 +615,17 @@ vec3 shade_local_surface(HitData h, MaterialResult m, vec3 N, vec3 V, bool p_is_
 		return m.albedo + m.emissive;
 	}
 	vec3 lit = m.emissive;
-	MaterialProperties material = material_properties_from_result(m);
+	MaterialProperties material = material_properties_from_result(h, m, N, V);
 	uint light_count = uint(get_rt_param(RT_PARAM_LIGHT_COUNT));
 	vec3 hit_pos_offset = offset_ray_origin(h.hit_pos, h.geometry_normal);
 	uint layers = geometries[h.geometry_idx].layers;
 	if (RT_GET_MAX_BOUNCES() == 0u) {
 		// Direct only: one ray per light group, plus the rasterizer's ambient.
-		lit += lights_evaluate_direct_lighting_per_group(hit_pos_offset, N, V, material, m.backlight,
+		lit += lights_evaluate_direct_lighting_per_group(hit_pos_offset, N, V, material,
 				rng_state, p_is_indirect, light_count, layers);
-		lit += ambient_approx(N, V, material);
+		lit += ambient_approx(N, V, m, material);
 	} else {
-		lit += lights_evaluate_direct_lighting(hit_pos_offset, N, V, material, m.backlight,
+		lit += lights_evaluate_direct_lighting(hit_pos_offset, N, V, material,
 				rng_state, p_is_indirect, light_count, layers);
 	}
 	return lit;
@@ -610,7 +641,7 @@ bool sample_surface_continuation(HitData h, MaterialResult m, vec3 N, vec3 V, in
 		return false;
 	}
 
-	MaterialProperties material = material_properties_from_result(m);
+	MaterialProperties material = material_properties_from_result(h, m, N, V);
 	vec3 specular_f0 = baseColorToSpecularF0(material.baseColor, material.metalness, material.dielectricF0);
 	vec3 diffuse_reflectance = baseColorToDiffuseReflectance(material.baseColor, material.metalness);
 	float specular_lum = luminance(specular_f0);
@@ -708,10 +739,12 @@ void shade_and_bounce(HitData h, MaterialResult m) {
 			}
 
 			// Dominant surface: the first peel layer on the primary segment
-			// with alpha >= 0.5 owns depth/velocity and blends into RR guides.
-			// depth_draw_always owns depth regardless of its alpha.
+			// with alpha >= the dominant layer alpha owns depth/velocity and
+			// blends into RR guides. depth_draw_always owns depth regardless of its alpha.
+			float dominant_alpha = get_rt_param(RT_PARAM_TRANSPARENCY_DOMINANT_LAYER_ALPHA);
 			if (get_total_bounces(ps.packed_bounces_flags) == 0u && is_sample_zero(ps.packed_bounces_flags) &&
-					(ps.packed_bounces_flags & PEEL_FIRST_LAYER_FLAG) != 0u && (depth_barrier || peel_alpha >= 0.5)) {
+					(ps.packed_bounces_flags & PEEL_FIRST_LAYER_FLAG) != 0u &&
+					(depth_barrier || (dominant_alpha > 0.0 && peel_alpha >= dominant_alpha))) {
 				rt_store_ndc_depth(h.hit_pos);
 				rt_store_velocity(h.hit_pos);
 #ifdef DLSS_RR_ENABLED
@@ -724,7 +757,7 @@ void shade_and_bounce(HitData h, MaterialResult m) {
 				vec3 blended_n = normalize(mix(prev_nr.xyz, N, guide_alpha));
 				imageStore(dlss_rr_normal_roughness, peel_pixel, vec4(blended_n, mix(prev_nr.w, m.roughness, guide_alpha)));
 				vec3 layer_specular = DLSSRR_computeSpecularAlbedo(
-						m.albedo, m.metalness, specular_to_f0(m.specular), m.roughness, NdotV);
+						m.albedo, m.metalness, material_specular_to_f0(m.specular), m.roughness, NdotV);
 				vec4 prev_specular = imageLoad(dlss_rr_specular_albedo, peel_pixel);
 				imageStore(dlss_rr_specular_albedo, peel_pixel,
 						vec4(mix(prev_specular.rgb, clamp(layer_specular, vec3(0.04), vec3(1.0)), guide_alpha), 1.0));
@@ -778,9 +811,6 @@ void shade_and_bounce(HitData h, MaterialResult m) {
 	ps.radiance += ps.throughput * shade_local_surface(
 			h, m, N, V, diffuse_bounces > 0u, ps.rng_state);
 
-	// BRDF material setup.
-	MaterialProperties brdf_mat = material_properties_from_result(m);
-
 	// =================================================================
 	// DLSS Ray Reconstruction output (primary ray, sample 0 only)
 	// =================================================================
@@ -791,7 +821,7 @@ void shade_and_bounce(HitData h, MaterialResult m) {
 		vec3 diffuse_albedo = DLSSRR_encodeDiffuseAlbedo(DLSSRR_computeDiffuseAlbedo(m.albedo, m.metalness));
 		imageStore(dlss_rr_diffuse_albedo, pixel, vec4(diffuse_albedo, 1.0));
 
-		vec3 specular_albedo = DLSSRR_computeSpecularAlbedo(m.albedo, m.metalness, brdf_mat.dielectricF0, m.roughness, NdotV);
+		vec3 specular_albedo = DLSSRR_computeSpecularAlbedo(m.albedo, m.metalness, material_specular_to_f0(m.specular), m.roughness, NdotV);
 		imageStore(dlss_rr_specular_albedo, pixel, vec4(clamp(specular_albedo, vec3(0.04), vec3(1.0)), 1.0)); // match UNORM8 like before - fixes some issues with garbling..
 
 		imageStore(dlss_rr_normal_roughness, pixel, vec4(N, m.roughness));

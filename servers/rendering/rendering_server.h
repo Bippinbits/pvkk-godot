@@ -567,6 +567,15 @@ public:
 	virtual void light_set_reverse_cull_face_mode(RID p_light, bool p_enabled) = 0;
 	virtual void light_set_shadow_caster_mask(RID p_light, uint32_t p_caster_mask) = 0;
 
+	enum LightShadowRenderer {
+		LIGHT_SHADOW_RENDERER_RASTERIZER = 1,
+		LIGHT_SHADOW_RENDERER_PATH_TRACER = 2,
+		LIGHT_SHADOW_RENDERER_ALL = LIGHT_SHADOW_RENDERER_RASTERIZER | LIGHT_SHADOW_RENDERER_PATH_TRACER,
+	};
+
+	/// Renderers that draw this light's shadow while light_set_shadow() is enabled; a LightShadowRenderer bitfield.
+	virtual void light_set_shadow_renderers(RID p_light, BitField<LightShadowRenderer> p_renderers) = 0;
+
 	enum LightBakeMode {
 		LIGHT_BAKE_DISABLED,
 		LIGHT_BAKE_STATIC,
@@ -1114,6 +1123,14 @@ public:
 		VIEWPORT_RENDER_INFO_RT_BLAS_REFITS,
 		VIEWPORT_RENDER_INFO_RT_TRIANGLES_BUILT,
 		VIEWPORT_RENDER_INFO_RT_TRIANGLES_REFIT,
+		VIEWPORT_RENDER_INFO_RT_DYNAMIC_REBAKES,
+		VIEWPORT_RENDER_INFO_RT_DYNAMIC_REBAKE_VERTICES,
+		VIEWPORT_RENDER_INFO_RT_CAPTURED_MESHES,
+		VIEWPORT_RENDER_INFO_RT_CAPTURED_VERTICES,
+		VIEWPORT_RENDER_INFO_RT_DYNAMIC_UPDATED,
+		VIEWPORT_RENDER_INFO_RT_DYNAMIC_HELD,
+		VIEWPORT_RENDER_INFO_RT_DYNAMIC_BUDGET_LIMITED,
+		VIEWPORT_RENDER_INFO_RT_PENDING_SURFACES,
 		VIEWPORT_RENDER_INFO_MAX,
 	};
 
@@ -1836,6 +1853,17 @@ public:
 	};
 
 	virtual uint64_t get_rendering_info(RenderingInfo p_info) = 0;
+
+	enum RenderingNotReadyReason {
+		RENDERING_NOT_READY_PIPELINE_COMPILATION = 1 << 0,
+		RENDERING_NOT_READY_RT_SHADER_COMPILATION = 1 << 1,
+		RENDERING_NOT_READY_RT_PENDING_SURFACES = 1 << 2,
+		RENDERING_NOT_READY_RT_STALE_GEOMETRY = 1 << 3,
+	};
+
+	/// Why the last drawn frame may differ from a fully converged one; empty when output is final.
+	virtual BitField<RenderingNotReadyReason> get_rendering_not_ready_reasons() = 0;
+
 	virtual String get_video_adapter_name() const = 0;
 	virtual String get_video_adapter_vendor() const = 0;
 	virtual RenderingDevice::DeviceType get_video_adapter_type() const = 0;
@@ -1973,6 +2001,7 @@ VARIANT_ENUM_CAST(RenderingServer::MultimeshTransformFormat);
 VARIANT_ENUM_CAST(RenderingServer::MultimeshPhysicsInterpolationQuality);
 VARIANT_ENUM_CAST(RenderingServer::LightType);
 VARIANT_ENUM_CAST(RenderingServer::LightParam);
+VARIANT_BITFIELD_CAST(RenderingServer::LightShadowRenderer);
 VARIANT_ENUM_CAST(RenderingServer::LightBakeMode);
 VARIANT_ENUM_CAST(RenderingServer::LightOmniShadowMode);
 VARIANT_ENUM_CAST(RenderingServer::LightDirectionalShadowMode);
@@ -2039,6 +2068,7 @@ VARIANT_ENUM_CAST(RenderingServer::CanvasLightShadowFilter);
 VARIANT_ENUM_CAST(RenderingServer::CanvasOccluderPolygonCullMode);
 VARIANT_ENUM_CAST(RenderingServer::GlobalShaderParameterType);
 VARIANT_ENUM_CAST(RenderingServer::RenderingInfo);
+VARIANT_BITFIELD_CAST(RenderingServer::RenderingNotReadyReason);
 VARIANT_ENUM_CAST(RenderingServer::SplashStretchMode);
 VARIANT_ENUM_CAST(RenderingServer::CanvasTextureChannel);
 VARIANT_ENUM_CAST(RenderingServer::BakeChannels);

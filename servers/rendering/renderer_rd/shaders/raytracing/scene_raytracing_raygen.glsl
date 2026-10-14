@@ -111,9 +111,13 @@ void main() {
 			scene_data_block.data.inv_view_matrix[2],
 			vec4(0.0, 0.0, 0.0, 1.0)));
 
+	// Orthogonal cameras shoot parallel rays from the near plane; perspective ones fan out from the eye.
+	const bool orthogonal = scene_data_block.data.projection_matrix[3][3] != 0.0;
 	vec4 target = scene_data_block.data.inv_projection_matrix * vec4(d.x, d.y, 1.0, 1.0);
-	vec4 origin = inv_view * vec4(0.0, 0.0, 0.0, 1.0);
-	vec4 direction = inv_view * vec4(normalize(target.xyz), 0);
+	vec3 view_origin = orthogonal ? vec3(target.xy / target.w, 0.0) : vec3(0.0);
+	vec3 view_direction = orthogonal ? vec3(0.0, 0.0, -1.0) : normalize(target.xyz);
+	vec4 origin = inv_view * vec4(view_origin, 1.0);
+	vec4 direction = inv_view * vec4(view_direction, 0.0);
 
 	// Depth composite against a co-tenant viewport (reverse-Z clear is 0.0): primary rays
 	// stop at its depth, and on a primary miss its color/velocity/guides win the pixel.
@@ -127,7 +131,7 @@ void main() {
 		composite_prepass_depth = texelFetch(sampler2D(prepass_depth_texture, SAMPLER_NEAREST_CLAMP), ivec2(pixel), 0).r;
 		if (composite_prepass_depth > 0.0) {
 			vec4 prepass_pos = scene_data_block.data.inv_projection_matrix * vec4(d.x, d.y, composite_prepass_depth, 1.0);
-			composite_t_max = length(prepass_pos.xyz / prepass_pos.w);
+			composite_t_max = length(prepass_pos.xyz / prepass_pos.w - view_origin);
 		}
 	}
 
@@ -190,9 +194,7 @@ void main() {
 					get_rt_param(RT_PARAM_MAX_TRANSPARENCY_LAYERS) > 0.0 &&
 					bounce <= uint(get_rt_param(RT_PARAM_TRANSPARENCY_MAX_BOUNCE));
 #ifdef RT_DEBUG_ENABLED
-			// The transparency heatmap (VIS 23) needs the traces to run.
-			int vm_gate = int(get_rt_param(RT_PARAM_VIS_MODE));
-			transparency_enabled = transparency_enabled && (vm_gate == 0 || vm_gate == 23);
+			transparency_enabled = transparency_enabled && rt_debug_keeps_transparency(int(get_rt_param(RT_PARAM_VIS_MODE)));
 #endif
 			if (transparency_enabled) {
 				// SCENE_DEPTH for peel hits: NDC depth of this segment's opaque
@@ -326,7 +328,7 @@ void main() {
 	}
 
 #ifdef RT_DEBUG_ENABLED
-	if (int(get_rt_param(RT_PARAM_VIS_MODE)) == 23) {
+	if (int(get_rt_param(RT_PARAM_VIS_MODE)) == RT_VIS_TRANSPARENCY_LAYERS) {
 		// Transparency cost heatmap: green 0 -> yellow 2 -> red 4+.
 		float heat_x = clamp(float(debug_tlayers) * 0.25, 0.0, 1.0);
 		vec3 heat = (heat_x < 0.5) ? mix(vec3(0.0, 1.0, 0.0), vec3(1.0, 1.0, 0.0), heat_x * 2.0)
@@ -623,6 +625,13 @@ vec3 radiance_octmap_sample(vec2 p_oct_uv, float p_roughness) {
 
 #endif // USE_RADIANCE_OCTMAP_ARRAY
 
+layout(set = 0, binding = 39) uniform texture2D rt_dfg;
+
+// Same lookup as raster prefiltered_dfg(); the roughness axis is inverted.
+vec2 rt_prefiltered_dfg(float p_roughness, float p_NdotV) {
+	return textureLod(sampler2D(rt_dfg, SAMPLER_LINEAR_CLAMP), vec2(p_NdotV, 1.0 - p_roughness), 0.0).xy;
+}
+
 // clang-format off
 #include "raytracing_material_eval_inc.glsl"
 #include "raytracing_closest_hit_common_inc.glsl"
@@ -676,8 +685,8 @@ void main() {
 	vec3 world_bitangent = normalize(view_to_world * binormal);
 
 	// Apply normal map if it was written.
+	vec3 ts_normal = vec3(0.0, 0.0, 1.0);
 	if (normal_map != vec3(0.5, 0.5, 1.0)) {
-		vec3 ts_normal;
 		ts_normal.xy = normal_map.xy * 2.0 - 1.0;
 		ts_normal.z = sqrt(max(0.0, 1.0 - dot(ts_normal.xy, ts_normal.xy)));
 		vec3 mapped = world_tangent * ts_normal.x + world_bitangent * ts_normal.y + m.normal * ts_normal.z;
@@ -695,11 +704,7 @@ void main() {
 		int VIS_MODE = int(get_rt_param(RT_PARAM_VIS_MODE));
 		// VIS 23 (transparency heatmap) shades normally; raygen overrides the image.
 		if (VIS_MODE != 0 && VIS_MODE != 23) {
-			vec3 V = -gl_WorldRayDirectionEXT;
-			float NdotV = max(dot(m.normal, V), 0.0001);
-			vec3 orm = vec3(1.0, m.roughness, m.metalness);
-			debug_visualize(VIS_MODE, h.is_front_face, h.geometry_normal, m.normal, normal_map,
-					world_tangent, world_bitangent, h.uv, m.albedo, orm, m.metalness, m.roughness, m.specular, m.emissive, V, NdotV);
+			debug_visualize(VIS_MODE, debug_material_inputs(h, m, ts_normal, world_tangent, world_bitangent, h.uv, ao), m.alpha);
 			return;
 		}
 	}
@@ -728,15 +733,11 @@ void main() {
 	// Texture sampling.
 	vec4 albedo_tex = material_uv_sample(mat.albedo_texture_idx, muv, mat.flags);
 	vec3 albedo = albedo_tex.rgb * mat.albedo_color.rgb;
-	vec3 orm = material_uv_sample(mat.orm_texture_idx, muv, mat.flags).rgb;
-	float roughness = saturate(orm.g * mat.roughness);
-	float metalness = saturate(orm.b * mat.metallic);
+	vec2 roughness_metallic = material_roughness_metallic(mat, muv);
+	float roughness = roughness_metallic.x;
+	float metalness = roughness_metallic.y;
 
-	vec3 emissive = vec3(0.0);
-	if ((mat.flags & RT_MAT_FLAG_HAS_EMISSION_TEX) != 0u) {
-		emissive = material_uv_sample(mat.emission_texture_idx, muv, mat.flags).rgb * mat.emission_color * mat.emission_strength;
-		emissive *= scene_data_block.data.emissive_exposure_normalization;
-	}
+	vec3 emissive = material_emission(mat, muv, h.uv2, h.hit_pos, h.geometry_normal) * scene_data_block.data.emissive_exposure_normalization;
 
 	// Build MaterialResult.
 	MaterialResult m;
@@ -781,11 +782,8 @@ void main() {
 		int VIS_MODE = int(get_rt_param(RT_PARAM_VIS_MODE));
 		// VIS 23 (transparency heatmap) shades normally; raygen overrides the image.
 		if (VIS_MODE != 0 && VIS_MODE != 23) {
-			vec3 V = -gl_WorldRayDirectionEXT;
-			float NdotV = max(dot(m.normal, V), 0.0001);
 			vec2 debug_uv = muv.triplanar ? muv.triplanar_pos.xy : muv.uv;
-			debug_visualize(VIS_MODE, h.is_front_face, h.geometry_normal, m.normal, tangent_space_normal,
-					h.tangent, h.bitangent, debug_uv, m.albedo, vec3(orm.r, m.roughness, m.metalness), m.metalness, m.roughness, m.specular, m.emissive, V, NdotV);
+			debug_visualize(VIS_MODE, debug_material_inputs(h, m, tangent_space_normal, h.tangent, h.bitangent, debug_uv, material_ao(mat, muv)), m.alpha);
 			return;
 		}
 	}
@@ -871,7 +869,7 @@ void main() {
 
 	float hit_alpha = 1.0;
 	vec3 hit_tint = vec3(1.0);
-	float scissor_threshold = 0.0;
+	float scissor_threshold = -1.0;
 
 #ifdef RT_CUSTOM_HIT_GROUP
 	// Compute hit data inline (cannot include closest_hit_common_inc here).
@@ -890,10 +888,8 @@ void main() {
 	vec3 rt_tangent = normalize(normal_matrix * ah_tbn.tangent);
 	vec3 rt_bitangent = cross(rt_normal, rt_tangent) * ah_tbn.bitangent_sign;
 
-	bool rt_front_face = (dot(rt_normal, -gl_WorldRayDirectionEXT) > 0.0);
-	if (!rt_front_face) {
-		rt_normal = -rt_normal;
-	}
+	bool rt_front_face = rt_triangle_front_facing(geom);
+	rt_normal = rt_side_checked_normal(geom, rt_normal, rt_front_face);
 
 	vec3 rt_hit_pos = gl_WorldRayOriginEXT + gl_WorldRayDirectionEXT * gl_HitTEXT;
 	vec4 rt_color = fetch_color(geom, i0, i1, i2, bary);
@@ -926,7 +922,7 @@ void main() {
 		hit_tint = clamp(hit_tint / hit_alpha, vec3(0.0), vec3(1.0));
 	}
 
-	if (scissor_threshold > 0.0) {
+	if (scissor_threshold >= 0.0) {
 		if (hit_alpha < scissor_threshold) {
 			ignoreIntersectionEXT;
 		}

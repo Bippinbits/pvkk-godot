@@ -1089,6 +1089,7 @@ public:
 
 	virtual void mesh_generate_pipelines(RID p_mesh, bool p_background_compilation);
 	virtual uint32_t get_pipeline_compilations(RS::PipelineSource p_source);
+	virtual BitField<RS::RenderingNotReadyReason> get_not_ready_reasons();
 
 	_FORCE_INLINE_ void _update_instance(Instance *p_instance) const;
 	_FORCE_INLINE_ void _update_instance_aabb(Instance *p_instance) const;
@@ -1174,6 +1175,8 @@ public:
 	void _scene_cull_threaded(uint32_t p_thread, CullData *cull_data);
 	void _scene_cull(CullData &cull_data, InstanceCullResult &cull_result, uint64_t p_from, uint64_t p_to);
 	static void _scene_particles_set_view_axis(RID p_particles, const Vector3 &p_axis, const Vector3 &p_up_axis);
+	// Requests simulation and view sorting for a visible particle system. Returns false when it is inactive.
+	bool _scene_particles_request_process(CullData &p_cull_data, RID p_particles);
 	_FORCE_INLINE_ bool _visibility_parent_check(const CullData &p_cull_data, const InstanceData &p_instance_data);
 
 	bool _render_reflection_probe_step(Instance *p_instance, int p_step);

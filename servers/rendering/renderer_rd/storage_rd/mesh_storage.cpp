@@ -261,6 +261,12 @@ void MeshStorage::mesh_set_blend_shape_count(RID p_mesh, int p_blend_shape_count
 }
 
 /// Returns stride
+// Creation and updates share one monotonic counter, so a new surface never reuses a value an older surface held.
+static uint32_t _next_rt_invalidation_counter() {
+	static uint32_t next = 1;
+	return next++;
+}
+
 void MeshStorage::mesh_add_surface(RID p_mesh, const RS::SurfaceData &p_surface) {
 	Mesh *mesh = mesh_owner.get_or_null(p_mesh);
 	ERR_FAIL_NULL(mesh);
@@ -370,9 +376,8 @@ void MeshStorage::mesh_add_surface(RID p_mesh, const RS::SurfaceData &p_surface)
 	}
 #endif
 
-	static uint32_t s_next_rt_invalidation_counter = 1; // Monotonic counter is required so that new surfaces are also invalidated.
 	Mesh::Surface *s = memnew(Mesh::Surface);
-	s->rt_invalidation_counter = s_next_rt_invalidation_counter++;
+	s->rt_invalidation_counter = _next_rt_invalidation_counter();
 
 	s->format = new_surface.format;
 	s->primitive = new_surface.primitive;
@@ -597,7 +602,7 @@ void MeshStorage::mesh_surface_update_vertex_region(RID p_mesh, int p_surface, i
 	RD::get_singleton()->buffer_update(mesh->surfaces[p_surface]->vertex_buffer, p_offset, data_size, r);
 
 	// Invalidate RT cache for this surface.
-	mesh->surfaces[p_surface]->rt_invalidation_counter++;
+	mesh->surfaces[p_surface]->rt_invalidation_counter = _next_rt_invalidation_counter();
 }
 
 void MeshStorage::mesh_surface_update_attribute_region(RID p_mesh, int p_surface, int p_offset, const Vector<uint8_t> &p_data) {
@@ -613,7 +618,7 @@ void MeshStorage::mesh_surface_update_attribute_region(RID p_mesh, int p_surface
 	RD::get_singleton()->buffer_update(mesh->surfaces[p_surface]->attribute_buffer, p_offset, data_size, r);
 
 	// Invalidate RT cache for this surface (attributes include UVs).
-	mesh->surfaces[p_surface]->rt_invalidation_counter++;
+	mesh->surfaces[p_surface]->rt_invalidation_counter = _next_rt_invalidation_counter();
 }
 
 void MeshStorage::mesh_surface_update_skin_region(RID p_mesh, int p_surface, int p_offset, const Vector<uint8_t> &p_data) {
@@ -629,7 +634,7 @@ void MeshStorage::mesh_surface_update_skin_region(RID p_mesh, int p_surface, int
 	RD::get_singleton()->buffer_update(mesh->surfaces[p_surface]->skin_buffer, p_offset, data_size, r);
 
 	// Invalidate RT cache for this surface (skinned meshes need BLAS rebuild).
-	mesh->surfaces[p_surface]->rt_invalidation_counter++;
+	mesh->surfaces[p_surface]->rt_invalidation_counter = _next_rt_invalidation_counter();
 }
 
 void RendererRD::MeshStorage::mesh_surface_update_index_region(RID p_mesh, int p_surface, int p_offset, const Vector<uint8_t> &p_data) {
@@ -645,7 +650,7 @@ void RendererRD::MeshStorage::mesh_surface_update_index_region(RID p_mesh, int p
 	RD::get_singleton()->buffer_update(mesh->surfaces[p_surface]->index_buffer, p_offset, data_size, r);
 
 	// Invalidate RT cache for this surface.
-	mesh->surfaces[p_surface]->rt_invalidation_counter++;
+	mesh->surfaces[p_surface]->rt_invalidation_counter = _next_rt_invalidation_counter();
 }
 
 void MeshStorage::mesh_surface_set_material(RID p_mesh, int p_surface, RID p_material) {

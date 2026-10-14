@@ -153,6 +153,12 @@
 #include "tests/scene/test_viewport.h"
 #include "tests/scene/test_visual_shader.h"
 #include "tests/scene/test_window.h"
+#ifdef RD_ENABLED
+#include "tests/servers/rendering/test_render_raytracing.h"
+#include "tests/servers/rendering/test_render_raytracing_capture.h"
+#include "tests/servers/rendering/test_render_raytracing_scheduler.h"
+#endif
+#include "tests/servers/rendering/test_rendering_billboard.h"
 #include "tests/servers/rendering/test_shader_preprocessor.h"
 #include "tests/servers/test_nav_heap.h"
 #include "tests/servers/test_text_server.h"

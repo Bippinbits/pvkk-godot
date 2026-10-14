@@ -64,6 +64,7 @@ public:
 
 	virtual void mesh_generate_pipelines(RID p_mesh, bool p_background_compilation) = 0;
 	virtual uint32_t get_pipeline_compilations(RS::PipelineSource p_source) = 0;
+	virtual BitField<RS::RenderingNotReadyReason> get_not_ready_reasons() { return 0; }
 
 	/* SDFGI UPDATE */
 

@@ -318,6 +318,16 @@ uint64_t RenderingServerDefault::get_rendering_info(RenderingInfo p_info) {
 	return RSG::utilities->get_rendering_info(p_info);
 }
 
+BitField<RenderingServer::RenderingNotReadyReason> RenderingServerDefault::get_rendering_not_ready_reasons() {
+	if (Thread::get_caller_id() != server_thread) {
+		BitField<RenderingNotReadyReason> ret;
+		command_queue.push_and_ret(RSG::scene, &RenderingMethod::get_not_ready_reasons, &ret);
+		return ret;
+	}
+	command_queue.flush_if_pending();
+	return RSG::scene->get_not_ready_reasons();
+}
+
 RenderingDevice::DeviceType RenderingServerDefault::get_video_adapter_type() const {
 	return RSG::utilities->get_video_adapter_type();
 }

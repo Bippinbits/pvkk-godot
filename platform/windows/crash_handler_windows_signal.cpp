@@ -223,3 +223,7 @@ void CrashHandler::initialize() {
 	signal(SIGILL, CrashHandlerException);
 #endif
 }
+
+void CrashHandler::reassert() {
+	// Signal handlers are per CRT; third-party DLLs cannot replace them.
+}

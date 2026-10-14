@@ -38,6 +38,7 @@
 #include "core/io/image.h"
 #include "renderer_compositor_rd.h"
 #include "servers/rendering/renderer_rd/environment/fog.h"
+#include "servers/rendering/renderer_rd/pipeline_hash_map_rd.h"
 #include "servers/rendering/renderer_rd/shaders/decal_data_inc.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/light_data_inc.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/scene_data_inc.glsl.gen.h"
@@ -1727,6 +1728,14 @@ RendererSceneRenderRD *RendererSceneRenderRD::singleton = nullptr;
 
 bool RendererSceneRenderRD::is_vrs_supported() const {
 	return RD::get_singleton()->has_feature(RD::SUPPORTS_ATTACHMENT_VRS);
+}
+
+BitField<RS::RenderingNotReadyReason> RendererSceneRenderRD::get_not_ready_reasons() {
+	BitField<RS::RenderingNotReadyReason> reasons = 0;
+	if (pipeline_hash_map_rd_compilations_in_flight.get() > 0) {
+		reasons.set_flag(RS::RENDERING_NOT_READY_PIPELINE_COMPILATION);
+	}
+	return reasons;
 }
 
 bool RendererSceneRenderRD::is_dynamic_gi_supported() const {

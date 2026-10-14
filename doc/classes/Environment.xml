@@ -569,6 +569,10 @@
 		<constant name="RT_DEBUG_DECAL_OVERLAP" value="28" enum="PathtracingDebugMode">
 			Shows how many [Decal]s cover each primary hit. Black: none. Green, yellow, orange and red: 1 to 4 decals. Magenta: more than 4, so the bottom-most decals are dropped. Requires [member ProjectSettings.rendering/pathtracing/max_decals] to be greater than [code]0[/code].
 		</constant>
+		<constant name="RT_DEBUG_DYNAMIC_GEOMETRY" value="29" enum="PathtracingDebugMode">
+			Shows which geometry costs per-frame acceleration structure work, over dim grayscale shading. Red: its bottom-level acceleration structure (BLAS) was rebuilt. Yellow: its BLAS was refit. Magenta and blue: the same for a BLAS built or refit from a vertex capture. Faint green: only its transform in the top-level acceleration structure changed this frame. Gray: static.
+			Work done this frame is drawn at full strength. Earlier work fades out over 60 frames, so items updated only on some frames (for example by the dynamic update scheduler) stay visible. Skinned, blend shape, vertex captured, MultiMesh and particle geometry whose last BLAS work was a rebuild fades to dark red (dark magenta when captured) instead of gray and stays so until it is updated again. Transparent layers are peeled as in normal rendering and drawn over what's behind them, with their material alpha clamped to between [code]0.35[/code] and [code]0.75[/code]. Compare with [constant Viewport.RENDER_INFO_RT_BLAS_BUILDS], [constant Viewport.RENDER_INFO_RT_BLAS_REFITS] and [constant Viewport.RENDER_INFO_RT_CAPTURED_MESHES].
+		</constant>
 		<constant name="FOG_MODE_EXPONENTIAL" value="0" enum="FogMode">
 			Use a physically-based fog model defined primarily by fog density.
 		</constant>

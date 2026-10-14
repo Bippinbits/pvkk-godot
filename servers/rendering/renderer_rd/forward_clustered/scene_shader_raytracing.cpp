@@ -38,6 +38,8 @@
 #include "servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.h"
 #include "servers/rendering/renderer_rd/renderer_compositor_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
+#include "servers/rendering/rendering_server_globals.h"
+#include "servers/rendering/shader_types.h"
 #include "servers/rendering/storage/environment_storage.h"
 
 using namespace RendererSceneRenderImplementation;
@@ -448,10 +450,10 @@ void SceneShaderRaytracing::_finalize_uniforms_with_textures(
 	uint32_t raw_uniform_end = 0;
 	for (const KeyValue<StringName, ShaderLanguage::ShaderNode::Uniform> &kv : p_uniforms) {
 		const ShaderLanguage::ShaderNode::Uniform &uu = kv.value;
-		if (ShaderLanguage::is_sampler_type(uu.type) || uu.order < 0 || uu.order >= (int)p_gen_code.uniform_offsets.size()) {
+		if (!is_material_buffer_uniform(uu, p_gen_code.uniform_offsets)) {
 			continue;
 		}
-		uint32_t end = p_gen_code.uniform_offsets[uu.order] + ShaderLanguage::get_datatype_size(uu.type);
+		uint32_t end = p_gen_code.uniform_offsets[uu.order] + material_buffer_uniform_size(uu);
 		if (end > raw_uniform_end) {
 			raw_uniform_end = end;
 		}
@@ -676,6 +678,21 @@ bool SceneShaderRaytracing::is_hg_ready_in_bundle(uint32_t p_slot_index, uint32_
 	return b.live_ready_mask[p_slot_index];
 }
 
+bool SceneShaderRaytracing::is_compiling() {
+	{
+		MutexLock lock(compile_lane.mutex);
+		if (compile_lane.to_be_built != nullptr) {
+			return true;
+		}
+	}
+	for (const KeyValue<uint32_t, PipelineBundle> &kv : pipeline_bundles) {
+		if (kv.value.dirty) {
+			return true;
+		}
+	}
+	return false;
+}
+
 uint32_t SceneShaderRaytracing::compute_rt_flags(RID p_environment, bool p_fog_enabled, bool p_volumetric_fog_enabled) {
 	uint32_t flags = RT_FLAG_NONE;
 	uint32_t sample_count = 1;
@@ -722,6 +739,212 @@ uint32_t SceneShaderRaytracing::compute_rt_flags(RID p_environment, bool p_fog_e
 	}
 
 	return rt_flags_pack(flags, sample_count, max_bounces);
+}
+
+namespace {
+
+using SL = ShaderLanguage;
+
+struct VertexBuiltinDependency {
+	const char *name;
+	uint32_t mask;
+};
+
+// Spatial built-ins readable in vertex() whose value changes between captures.
+const VertexBuiltinDependency vertex_builtin_dependencies[] = {
+	{ "TIME", RTVertexCapture::DEP_TIME },
+	{ "PREV_TIME", RTVertexCapture::DEP_TIME },
+	{ "EXPOSURE", RTVertexCapture::DEP_CAMERA },
+	{ "VIEW_MATRIX", RTVertexCapture::DEP_CAMERA },
+	{ "INV_VIEW_MATRIX", RTVertexCapture::DEP_CAMERA },
+	{ "MAIN_CAM_INV_VIEW_MATRIX", RTVertexCapture::DEP_CAMERA },
+	{ "PROJECTION_MATRIX", RTVertexCapture::DEP_CAMERA },
+	{ "INV_PROJECTION_MATRIX", RTVertexCapture::DEP_CAMERA },
+	{ "VIEWPORT_SIZE", RTVertexCapture::DEP_CAMERA },
+	{ "CAMERA_POSITION_WORLD", RTVertexCapture::DEP_CAMERA },
+	{ "CAMERA_DIRECTION_WORLD", RTVertexCapture::DEP_CAMERA },
+	{ "CAMERA_VISIBLE_LAYERS", RTVertexCapture::DEP_CAMERA },
+	{ "EYE_OFFSET", RTVertexCapture::DEP_CAMERA },
+	{ "VIEW_INDEX", RTVertexCapture::DEP_CAMERA },
+	{ "MODEL_MATRIX", RTVertexCapture::DEP_MODEL_TRANSFORM },
+	{ "MODEL_NORMAL_MATRIX", RTVertexCapture::DEP_MODEL_TRANSFORM },
+	{ "NODE_POSITION_WORLD", RTVertexCapture::DEP_MODEL_TRANSFORM },
+	{ "NODE_POSITION_VIEW", RTVertexCapture::DEP_CAMERA | RTVertexCapture::DEP_MODEL_TRANSFORM },
+	{ "MODELVIEW_MATRIX", RTVertexCapture::DEP_CAMERA | RTVertexCapture::DEP_MODEL_TRANSFORM },
+	{ "MODELVIEW_NORMAL_MATRIX", RTVertexCapture::DEP_CAMERA | RTVertexCapture::DEP_MODEL_TRANSFORM },
+};
+
+uint32_t uniform_scope_dependency(SL::ShaderNode::Uniform::Scope p_scope) {
+	switch (p_scope) {
+		case SL::ShaderNode::Uniform::SCOPE_INSTANCE:
+			return RTVertexCapture::DEP_INSTANCE_UNIFORMS;
+		case SL::ShaderNode::Uniform::SCOPE_GLOBAL:
+			return RTVertexCapture::DEP_GLOBAL_UNIFORMS;
+		default:
+			return RTVertexCapture::DEP_MATERIAL_UNIFORMS;
+	}
+}
+
+// Global uniforms are only type-checked in the editor; unknown ones fail the parse there.
+SL::DataType global_shader_uniform_type(const StringName &p_name) {
+	if (!RSG::material_storage) {
+		return SL::TYPE_MAX;
+	}
+	return SL::DataType(RSE::global_shader_uniform_type_get_shader_datatype(RSG::material_storage->global_shader_parameter_get_type(p_name)));
+}
+
+// Accumulates the dependencies of everything reachable from one entry point of a parsed shader.
+class VertexDependencyCollector {
+	const SL::ShaderNode *shader = nullptr;
+	HashSet<StringName> visited_functions;
+	RTVertexCapture::VertexDependencies dependencies;
+
+	void visit_identifier(const StringName &p_name) {
+		const HashMap<StringName, SL::ShaderNode::Uniform>::ConstIterator uniform = shader->uniforms.find(p_name);
+		if (uniform) {
+			dependencies.mask |= uniform_scope_dependency(uniform->value.scope);
+			if (uniform->value.scope == SL::ShaderNode::Uniform::SCOPE_GLOBAL && !dependencies.global_uniforms.has(p_name)) {
+				dependencies.global_uniforms.push_back(p_name);
+			}
+			return;
+		}
+		const String name = p_name;
+		for (const VertexBuiltinDependency &builtin : vertex_builtin_dependencies) {
+			if (name == builtin.name) {
+				dependencies.mask |= builtin.mask;
+				return;
+			}
+		}
+	}
+
+	void visit_nodes(const Vector<SL::Node *> &p_nodes) {
+		for (const SL::Node *node : p_nodes) {
+			visit(node);
+		}
+	}
+
+	void visit(const SL::Node *p_node) {
+		if (!p_node) {
+			return;
+		}
+		switch (p_node->type) {
+			case SL::Node::NODE_TYPE_BLOCK: {
+				for (const SL::Node *statement : static_cast<const SL::BlockNode *>(p_node)->statements) {
+					visit(statement);
+				}
+			} break;
+			case SL::Node::NODE_TYPE_VARIABLE: {
+				const SL::VariableNode *variable = static_cast<const SL::VariableNode *>(p_node);
+				if (!variable->is_local) {
+					visit_identifier(variable->name);
+				}
+			} break;
+			case SL::Node::NODE_TYPE_VARIABLE_DECLARATION: {
+				for (const SL::VariableDeclarationNode::Declaration &declaration : static_cast<const SL::VariableDeclarationNode *>(p_node)->declarations) {
+					visit(declaration.size_expression);
+					visit_nodes(declaration.initializer);
+				}
+			} break;
+			case SL::Node::NODE_TYPE_CONSTANT: {
+				for (const SL::VariableDeclarationNode::Declaration &declaration : static_cast<const SL::ConstantNode *>(p_node)->array_declarations) {
+					visit_nodes(declaration.initializer);
+				}
+			} break;
+			case SL::Node::NODE_TYPE_OPERATOR: {
+				visit_nodes(static_cast<const SL::OperatorNode *>(p_node)->arguments);
+			} break;
+			case SL::Node::NODE_TYPE_CONTROL_FLOW: {
+				const SL::ControlFlowNode *flow = static_cast<const SL::ControlFlowNode *>(p_node);
+				visit_nodes(flow->expressions);
+				for (const SL::BlockNode *block : flow->blocks) {
+					visit(block);
+				}
+			} break;
+			case SL::Node::NODE_TYPE_MEMBER: {
+				const SL::MemberNode *member = static_cast<const SL::MemberNode *>(p_node);
+				visit(member->owner);
+				visit(member->index_expression);
+				visit(member->assign_expression);
+				visit(member->call_expression);
+			} break;
+			case SL::Node::NODE_TYPE_ARRAY: {
+				const SL::ArrayNode *array = static_cast<const SL::ArrayNode *>(p_node);
+				if (!array->is_local) {
+					visit_identifier(array->name);
+				}
+				visit(array->index_expression);
+				visit(array->call_expression);
+				visit(array->assign_expression);
+			} break;
+			case SL::Node::NODE_TYPE_ARRAY_CONSTRUCT: {
+				visit_nodes(static_cast<const SL::ArrayConstructNode *>(p_node)->initializer);
+			} break;
+			default:
+				break;
+		}
+	}
+
+	void visit_function(const StringName &p_name) {
+		if (visited_functions.has(p_name)) {
+			return;
+		}
+		visited_functions.insert(p_name);
+		// vfunctions, not the functions map, holds the call graph (uses_function).
+		for (const SL::ShaderNode::Function &function : shader->vfunctions) {
+			if (function.name != p_name) {
+				continue;
+			}
+			if (function.function) {
+				visit(function.function->body);
+			}
+			for (const StringName &callee : function.uses_function) {
+				visit_function(callee);
+			}
+			return;
+		}
+	}
+
+public:
+	RTVertexCapture::VertexDependencies collect(const SL::ShaderNode *p_shader, const StringName &p_entry_point) {
+		shader = p_shader;
+		visited_functions.clear();
+		dependencies = RTVertexCapture::VertexDependencies();
+		dependencies.mask = 0;
+		visit_function(p_entry_point);
+		return dependencies;
+	}
+};
+
+RTVertexCapture::VertexDependencies unparsed_vertex_dependencies() {
+	RTVertexCapture::VertexDependencies dependencies;
+	dependencies.mask = RTVertexCapture::DEP_ALL;
+	return dependencies;
+}
+
+} // namespace
+
+RTVertexCapture::VertexDependencies SceneShaderRaytracing::compute_vertex_capture_dependencies(const String &p_code) {
+	const ShaderTypes *types = ShaderTypes::get_singleton();
+	ERR_FAIL_NULL_V(types, unparsed_vertex_dependencies());
+
+	ShaderLanguage::ShaderCompileInfo info;
+	info.functions = types->get_functions(RSE::SHADER_SPATIAL);
+	info.render_modes = types->get_modes(RSE::SHADER_SPATIAL);
+	info.stencil_modes = types->get_stencil_modes(RSE::SHADER_SPATIAL);
+	info.shader_types = types->get_types();
+	info.global_shader_uniform_type_func = global_shader_uniform_type;
+
+	ShaderLanguage parser;
+	if (parser.compile(p_code, info) != OK) {
+		return unparsed_vertex_dependencies();
+	}
+	VertexDependencyCollector collector;
+	RTVertexCapture::VertexDependencies dependencies = collector.collect(parser.get_shader(), SNAME("vertex"));
+	// World-space VERTEX is mapped back through the model transform after vertex().
+	if (parser.get_shader()->render_modes.has(SNAME("world_vertex_coords"))) {
+		dependencies.mask |= RTVertexCapture::DEP_MODEL_TRANSFORM;
+	}
+	return dependencies;
 }
 
 SceneShaderRaytracing *SceneShaderRaytracing::get_singleton() {
@@ -1048,9 +1271,11 @@ SceneShaderRaytracing::PipelineBuildTask *SceneShaderRaytracing::_make_pipeline_
 					"vec4 albedo_tex = sample_material_texture(rt_mat.albedo_texture_idx, mat_uv, rt_mat.flags);\n"
 					"albedo = albedo_tex.rgb * rt_mat.albedo_color.rgb;\n"
 					"alpha = albedo_tex.a * rt_mat.albedo_color.a;\n"
-					"vec3 orm = sample_material_texture(rt_mat.orm_texture_idx, mat_uv, rt_mat.flags).rgb;\n"
-					"roughness = orm.g * rt_mat.roughness;\n"
-					"metallic = orm.b * rt_mat.metallic;\n"
+					"vec2 roughness_metallic = material_roughness_metallic_from_texels(rt_mat,\n"
+					"        sample_material_texture(rt_mat.roughness_texture_idx, mat_uv, rt_mat.flags),\n"
+					"        sample_material_texture(rt_mat.metallic_texture_idx, mat_uv, rt_mat.flags));\n"
+					"roughness = roughness_metallic.x;\n"
+					"metallic = roughness_metallic.y;\n"
 					"if ((rt_mat.flags & 1u) != 0u) {\n"
 					"    normal_map = sample_material_texture(rt_mat.normal_texture_idx, mat_uv, rt_mat.flags).rgb;\n"
 					"    normal_map_depth = rt_mat.normal_map_depth;\n"

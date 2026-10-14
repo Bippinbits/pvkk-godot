@@ -353,6 +353,8 @@ public:
 
 	virtual void sdfgi_set_debug_probe_select(const Vector3 &p_position, const Vector3 &p_dir) override;
 
+	virtual BitField<RS::RenderingNotReadyReason> get_not_ready_reasons() override;
+
 	virtual bool is_vrs_supported() const;
 	virtual bool is_dynamic_gi_supported() const;
 	virtual bool is_volumetric_supported() const;

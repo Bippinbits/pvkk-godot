@@ -47,7 +47,10 @@ class CrashHandler {
 	bool disabled;
 
 public:
+	/// Installs the unhandled exception filter, the abort, pure call and invalid parameter hooks, and the main thread's stack overflow reserve.
 	void initialize();
+	/// Reinstalls the unhandled exception filter. Streamline, NGX and Reflex replace it when they load, some of them lazily.
+	void reassert();
 
 	void disable();
 	bool is_disabled() const { return disabled; }

@@ -521,13 +521,8 @@ private:
 		StringName z_clip_scale;
 		StringName fov_override;
 
-		// Not shader uniforms: triplanar mapping exists only as generated shader
-		// code, so it is mirrored into params for renderers that evaluate this
-		// material analytically instead of running its shader (the pathtracer).
-		StringName rt_uv1_triplanar;
-		StringName rt_uv1_world_triplanar;
-		StringName rt_proximity_fade;
-		StringName rt_distance_fade_mode;
+		// Not a shader uniform: RTBaseMaterialState for the path tracer.
+		StringName rt_base_material_state;
 	};
 
 	static Mutex material_mutex;

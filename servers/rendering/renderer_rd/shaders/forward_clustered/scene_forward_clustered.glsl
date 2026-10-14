@@ -9,6 +9,12 @@
 
 #include "scene_forward_clustered_inc.glsl"
 
+#include "../billboard_inc.glsl"
+
+#ifdef MODE_RT_CAPTURE
+#include "rt_capture_inc.glsl"
+#endif
+
 #define SHADER_IS_SRGB false
 #define SHADER_SPACE_FAR 0.0
 
@@ -447,6 +453,10 @@ void vertex_shader(vec3 vertex_input,
 	float point_size = 1.0;
 #endif
 
+#ifdef BILLBOARD_RENDER_MODE_USED
+	billboard_apply_render_modes(modelview, modelview_normal, read_view_matrix, scene_data.main_cam_inv_view_matrix, inv_view_matrix, projection_matrix, instance_custom, OUTPUT_IS_MULTIVIEW);
+#endif
+
 	{
 #CODE : VERTEX
 	}
@@ -484,6 +494,10 @@ void vertex_shader(vec3 vertex_input,
 	binormal = (read_view_matrix * vec4(binormal, 0.0)).xyz;
 	tangent = (read_view_matrix * vec4(tangent, 0.0)).xyz;
 #endif
+#endif
+
+#ifdef MODE_RT_CAPTURE
+	rt_capture_store(vertex, normal, tangent, binormal, sc_multimesh() && rt_capture_is_non_finite(matrix[3].xyz));
 #endif
 
 	vertex_interp = vertex;
@@ -1100,6 +1114,8 @@ layout(location = 2) out vec2 motion_vector;
 
 #include "../scene_forward_gi_inc.glsl"
 
+#include "../material_inputs_inc.glsl"
+
 #endif //!defined(MODE_RENDER_DEPTH) && !defined(MODE_UNSHADED)
 
 #ifndef MODE_RENDER_DEPTH
@@ -1681,6 +1697,8 @@ void fragment_shader(in SceneData scene_data) {
 	// Used in regular draw pass and when drawing SDFs for SDFGI and materials for VoxelGI.
 	emission *= scene_data.emissive_exposure_normalization;
 #endif
+
+#include "material_debug_capture_inc.glsl"
 
 #if !defined(MODE_RENDER_DEPTH) && !defined(MODE_UNSHADED)
 
@@ -2952,6 +2970,8 @@ void fragment_shader(in SceneData scene_data) {
 	//restore fog
 	fog = vec4(unpackHalf2x16(fog_rg), unpackHalf2x16(fog_ba));
 #endif //!FOG_DISABLED
+
+#include "material_debug_apply_inc.glsl"
 
 #ifdef MODE_SEPARATE_SPECULAR
 

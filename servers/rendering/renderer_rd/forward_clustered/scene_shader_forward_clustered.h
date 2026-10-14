@@ -33,6 +33,8 @@
 #include "../storage_rd/material_storage.h"
 #include "servers/rendering/renderer_rd/pipeline_hash_map_rd.h"
 #include "servers/rendering/renderer_rd/shaders/forward_clustered/scene_forward_clustered.glsl.gen.h"
+#include "servers/rendering/renderer_rd/forward_clustered/render_raytracing_capture.h"
+#include "servers/rendering/rendering_billboard.h"
 
 namespace RendererSceneRenderImplementation {
 
@@ -50,6 +52,7 @@ public:
 		SHADER_GROUP_OIT, // Compiled on first blend_oit material.
 		SHADER_GROUP_OIT_MULTIVIEW,
 		SHADER_GROUP_OIT_UNUSED, // OIT combos that are never requested; never enabled.
+		SHADER_GROUP_RT_CAPTURE, // Path tracer vertex capture; compiled on first capture.
 	};
 
 	// Not an enum because these values are constants that are processed as numbers
@@ -77,6 +80,9 @@ public:
 		SHADER_COLOR_PASS_FLAG_COUNT = 1 << 6
 	};
 
+	// Single variant after the color pass combinations; has no ubershader.
+	static constexpr uint16_t SHADER_VERSION_RT_CAPTURE = ShaderVersion::SHADER_VERSION_COLOR_PASS * 2 + SHADER_COLOR_PASS_FLAG_COUNT;
+
 	enum PipelineVersion {
 		PIPELINE_VERSION_DEPTH_PASS,
 		PIPELINE_VERSION_DEPTH_PASS_DP,
@@ -88,6 +94,7 @@ public:
 		PIPELINE_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_MULTIVIEW,
 		PIPELINE_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_AND_VOXEL_GI_MULTIVIEW,
 		PIPELINE_VERSION_COLOR_PASS,
+		PIPELINE_VERSION_RT_CAPTURE,
 		PIPELINE_VERSION_MAX
 	};
 
@@ -131,11 +138,16 @@ public:
 				uint32_t multimesh_has_color : 1;
 				uint32_t multimesh_has_custom_data : 1;
 				uint32_t fog_use_legacy_blending : 1;
+				uint32_t material_debug_mode : 5; // See material_debug_mode_from_environment().
 			};
 		};
 
 		uint32_t packed_2;
 	};
+
+	/// Raster material debug view for an Environment pathtracing debug mode: the mode itself when
+	/// it only shows material inputs (drawn by material_inputs_inc.glsl), otherwise 0.
+	static uint32_t material_debug_mode_from_environment(int p_pathtracing_debug_mode);
 
 	struct UbershaderConstants {
 		union {
@@ -172,6 +184,21 @@ public:
 			ALPHA_ANTIALIASING_OFF,
 			ALPHA_ANTIALIASING_ALPHA_TO_COVERAGE,
 			ALPHA_ANTIALIASING_ALPHA_TO_COVERAGE_AND_TO_ONE
+		};
+
+		// Light model from the diffuse_* render modes; unset means Lambert, like the rasterizer.
+		enum DiffuseMode {
+			DIFFUSE_LAMBERT,
+			DIFFUSE_BURLEY,
+			DIFFUSE_LAMBERT_WRAP,
+			DIFFUSE_TOON,
+		};
+
+		// Light model from the specular_* render modes; unset means Schlick-GGX, like the rasterizer.
+		enum SpecularMode {
+			SPECULAR_SCHLICK_GGX,
+			SPECULAR_TOON,
+			SPECULAR_DISABLED,
 		};
 
 		enum StencilFlags {
@@ -223,7 +250,7 @@ public:
 
 		RID version;
 
-		static const uint32_t VERTEX_INPUT_MASKS_SIZE = ShaderVersion::SHADER_VERSION_COLOR_PASS * 2 + SHADER_COLOR_PASS_FLAG_COUNT;
+		static const uint32_t VERTEX_INPUT_MASKS_SIZE = SHADER_VERSION_RT_CAPTURE + 1;
 		std::atomic<uint64_t> vertex_input_masks[VERTEX_INPUT_MASKS_SIZE] = {};
 
 		Vector<ShaderCompiler::GeneratedCode::Texture> texture_uniforms;
@@ -260,6 +287,8 @@ public:
 
 		bool unshaded = false;
 		bool fog_disabled = false;
+		DiffuseMode diffuse_mode = DIFFUSE_LAMBERT; // Resolved against rendering/shading/overrides/force_lambert_over_burley.
+		SpecularMode specular_mode = SPECULAR_SCHLICK_GGX;
 		bool uses_vertex = false;
 		bool uses_position = false;
 		bool uses_sss = false;
@@ -272,6 +301,8 @@ public:
 		bool uses_fragment_time = false;
 		bool writes_modelview_or_projection = false;
 		bool uses_world_coordinates = false;
+		RenderingBillboard::Settings billboard; // From the billboard* and fixed_size render modes.
+		RTVertexCapture::ShaderTraits rt_capture; // From the rt_vertex_* render modes and user vertex() writes.
 		bool uses_screen_texture_mipmaps = false;
 		bool uses_z_clip_scale = false;
 		RS::CullMode cull_mode = RS::CULL_MODE_DISABLED;
@@ -391,7 +422,7 @@ public:
 
 		_FORCE_INLINE_ bool uses_shared_shadow_material() const {
 			bool backface_culling = cull_mode == RS::CULL_MODE_BACK;
-			return !uses_particle_trails && !writes_modelview_or_projection && !uses_vertex && !uses_position && !uses_discard && !uses_depth_prepass_alpha && !uses_alpha_clip && !uses_alpha_antialiasing && backface_culling && !uses_point_size && !uses_world_coordinates && !wireframe && !uses_z_clip_scale && !stencil_enabled;
+			return !uses_particle_trails && !writes_modelview_or_projection && !uses_vertex && !uses_position && !uses_discard && !uses_depth_prepass_alpha && !uses_alpha_clip && !uses_alpha_antialiasing && backface_culling && !uses_point_size && !uses_world_coordinates && !billboard.is_camera_dependent() && !wireframe && !uses_z_clip_scale && !stencil_enabled;
 		}
 
 		virtual void set_code(const String &p_Code) override;

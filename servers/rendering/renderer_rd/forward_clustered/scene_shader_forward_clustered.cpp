@@ -84,8 +84,14 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	uses_world_coordinates = false;
 	uses_particle_trails = false;
 	uses_z_clip_scale = false;
+	billboard = RenderingBillboard::Settings();
+	rt_capture = RTVertexCapture::ShaderTraits();
 
 	int depth_drawi = DEPTH_DRAW_OPAQUE;
+	int diffuse_modei = DIFFUSE_LAMBERT;
+	int specular_modei = SPECULAR_SCHLICK_GGX;
+	int billboard_modei = RenderingBillboard::MODE_DISABLED;
+	int rt_vertexi = RTVertexCapture::OVERRIDE_AUTO;
 
 	int stencil_readi = 0;
 	int stencil_writei = 0;
@@ -120,11 +126,31 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	actions.render_mode_values["cull_front"] = Pair<int *, int>(&cull_modei, RS::CULL_MODE_FRONT);
 	actions.render_mode_values["cull_back"] = Pair<int *, int>(&cull_modei, RS::CULL_MODE_BACK);
 
+	actions.render_mode_values["diffuse_lambert"] = Pair<int *, int>(&diffuse_modei, DIFFUSE_LAMBERT);
+	actions.render_mode_values["diffuse_burley"] = Pair<int *, int>(&diffuse_modei, DIFFUSE_BURLEY);
+	actions.render_mode_values["diffuse_lambert_wrap"] = Pair<int *, int>(&diffuse_modei, DIFFUSE_LAMBERT_WRAP);
+	actions.render_mode_values["diffuse_toon"] = Pair<int *, int>(&diffuse_modei, DIFFUSE_TOON);
+
+	actions.render_mode_values["specular_schlick_ggx"] = Pair<int *, int>(&specular_modei, SPECULAR_SCHLICK_GGX);
+	actions.render_mode_values["specular_toon"] = Pair<int *, int>(&specular_modei, SPECULAR_TOON);
+	actions.render_mode_values["specular_disabled"] = Pair<int *, int>(&specular_modei, SPECULAR_DISABLED);
+
 	actions.render_mode_flags["unshaded"] = &unshaded;
 	actions.render_mode_flags["fog_disabled"] = &fog_disabled;
 	actions.render_mode_flags["wireframe"] = &wireframe;
 	actions.render_mode_flags["particle_trails"] = &uses_particle_trails;
 	actions.render_mode_flags["world_vertex_coords"] = &uses_world_coordinates;
+
+	actions.render_mode_values["billboard"] = Pair<int *, int>(&billboard_modei, RenderingBillboard::MODE_ENABLED);
+	actions.render_mode_values["billboard_y"] = Pair<int *, int>(&billboard_modei, RenderingBillboard::MODE_FIXED_Y);
+	actions.render_mode_values["billboard_particles"] = Pair<int *, int>(&billboard_modei, RenderingBillboard::MODE_PARTICLES);
+	actions.render_mode_flags["billboard_keep_scale"] = &billboard.keep_scale;
+	actions.render_mode_flags["fixed_size"] = &billboard.fixed_size;
+
+	actions.render_mode_values["rt_vertex_auto"] = Pair<int *, int>(&rt_vertexi, RTVertexCapture::OVERRIDE_AUTO);
+	actions.render_mode_values["rt_vertex_dynamic"] = Pair<int *, int>(&rt_vertexi, RTVertexCapture::OVERRIDE_DYNAMIC);
+	actions.render_mode_values["rt_vertex_static"] = Pair<int *, int>(&rt_vertexi, RTVertexCapture::OVERRIDE_STATIC);
+	actions.render_mode_values["rt_vertex_frozen"] = Pair<int *, int>(&rt_vertexi, RTVertexCapture::OVERRIDE_FROZEN);
 
 	actions.usage_flag_pointers["ALPHA"] = &uses_alpha;
 	actions.usage_flag_pointers["ALPHA_SCISSOR_THRESHOLD"] = &uses_alpha_clip;
@@ -195,6 +221,16 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	}
 
 	depth_draw = DepthDraw(depth_drawi);
+	diffuse_mode = DiffuseMode(diffuse_modei);
+	if (diffuse_mode == DIFFUSE_BURLEY && bool(GLOBAL_GET("rendering/shading/overrides/force_lambert_over_burley"))) {
+		diffuse_mode = DIFFUSE_LAMBERT;
+	}
+	specular_mode = SpecularMode(specular_modei);
+	billboard.mode = RenderingBillboard::Mode(billboard_modei);
+	rt_capture.override_mode = RTVertexCapture::ShaderOverride(rt_vertexi);
+	rt_capture.writes_vertex = uses_vertex;
+	rt_capture.writes_modelview_or_projection = writes_modelview_or_projection;
+	rt_capture.particle_trails = uses_particle_trails;
 	if (depth_test_disabledi) {
 		depth_test = DEPTH_TEST_DISABLED;
 	} else if (depth_test_invertedi) {
@@ -453,6 +489,8 @@ uint16_t SceneShaderForwardClustered::ShaderData::_get_shader_version(PipelineVe
 
 			return ShaderVersion::SHADER_VERSION_COLOR_PASS * 2 + shader_flags;
 		} break;
+		case PIPELINE_VERSION_RT_CAPTURE:
+			return SHADER_VERSION_RT_CAPTURE;
 		default: {
 			DEV_ASSERT(false && "Unknown pipeline version.");
 			return 0;
@@ -559,6 +597,14 @@ void SceneShaderForwardClustered::ShaderData::_create_pipeline(PipelineKey p_pip
 	RD::PipelineRasterizationState raster_state;
 	raster_state.cull_mode = p_pipeline_key.cull_mode;
 	raster_state.wireframe = wireframe || p_pipeline_key.wireframe;
+
+	if (p_pipeline_key.version == PIPELINE_VERSION_RT_CAPTURE) {
+		// One point per vertex; the vertex stage stores its output and nothing is rasterized.
+		primitive_rd = RD::RENDER_PRIMITIVE_POINTS;
+		emulate_point_size_flag = false;
+		raster_state.discard_primitives = true;
+		depth_stencil_state = RD::PipelineDepthStencilState();
+	}
 
 	RD::PipelineMultisampleState multisample_state;
 	multisample_state.sample_count = RD::get_singleton()->framebuffer_format_get_texture_samples(p_pipeline_key.framebuffer_format_id, 0);
@@ -777,6 +823,17 @@ RendererRD::MaterialStorage::MaterialData *SceneShaderForwardClustered::_create_
 SceneShaderForwardClustered *SceneShaderForwardClustered::singleton = nullptr;
 Mutex SceneShaderForwardClustered::singleton_mutex;
 
+uint32_t SceneShaderForwardClustered::material_debug_mode_from_environment(int p_pathtracing_debug_mode) {
+	// Must match material_debug_is_material_mode() in material_inputs_inc.glsl.
+	constexpr int GEOMETRY_NORMALS = 2;
+	constexpr int NORMAL_ROUGHNESS = 12;
+	constexpr int METALNESS = 14;
+	constexpr int EMISSIVE = 21;
+	const bool is_material_mode = (p_pathtracing_debug_mode >= GEOMETRY_NORMALS && p_pathtracing_debug_mode <= NORMAL_ROUGHNESS) ||
+			(p_pathtracing_debug_mode >= METALNESS && p_pathtracing_debug_mode <= EMISSIVE);
+	return is_material_mode ? uint32_t(p_pathtracing_debug_mode) : 0u;
+}
+
 SceneShaderForwardClustered::SceneShaderForwardClustered() {
 	// there should be only one of these, contained within our RenderFM singleton.
 	singleton = this;
@@ -853,6 +910,9 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 
 			shader_versions.push_back(ShaderRD::VariantDefine(group, version, false));
 		}
+
+		// SHADER_VERSION_RT_CAPTURE. Always reads normals and tangents so every mesh format captures a full TBN.
+		shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_RT_CAPTURE, "\n#define MODE_RENDER_DEPTH\n#define MODE_RT_CAPTURE\n#define NORMAL_USED\n#define TANGENT_USED\n", false));
 
 		Vector<uint64_t> dynamic_buffers;
 		dynamic_buffers.push_back(ShaderRD::DynamicBuffer::encode(RenderForwardClustered::RENDER_PASS_UNIFORM_SET, 2));
@@ -1030,6 +1090,11 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 		actions.render_mode_defines["cull_disabled"] = "#define DO_SIDE_CHECK\n";
 		actions.render_mode_defines["particle_trails"] = "#define USE_PARTICLE_TRAILS\n";
 		actions.render_mode_defines["depth_prepass_alpha"] = "#define USE_OPAQUE_PREPASS\n";
+		actions.render_mode_defines["billboard"] = "#define BILLBOARD_ENABLED\n";
+		actions.render_mode_defines["billboard_y"] = "#define BILLBOARD_FIXED_Y\n";
+		actions.render_mode_defines["billboard_particles"] = "#define BILLBOARD_PARTICLES\n";
+		actions.render_mode_defines["billboard_keep_scale"] = "#define BILLBOARD_KEEP_SCALE\n";
+		actions.render_mode_defines["fixed_size"] = "#define FIXED_SIZE_USED\n";
 
 		bool force_lambert = GLOBAL_GET("rendering/shading/overrides/force_lambert_over_burley");
 

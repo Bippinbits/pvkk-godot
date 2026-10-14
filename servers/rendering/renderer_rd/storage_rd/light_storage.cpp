@@ -213,6 +213,13 @@ void LightStorage::light_set_param(RID p_light, RS::LightParam p_param, float p_
 				light->dependency.changed_notify(Dependency::DEPENDENCY_CHANGED_LIGHT_SOFT_SHADOW_AND_PROJECTOR);
 			}
 		} break;
+		case RS::LIGHT_PARAM_SHADOW_OPACITY: {
+			if (is_shadow_opacity_visible(light->param[p_param]) != is_shadow_opacity_visible(p_value)) {
+				// Toggles whether the shadow is rendered at all.
+				light->version++;
+				light->dependency.changed_notify(Dependency::DEPENDENCY_CHANGED_LIGHT);
+			}
+		} break;
 		default: {
 		}
 	}
@@ -306,6 +313,16 @@ uint32_t LightStorage::light_get_shadow_caster_mask(RID p_light) const {
 	ERR_FAIL_NULL_V(light, 0);
 
 	return light->shadow_caster_mask;
+}
+
+void LightStorage::light_set_shadow_renderers(RID p_light, BitField<RS::LightShadowRenderer> p_renderers) {
+	Light *light = light_owner.get_or_null(p_light);
+	ERR_FAIL_NULL(light);
+
+	light->shadow_renderers = uint32_t(p_renderers) & RS::LIGHT_SHADOW_RENDERER_ALL;
+
+	light->version++;
+	light->dependency.changed_notify(Dependency::DEPENDENCY_CHANGED_LIGHT);
 }
 
 void LightStorage::light_set_bake_mode(RID p_light, RS::LightBakeMode p_bake_mode) {
@@ -673,7 +690,7 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 
 				light_data.size = 1.0 - Math::cos(Math::deg_to_rad(size)); //angle to cosine offset
 
-				light_data.shadow_opacity = (p_using_shadows && light->shadow)
+				light_data.shadow_opacity = (p_using_shadows && light->has_shadow_in(RS::LIGHT_SHADOW_RENDERER_RASTERIZER))
 						? light->param[RS::LIGHT_PARAM_SHADOW_OPACITY]
 						: 0.0;
 
@@ -683,7 +700,7 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 					// technically this will keep expanding until reaching the sun, but all we care
 					// is expand until we reach the radius of the near plane (there can't be more occluders than that)
 					angular_diameter = Math::tan(Math::deg_to_rad(angular_diameter));
-					if (light->shadow && light->param[RS::LIGHT_PARAM_SHADOW_BLUR] > 0.0) {
+					if (light->has_shadow_in(RS::LIGHT_SHADOW_RENDERER_RASTERIZER) && light->param[RS::LIGHT_PARAM_SHADOW_BLUR] > 0.0) {
 						// Only enable PCSS-like soft shadows if blurring is enabled.
 						// Otherwise, performance would decrease with no visual difference.
 						r_directional_light_soft_shadows = true;
@@ -857,14 +874,8 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 			fade_shadow = light->distance_fade_shadow;
 			fade_length = light->distance_fade_length;
 
-			// Use `smoothstep()` to make opacity changes more gradual and less noticeable to the player.
-			if (distance > fade_begin) {
-				fade = Math::smoothstep(0.0f, 1.0f, 1.0f - float(distance - fade_begin) / fade_length);
-			}
-
-			if (distance > fade_shadow) {
-				shadow_opacity_fade = Math::smoothstep(0.0f, 1.0f, 1.0f - float(distance - fade_shadow) / fade_length);
-			}
+			fade = distance_fade_factor(distance, fade_begin, fade_length);
+			shadow_opacity_fade = distance_fade_factor(distance, fade_shadow, fade_length);
 		}
 
 		float energy = sign * light->param[RS::LIGHT_PARAM_ENERGY] * fade;
@@ -948,13 +959,14 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 			light_data.projector_rect[3] = 0;
 		}
 
-		const bool ray_query_shadow = p_render_data->shadows_from_ray_queries && p_using_shadows && light->shadow;
+		const bool raster_shadow = light->has_shadow_in(RS::LIGHT_SHADOW_RENDERER_RASTERIZER);
+		const bool ray_query_shadow = p_render_data->shadows_from_ray_queries && p_using_shadows && raster_shadow;
 		const bool needs_shadow =
 				!ray_query_shadow &&
 				p_using_shadows &&
 				owns_shadow_atlas(p_shadow_atlas) &&
 				shadow_atlas_owns_light_instance(p_shadow_atlas, light_instance->self) &&
-				light->shadow;
+				raster_shadow;
 
 		bool in_shadow_range = true;
 		if ((needs_shadow || ray_query_shadow) && light->distance_fade) {

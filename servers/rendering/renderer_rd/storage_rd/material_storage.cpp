@@ -2450,6 +2450,8 @@ void MaterialStorage::material_set_param(RID p_material, const StringName &p_par
 	Material *material = material_owner.get_or_null(p_material);
 	ERR_FAIL_NULL(material);
 
+	const Variant *previous = material->params.getptr(p_param);
+	const bool changed = previous ? *previous != p_value : p_value.get_type() != Variant::NIL;
 	if (p_value.get_type() == Variant::NIL) {
 		material->params.erase(p_param);
 	} else {
@@ -2457,8 +2459,10 @@ void MaterialStorage::material_set_param(RID p_material, const StringName &p_par
 		material->params[p_param] = p_value;
 	}
 
-	// Invalidate RT cache for this material.
-	material->rt_invalidation_counter++;
+	// Invalidate RT cache for this material. Scripts often set unchanged values every frame, which must not recapture.
+	if (changed) {
+		material->rt_invalidation_counter++;
+	}
 
 	if (material->shader && material->shader->data) { //shader is valid
 		bool is_texture = material->shader->data->is_parameter_texture(p_param);

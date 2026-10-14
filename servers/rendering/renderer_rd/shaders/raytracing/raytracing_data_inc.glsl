@@ -52,10 +52,10 @@ struct GeometryData {
 	uint instance_uniforms_ofs; // Per-instance shader uniforms offset in the global buffer.
 	uint uv2_byte_offset;
 	uint uv2_scale_packed; // fp16 x, fp16 y
-	uint custom_data_primitive_divisor; // Source triangle count for merged instances; 0 for fixed address.
-	uint64_t custom_data_address;
-	uint custom_data_stride; // Low 8 bits: stride in floats; upper 24 bits reserved, zero.
-	uint _pad;
+	uint instance_data_primitive_divisor; // Source triangle count for merged instances; 0 for fixed address.
+	uint64_t instance_data_address; // First float of the instance record; 0 without instance data.
+	uint instance_data_layout; // Bits 0-7 stride, 8-15 color offset, 16-23 custom offset, in floats; 0xff = absent.
+	uint debug_state; // Dynamic Geometry debug view only: RT_DYNAMIC_GEOMETRY_* category, rest category above RT_DYNAMIC_GEOMETRY_REST_SHIFT, age above RT_DYNAMIC_GEOMETRY_AGE_SHIFT.
 };
 
 // ============================================================================
@@ -66,7 +66,7 @@ struct InstanceMotionData {
 };
 
 // ============================================================================
-// MATERIAL DATA (matches C++ layout, 112 bytes)
+// MATERIAL DATA (matches C++ layout, 128 bytes)
 // ============================================================================
 
 // MaterialData::flags bits (must match RT_MAT_FLAG_* in render_raytracing.h).
@@ -93,11 +93,26 @@ struct InstanceMotionData {
 #define RT_MAT_FLAG_DISTANCE_FADE 8192u
 #define RT_MAT_FLAG_FOG_DISABLED 16384u
 #define RT_MAT_FLAG_NO_RAY_QUERY_ALPHA 32768u
+#define RT_MAT_FLAG_EMISSION_ADD 65536u
+#define RT_MAT_FLAG_EMISSION_UV2 131072u
+#define RT_MAT_FLAG_UV2_TRIPLANAR 262144u
+#define RT_MAT_FLAG_UV2_TRIPLANAR_WORLD 524288u
+// Godot diffuse mode (bits 20-21) and specular mode (bits 22-23), values GODOT_DIFFUSE_* / GODOT_SPECULAR_*.
+#define RT_MAT_DIFFUSE_MODE_SHIFT 20u
+#define RT_MAT_SPECULAR_MODE_SHIFT 22u
+#define RT_MAT_SHADING_MODE_MASK 3u
+
+// MaterialData::texture_channels (must match RTTextureChannel in render_raytracing.h).
+#define RT_TEXTURE_CHANNEL_GRAYSCALE 4u
+#define RT_TEXTURE_CHANNEL_ROUGHNESS_SHIFT 0u
+#define RT_TEXTURE_CHANNEL_METALLIC_SHIFT 3u
+#define RT_TEXTURE_CHANNEL_AO_SHIFT 6u
+#define RT_TEXTURE_CHANNEL_MASK 7u
 
 struct MaterialData {
 	uint albedo_texture_idx;
 	uint normal_texture_idx;
-	uint orm_texture_idx;
+	uint roughness_texture_idx; // texture_roughness, or texture_orm for ORMMaterial3D.
 	uint emission_texture_idx;
 
 	vec4 albedo_color;
@@ -111,14 +126,18 @@ struct MaterialData {
 
 	float metallic;
 	float roughness;
-	float ao_strength;
+	uint uv2_scale_xy; // fp16x2. UV2 transform: identity unless triplanar or applied by the vertex stage.
 	uint flags; // See RT_MAT_FLAG_*.
 
 	uint64_t uniform_address; // BDA for custom shader uniform buffer (0 = none)
-	float uv1_blend_sharpness; // Triplanar per-axis blend exponent (default 1.0)
+	uint blend_sharpness; // fp16x2: UV1, UV2 triplanar per-axis blend exponents (default 1.0)
 	float proximity_fade_distance;
 	float distance_fade_min;
 	float distance_fade_max;
-	float _pad0;
-	float _pad1;
+	uint uv2_offset_xy; // fp16x2, modulo 1.
+	uint uv2_scale_offset_z; // fp16x2: scale.z, offset.z (modulo 1).
+	uint metallic_texture_idx; // texture_metallic, or texture_orm for ORMMaterial3D.
+	uint ao_texture_idx; // AO texture when AO is enabled; 0 (white) otherwise.
+	uint texture_channels; // RT_TEXTURE_CHANNEL_* for roughness, metallic, AO (3 bits each).
+	uint pad;
 };

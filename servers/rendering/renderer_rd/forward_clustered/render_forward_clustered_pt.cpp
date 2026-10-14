@@ -34,7 +34,9 @@
 #include "servers/rendering/renderer_rd/environment/fog.h"
 #include "servers/rendering/renderer_rd/forward_clustered/scene_shader_raytracing.h"
 #include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
+#include "servers/rendering/renderer_rd/storage_rd/particles_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
+#include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
 #include "servers/rendering/rendering_device.h"
 #include "servers/rendering/rendering_server_default.h" // IWYU pragma: keep. RENDER_TIMESTAMP macro uses RSG.
 
@@ -143,7 +145,7 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 
 	p_render_data->scene_data->directional_light_count = _count_directional_lights(p_render_data);
 
-	_setup_environment(p_render_data, false, screen_size, screen_size, p_default_bg_color, false);
+	const uint32_t scene_uniform_buffer_index = _setup_environment(p_render_data, false, screen_size, screen_size, p_default_bg_color, false);
 
 	// May have changed due to the above (light buffer enlarged, as an example).
 	_update_render_base_uniform_set();
@@ -229,7 +231,8 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 			pt_sky_screen = raytracing->rt_has_sky_texture(rb.ptr());
 		}
 
-		rt_state = raytracing->build_tlas(p_render_data, rt_flags);
+		_record_rt_captures(p_render_data, rt_flags, samplers, scene_uniform_buffer_index);
+		rt_state = raytracing->build_tlas(p_render_data, rt_flags, rt_capture_requests);
 		if (rt_state) {
 			if (rt_flags & SceneShaderRaytracing::RT_FLAG_DECALS_ENABLED) {
 				raytracing->build_decal_volumes(rt_state, p_render_data);
@@ -397,8 +400,8 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 		}
 	}
 
-	// Execute raytracing (replaces the opaque + motion vector pass).
-	if (rb_data.is_valid() && raytracing && raytracing->get_shader()) {
+	// Execute raytracing (replaces the opaque + motion vector pass). Without a built TLAS and its uniform set there is nothing valid to trace.
+	if (rb_data.is_valid() && raytracing && raytracing->get_shader() && rt_state && rt_uniform_set.is_valid()) {
 		RD::get_singleton()->draw_command_begin_label("Raytracing");
 		RENDER_TIMESTAMP("TLAS Build");
 
@@ -412,6 +415,7 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 		RID rt_pipeline = raytracing->get_shader()->get_raytracing_pipeline(rt_flags);
 		if (!rt_pipeline.is_valid()) {
 			ERR_PRINT_ONCE_ED("Failed to get raytracing pipeline. Aborting render.");
+			RD::get_singleton()->draw_command_end_label();
 			return;
 		}
 		RD::RaytracingListID raytracing_list = RD::get_singleton()->raytracing_list_begin();
@@ -590,6 +594,14 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 
 // Raytracing methods
 
+BitField<RS::RenderingNotReadyReason> RenderForwardClusteredPT::get_not_ready_reasons() {
+	BitField<RS::RenderingNotReadyReason> reasons = RenderForwardClustered::get_not_ready_reasons();
+	if (raytracing) {
+		reasons.set_flag(raytracing->get_not_ready_reasons());
+	}
+	return reasons;
+}
+
 bool RenderForwardClusteredPT::pathtracing_is_used(RID p_env, RID p_viewport) const {
 	return p_env.is_valid() && environment_get_pathtracing_enabled(p_env) &&
 			(p_viewport.is_null() || RSG::viewport->viewport_get_use_pathtracing(p_viewport)) &&
@@ -621,6 +633,161 @@ bool RenderForwardClusteredPT::_setup_rt() {
 		fog_shadows->initialize();
 	}
 
+	return true;
+}
+
+void RenderForwardClusteredPT::_record_rt_captures(const RenderDataRD *p_render_data, uint32_t p_rt_flags, const RendererRD::MaterialStorage::Samplers &p_samplers, uint32_t p_uniform_buffer_index) {
+	raytracing->prepare_vertex_captures(p_render_data, p_rt_flags, rt_capture_requests);
+	_update_rt_capture_preloads();
+	if (rt_capture_requests.is_empty()) {
+		return;
+	}
+
+	RENDER_TIMESTAMP("RT Vertex Capture");
+	RD::get_singleton()->draw_command_begin_label("RT Vertex Capture");
+
+	// The instance data index of request i is i: it selects the request's draw parameters in the capture shader.
+	RenderList &capture_list = render_list[RENDER_LIST_SECONDARY];
+	capture_list.clear();
+	for (const RTCaptureRequest &request : rt_capture_requests) {
+		capture_list.add_element(const_cast<GeometryInstanceSurfaceDataCache *>(static_cast<const GeometryInstanceSurfaceDataCache *>(request.surf)));
+	}
+	_fill_instance_data(RENDER_LIST_SECONDARY);
+	RID render_pass_uniform_set = _setup_render_pass_uniform_set(RENDER_LIST_SECONDARY, p_render_data, RID(), p_samplers, p_uniform_buffer_index);
+
+	if (rt_capture_framebuffer.is_null()) {
+		rt_capture_framebuffer = RD::get_singleton()->framebuffer_create_empty(Size2i(1, 1), RD::TEXTURE_SAMPLES_1, RD::get_singleton()->framebuffer_format_create_empty());
+	}
+
+	RD::DrawListID draw_list = RD::get_singleton()->draw_list_begin(rt_capture_framebuffer);
+	RD::get_singleton()->draw_list_bind_uniform_set(draw_list, render_base_uniform_set, SCENE_UNIFORM_SET);
+	RD::get_singleton()->draw_list_bind_uniform_set(draw_list, render_pass_uniform_set, RENDER_PASS_UNIFORM_SET);
+	for (uint32_t i = 0; i < rt_capture_requests.size(); i++) {
+		rt_capture_requests[i].recorded = _record_rt_capture(draw_list, i);
+	}
+	RD::get_singleton()->draw_list_end();
+	RD::get_singleton()->draw_command_end_label();
+}
+
+bool RenderForwardClusteredPT::_rt_capture_variant_ready(const SceneShaderForwardClustered::ShaderData *p_shader) {
+	return p_shader->version.is_valid() && scene_shader.shader.version_is_group_compiled(p_shader->version, SceneShaderForwardClustered::SHADER_GROUP_RT_CAPTURE);
+}
+
+// Blocks until the capture variant is compiled; call only once _rt_capture_variant_ready() returned true.
+uint64_t RenderForwardClusteredPT::_rt_capture_input_mask(SceneShaderForwardClustered::ShaderData *p_shader) {
+	return p_shader->get_vertex_input_mask(SceneShaderForwardClustered::PIPELINE_VERSION_RT_CAPTURE, 0, false);
+}
+
+// Key of the capture pipeline of a surface for p_vertex_format; preloads and draws must agree on it.
+// Instanced surfaces need the raster draw's multimesh specialization to read their instance records.
+SceneShaderForwardClustered::ShaderData::PipelineKey RenderForwardClusteredPT::_rt_capture_pipeline_key(const GeometryInstanceSurfaceDataCache *p_surface_cache, RD::VertexFormatID p_vertex_format) const {
+	const uint32_t base_flags = p_surface_cache->owner->base_flags;
+	SceneShaderForwardClustered::ShaderData::PipelineKey pipeline_key;
+	pipeline_key.vertex_format_id = p_vertex_format;
+	pipeline_key.framebuffer_format_id = RD::get_singleton()->framebuffer_format_create_empty();
+	pipeline_key.cull_mode = RD::POLYGON_CULL_DISABLED;
+	pipeline_key.primitive_type = RSE::PRIMITIVE_POINTS;
+	pipeline_key.version = SceneShaderForwardClustered::PIPELINE_VERSION_RT_CAPTURE;
+	pipeline_key.shader_specialization = scene_shader.default_specialization;
+	pipeline_key.shader_specialization.multimesh = bool(base_flags & INSTANCE_DATA_FLAG_MULTIMESH);
+	pipeline_key.shader_specialization.multimesh_format_2d = bool(base_flags & INSTANCE_DATA_FLAG_MULTIMESH_FORMAT_2D);
+	pipeline_key.shader_specialization.multimesh_has_color = bool(base_flags & INSTANCE_DATA_FLAG_MULTIMESH_HAS_COLOR);
+	pipeline_key.shader_specialization.multimesh_has_custom_data = bool(base_flags & INSTANCE_DATA_FLAG_MULTIMESH_HAS_CUSTOM_DATA);
+	return pipeline_key;
+}
+
+// Queues the capture pipeline of a surface captured under p_mode. False when the capture variant isn't compiled yet.
+bool RenderForwardClusteredPT::_preload_rt_capture_pipeline(const GeometryInstanceSurfaceDataCache *p_surface_cache, RTVertexCapture::Mode p_mode) {
+	if (!RenderRaytracing::is_capture_surface(p_surface_cache, p_mode)) {
+		return true;
+	}
+	SceneShaderForwardClustered::ShaderData *shader = p_surface_cache->shader;
+	if (!_rt_capture_variant_ready(shader)) {
+		return false;
+	}
+	const uint64_t input_mask = _rt_capture_input_mask(shader);
+	const RD::VertexFormatID vertex_format = RendererRD::MeshStorage::get_singleton()->mesh_surface_get_vertex_format(
+			p_surface_cache->surface, input_mask, p_surface_cache->owner->mesh_instance.is_valid(), false, false);
+	const SceneShaderForwardClustered::ShaderData::PipelineKey pipeline_key = _rt_capture_pipeline_key(p_surface_cache, vertex_format);
+	shader->pipeline_hash_map.compile_pipeline(pipeline_key, pipeline_key.hash(), RSE::PIPELINE_SOURCE_SURFACE, false);
+	return true;
+}
+
+// Queues capture pipelines of every surface once per capture mode, retrying while capture variants still compile.
+void RenderForwardClusteredPT::_update_rt_capture_preloads() {
+	const uint32_t mode_version = raytracing->get_capture_mode_version();
+	if (mode_version == rt_capture_preload_version) {
+		return;
+	}
+	const RTVertexCapture::Mode mode = RenderRaytracing::read_capture_mode();
+	if (mode == RTVertexCapture::MODE_DISABLED || !RD::get_singleton()->has_feature(RD::SUPPORTS_VERTEX_PIPELINE_STORES)) {
+		rt_capture_preload_version = mode_version;
+		return;
+	}
+	scene_shader.shader.enable_group(SceneShaderForwardClustered::SHADER_GROUP_RT_CAPTURE);
+	bool complete = true;
+	for (SelfList<GeometryInstanceSurfaceDataCache> *element = geometry_surface_compilation_all_list.first(); element; element = element->next()) {
+		complete = _preload_rt_capture_pipeline(element->self(), mode) && complete;
+	}
+	if (complete) {
+		rt_capture_preload_version = mode_version;
+	}
+}
+
+void RenderForwardClusteredPT::_mesh_generate_extra_pipelines_for_surface_cache(GeometryInstanceSurfaceDataCache *p_surface_cache) {
+	if (rt_capture_preload_version != 0) {
+		_preload_rt_capture_pipeline(p_surface_cache, RenderRaytracing::read_capture_mode());
+	}
+}
+
+// Records the capture draw of request p_element: a non-indexed point draw of every vertex of every instance.
+// False while its shader variant or pipeline is still compiling; the surface is then skipped for this frame.
+bool RenderForwardClusteredPT::_record_rt_capture(RD::DrawListID p_draw_list, uint32_t p_element) {
+	RendererRD::MeshStorage *mesh_storage = RendererRD::MeshStorage::get_singleton();
+	const RTCaptureRequest &request = rt_capture_requests[p_element];
+	const GeometryInstanceSurfaceDataCache *surf = static_cast<const GeometryInstanceSurfaceDataCache *>(request.surf);
+	SceneShaderForwardClustered::ShaderData *shader = surf->shader;
+	const SceneShaderForwardClustered::PipelineVersion version = SceneShaderForwardClustered::PIPELINE_VERSION_RT_CAPTURE;
+	if (!_rt_capture_variant_ready(shader)) {
+		return false;
+	}
+
+	const uint64_t input_mask = _rt_capture_input_mask(shader);
+	RID vertex_array;
+	RD::VertexFormatID vertex_format = 0;
+	if (surf->owner->mesh_instance.is_valid()) {
+		mesh_storage->mesh_instance_surface_get_vertex_arrays_and_format(surf->owner->mesh_instance, surf->surface_index, input_mask, false, false, vertex_array, vertex_format);
+	} else {
+		mesh_storage->mesh_surface_get_vertex_arrays_and_format(surf->surface, input_mask, false, false, vertex_array, vertex_format);
+	}
+
+	const SceneShaderForwardClustered::ShaderData::PipelineKey pipeline_key = _rt_capture_pipeline_key(surf, vertex_format);
+	const RID pipeline = shader->pipeline_hash_map.get_pipeline(pipeline_key, pipeline_key.hash(), false, RSE::PIPELINE_SOURCE_SPECIALIZATION);
+	if (pipeline.is_null()) {
+		return false;
+	}
+
+	RD *rd = RD::get_singleton();
+	rd->draw_list_bind_render_pipeline(p_draw_list, pipeline);
+	rd->draw_list_bind_vertex_array(p_draw_list, vertex_array);
+	rd->draw_list_bind_uniform_set(p_draw_list, surf->owner->transforms_uniform_set.is_valid() ? surf->owner->transforms_uniform_set : scene_shader.default_vec4_xform_uniform_set, TRANSFORMS_UNIFORM_SET);
+	if (surf->material_uniform_set.is_valid() && rd->uniform_set_is_valid(surf->material_uniform_set)) {
+		rd->draw_list_bind_uniform_set(p_draw_list, surf->material_uniform_set, MATERIAL_UNIFORM_SET);
+	}
+	const RID capture_uniform_set = UniformSetCacheRD::get_singleton()->get_cache(shader->get_shader_variant(version, 0, false), RT_CAPTURE_UNIFORM_SET,
+			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, raytracing->get_capture_params_buffer()),
+			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, raytracing->get_capture_arena()));
+	rd->draw_list_bind_uniform_set(p_draw_list, capture_uniform_set, RT_CAPTURE_UNIFORM_SET);
+
+	SceneState::PushConstant push_constant = {};
+	push_constant.base_index = p_element;
+	if (surf->owner->base_flags & INSTANCE_DATA_FLAG_PARTICLES) {
+		RendererRD::ParticlesStorage::get_singleton()->particles_get_instance_buffer_motion_vectors_offsets(surf->owner->data->base, push_constant.multimesh_motion_vectors_current_offset, push_constant.multimesh_motion_vectors_previous_offset);
+	} else if (surf->owner->base_flags & INSTANCE_DATA_FLAG_MULTIMESH) {
+		mesh_storage->_multimesh_get_motion_vectors_offsets(surf->owner->data->base, push_constant.multimesh_motion_vectors_current_offset, push_constant.multimesh_motion_vectors_previous_offset);
+	}
+	rd->draw_list_set_push_constant(p_draw_list, &push_constant, sizeof(SceneState::PushConstant) - sizeof(SceneState::PushConstantUbershader));
+	rd->draw_list_draw(p_draw_list, false, request.layout.instance_count, request.layout.vertex_count);
 	return true;
 }
 
@@ -729,6 +896,9 @@ RenderForwardClusteredPT::RenderForwardClusteredPT() {
 }
 
 RenderForwardClusteredPT::~RenderForwardClusteredPT() {
+	if (rt_capture_framebuffer.is_valid()) {
+		RD::get_singleton()->free_rid(rt_capture_framebuffer);
+	}
 	if (fog_shadows) {
 		memdelete(fog_shadows);
 	}

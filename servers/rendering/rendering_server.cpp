@@ -2560,6 +2560,7 @@ void RenderingServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("light_set_distance_fade", "decal", "enabled", "begin", "shadow", "length"), &RenderingServer::light_set_distance_fade);
 	ClassDB::bind_method(D_METHOD("light_set_reverse_cull_face_mode", "light", "enabled"), &RenderingServer::light_set_reverse_cull_face_mode);
 	ClassDB::bind_method(D_METHOD("light_set_shadow_caster_mask", "light", "mask"), &RenderingServer::light_set_shadow_caster_mask);
+	ClassDB::bind_method(D_METHOD("light_set_shadow_renderers", "light", "renderers"), &RenderingServer::light_set_shadow_renderers);
 	ClassDB::bind_method(D_METHOD("light_set_bake_mode", "light", "bake_mode"), &RenderingServer::light_set_bake_mode);
 	ClassDB::bind_method(D_METHOD("light_set_max_sdfgi_cascade", "light", "cascade"), &RenderingServer::light_set_max_sdfgi_cascade);
 
@@ -2605,6 +2606,10 @@ void RenderingServer::_bind_methods() {
 	BIND_ENUM_CONSTANT(LIGHT_PARAM_TRANSMITTANCE_BIAS);
 	BIND_ENUM_CONSTANT(LIGHT_PARAM_INTENSITY);
 	BIND_ENUM_CONSTANT(LIGHT_PARAM_MAX);
+
+	BIND_BITFIELD_FLAG(LIGHT_SHADOW_RENDERER_RASTERIZER);
+	BIND_BITFIELD_FLAG(LIGHT_SHADOW_RENDERER_PATH_TRACER);
+	BIND_BITFIELD_FLAG(LIGHT_SHADOW_RENDERER_ALL);
 
 	BIND_ENUM_CONSTANT(LIGHT_BAKE_DISABLED);
 	BIND_ENUM_CONSTANT(LIGHT_BAKE_STATIC);
@@ -2997,6 +3002,14 @@ void RenderingServer::_bind_methods() {
 	BIND_ENUM_CONSTANT(VIEWPORT_RENDER_INFO_RT_BLAS_REFITS);
 	BIND_ENUM_CONSTANT(VIEWPORT_RENDER_INFO_RT_TRIANGLES_BUILT);
 	BIND_ENUM_CONSTANT(VIEWPORT_RENDER_INFO_RT_TRIANGLES_REFIT);
+	BIND_ENUM_CONSTANT(VIEWPORT_RENDER_INFO_RT_DYNAMIC_REBAKES);
+	BIND_ENUM_CONSTANT(VIEWPORT_RENDER_INFO_RT_DYNAMIC_REBAKE_VERTICES);
+	BIND_ENUM_CONSTANT(VIEWPORT_RENDER_INFO_RT_CAPTURED_MESHES);
+	BIND_ENUM_CONSTANT(VIEWPORT_RENDER_INFO_RT_CAPTURED_VERTICES);
+	BIND_ENUM_CONSTANT(VIEWPORT_RENDER_INFO_RT_DYNAMIC_UPDATED);
+	BIND_ENUM_CONSTANT(VIEWPORT_RENDER_INFO_RT_DYNAMIC_HELD);
+	BIND_ENUM_CONSTANT(VIEWPORT_RENDER_INFO_RT_DYNAMIC_BUDGET_LIMITED);
+	BIND_ENUM_CONSTANT(VIEWPORT_RENDER_INFO_RT_PENDING_SURFACES);
 	BIND_ENUM_CONSTANT(VIEWPORT_RENDER_INFO_MAX);
 
 	BIND_ENUM_CONSTANT(VIEWPORT_RENDER_INFO_TYPE_VISIBLE);
@@ -3588,6 +3601,12 @@ void RenderingServer::_bind_methods() {
 	BIND_ENUM_CONSTANT(RENDERING_INFO_PIPELINE_COMPILATIONS_DRAW);
 	BIND_ENUM_CONSTANT(RENDERING_INFO_PIPELINE_COMPILATIONS_SPECIALIZATION);
 
+	ClassDB::bind_method(D_METHOD("get_rendering_not_ready_reasons"), &RenderingServer::get_rendering_not_ready_reasons);
+	BIND_BITFIELD_FLAG(RENDERING_NOT_READY_PIPELINE_COMPILATION);
+	BIND_BITFIELD_FLAG(RENDERING_NOT_READY_RT_SHADER_COMPILATION);
+	BIND_BITFIELD_FLAG(RENDERING_NOT_READY_RT_PENDING_SURFACES);
+	BIND_BITFIELD_FLAG(RENDERING_NOT_READY_RT_STALE_GEOMETRY);
+
 	BIND_ENUM_CONSTANT(PIPELINE_SOURCE_CANVAS);
 	BIND_ENUM_CONSTANT(PIPELINE_SOURCE_MESH);
 	BIND_ENUM_CONSTANT(PIPELINE_SOURCE_SURFACE);
@@ -3847,15 +3866,24 @@ void RenderingServer::init() {
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/pathtracing/transparency_max_bounce", PROPERTY_HINT_RANGE, "0,8,1"), 2);
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/pathtracing/transparency_indirect_range", PROPERTY_HINT_RANGE, "0,10000,0.1,or_greater,suffix:m"), 0.0);
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/pathtracing/transparency_indirect_fade", PROPERTY_HINT_RANGE, "0,1000,0.1,or_greater,suffix:m"), 0.0);
+	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/pathtracing/transparency_dominant_layer_alpha", PROPERTY_HINT_RANGE, "0,1,0.01"), 0.5);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/pathtracing/volumetric_fog_positional_shadow_rays", PROPERTY_HINT_RANGE, "1,4,1"), 2);
 	GLOBAL_DEF("rendering/pathtracing/volumetric_fog_shadows", true);
 	// Decal budget; 0 compiles decals out of the RT pipeline. Changing between 0 and non-zero swaps pipelines.
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/pathtracing/max_decals", PROPERTY_HINT_RANGE, "0,65536,1"), 1024);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/pathtracing/decals", PROPERTY_HINT_ENUM, "All Hits,Skip After Diffuse,Singular Only"), 0);
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/pathtracing/vertex_capture_mode", PROPERTY_HINT_ENUM, "Automatic,Opt-in,Disabled"), 0);
 	GLOBAL_DEF_RST("rendering/pathtracing/multimesh_cache_cpu_transforms", false);
 	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/pathtracing/deformed_mesh_cache_ttl_frames", PROPERTY_HINT_RANGE, "1,3600,1"), 60);
 	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/pathtracing/multimesh_blas_cache_ttl_frames", PROPERTY_HINT_RANGE, "1,18000,1"), 3600);
 	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/pathtracing/multimesh_merged_blas_max_triangles", PROPERTY_HINT_RANGE, "256,1048576,1"), 65536);
+	// Per-frame budgets of the dynamic BLAS scheduler (particles, camera-dependent MultiMesh), shared by all viewports.
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/pathtracing/dynamic_blas_max_operations", PROPERTY_HINT_RANGE, "1,100000,1"), 2000);
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/pathtracing/dynamic_blas_build_triangle_budget", PROPERTY_HINT_RANGE, "0,100000000,1"), 500000);
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/pathtracing/dynamic_blas_update_triangle_budget", PROPERTY_HINT_RANGE, "0,100000000,1"), 1500000);
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/pathtracing/dynamic_rebuild_interval_frames", PROPERTY_HINT_RANGE, "1,600,1"), 4);
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/pathtracing/dynamic_max_stale_frames", PROPERTY_HINT_RANGE, "1,600,1"), 30);
+	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/pathtracing/dynamic_offscreen_size_weight", PROPERTY_HINT_RANGE, "0,1,0.01"), 0.25);
 
 	// OpenGL limits
 	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/limits/opengl/max_renderable_elements", PROPERTY_HINT_RANGE, "1024,65536,1"), 65536);

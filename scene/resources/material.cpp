@@ -35,6 +35,7 @@
 #include "core/error/error_macros.h"
 #include "core/version.h"
 #include "scene/main/scene_tree.h"
+#include "servers/rendering/rendering_rt_material_state.h"
 
 void Material::set_next_pass(const Ref<Material> &p_pass) {
 	for (Ref<Material> pass_child = p_pass; pass_child.is_valid(); pass_child = pass_child->get_next_pass()) {
@@ -670,10 +671,7 @@ void BaseMaterial3D::init_shaders() {
 	shader_names->z_clip_scale = "z_clip_scale";
 	shader_names->fov_override = "fov_override";
 
-	shader_names->rt_uv1_triplanar = "rt_uv1_triplanar";
-	shader_names->rt_uv1_world_triplanar = "rt_uv1_world_triplanar";
-	shader_names->rt_proximity_fade = "rt_proximity_fade";
-	shader_names->rt_distance_fade_mode = "rt_distance_fade_mode";
+	shader_names->rt_base_material_state = RTBaseMaterialState::PARAM_NAME;
 }
 
 HashMap<uint64_t, Ref<StandardMaterial3D>> BaseMaterial3D::materials_for_2d;
@@ -697,15 +695,24 @@ void BaseMaterial3D::_update_shader() {
 		return; //no update required in the end
 	}
 
-	// Triplanar mapping is emitted as shader code below, which the pathtracer's
-	// fixed-function material evaluation never runs. Mirror the flags into
-	// params so it can reproduce the mapping (see RenderRaytracing::process_material).
-	_material_set_param(shader_names->rt_uv1_triplanar, flags[FLAG_UV1_USE_TRIPLANAR]);
-	_material_set_param(shader_names->rt_uv1_world_triplanar, flags[FLAG_UV1_USE_WORLD_TRIPLANAR]);
-	// Same for proximity/distance fade: the fixed-function hit group applies
-	// them from MaterialData instead of the generated fragment code.
-	_material_set_param(shader_names->rt_proximity_fade, proximity_fade_enabled);
-	_material_set_param(shader_names->rt_distance_fade_mode, int(distance_fade));
+	{
+		// State compiled into the generated code below, which the path tracer's fixed-function hit group never runs.
+		RTBaseMaterialState rt;
+		rt.uv1_triplanar = flags[FLAG_UV1_USE_TRIPLANAR];
+		rt.uv1_world_triplanar = flags[FLAG_UV1_USE_WORLD_TRIPLANAR];
+		rt.uv2_triplanar = flags[FLAG_UV2_USE_TRIPLANAR];
+		rt.uv2_world_triplanar = flags[FLAG_UV2_USE_WORLD_TRIPLANAR];
+		rt.uv2_vertex_transform = detail_uv == DETAIL_UV_2 && !flags[FLAG_UV2_USE_TRIPLANAR];
+		rt.proximity_fade = proximity_fade_enabled;
+		rt.distance_fade_mode = distance_fade;
+		rt.emission = features[FEATURE_EMISSION];
+		rt.emission_add = emission_op == EMISSION_OP_ADD;
+		rt.emission_on_uv2 = flags[FLAG_EMISSION_ON_UV2];
+		rt.orm = orm;
+		rt.ambient_occlusion = features[FEATURE_AMBIENT_OCCLUSION];
+		rt.roughness_texture_channel = roughness_texture_channel;
+		_material_set_param(shader_names->rt_base_material_state, rt.encode());
+	}
 
 	{
 		MutexLock lock(shader_map_mutex);
@@ -877,6 +884,26 @@ void BaseMaterial3D::_update_shader() {
 
 	if (shading_mode == SHADING_MODE_UNSHADED) {
 		code += ", unshaded";
+	}
+	switch (billboard_mode) {
+		case BILLBOARD_ENABLED:
+			code += ", billboard";
+			break;
+		case BILLBOARD_FIXED_Y:
+			code += ", billboard_y";
+			break;
+		case BILLBOARD_PARTICLES:
+			code += ", billboard_particles";
+			break;
+		case BILLBOARD_DISABLED:
+		case BILLBOARD_MAX:
+			break;
+	}
+	if (billboard_mode != BILLBOARD_DISABLED && flags[FLAG_BILLBOARD_KEEP_SCALE]) {
+		code += ", billboard_keep_scale";
+	}
+	if (flags[FLAG_FIXED_SIZE]) {
+		code += ", fixed_size";
 	}
 	if (flags[FLAG_DISABLE_DEPTH_TEST]) {
 		code += ", depth_test_disabled";
@@ -1275,86 +1302,10 @@ void vertex() {)";
 )";
 	}
 
-	switch (billboard_mode) {
-		case BILLBOARD_DISABLED: {
-		} break;
-		case BILLBOARD_ENABLED: {
-			// `MAIN_CAM_INV_VIEW_MATRIX` is inverse of the camera, even on shadow passes.
-			// This ensures the billboard faces the camera when casting shadows.
-			code += R"(
-	// Billboard Mode: Enabled
-	MODELVIEW_MATRIX = VIEW_MATRIX * mat4(
-			MAIN_CAM_INV_VIEW_MATRIX[0],
-			MAIN_CAM_INV_VIEW_MATRIX[1],
-			MAIN_CAM_INV_VIEW_MATRIX[2],
-			MODEL_MATRIX[3]);
-)";
-			if (flags[FLAG_BILLBOARD_KEEP_SCALE]) {
-				code += R"(
-	// Billboard Keep Scale: Enabled
-	MODELVIEW_MATRIX = MODELVIEW_MATRIX * mat4(
-			vec4(length(MODEL_MATRIX[0].xyz), 0.0, 0.0, 0.0),
-			vec4(0.0, length(MODEL_MATRIX[1].xyz), 0.0, 0.0),
-			vec4(0.0, 0.0, length(MODEL_MATRIX[2].xyz), 0.0),
-			vec4(0.0, 0.0, 0.0, 1.0));
-)";
-			}
-			code += "	MODELVIEW_NORMAL_MATRIX = mat3(MODELVIEW_MATRIX);\n";
-		} break;
-		case BILLBOARD_FIXED_Y: {
-			// `MAIN_CAM_INV_VIEW_MATRIX` is inverse of the camera, even on shadow passes.
-			// This ensures the billboard faces the camera when casting shadows.
-			code += R"(
-	// Billboard Mode: Y-Billboard
-	MODELVIEW_MATRIX = VIEW_MATRIX * mat4(
-			vec4(normalize(cross(vec3(0.0, 1.0, 0.0), MAIN_CAM_INV_VIEW_MATRIX[2].xyz)), 0.0),
-			vec4(0.0, 1.0, 0.0, 0.0),
-			vec4(normalize(cross(MAIN_CAM_INV_VIEW_MATRIX[0].xyz, vec3(0.0, 1.0, 0.0))), 0.0),
-			MODEL_MATRIX[3]);
-)";
-			if (flags[FLAG_BILLBOARD_KEEP_SCALE]) {
-				code += R"(
-	// Billboard Keep Scale: Enabled
-	MODELVIEW_MATRIX = MODELVIEW_MATRIX * mat4(
-			vec4(length(MODEL_MATRIX[0].xyz), 0.0, 0.0, 0.0),
-			vec4(0.0, length(MODEL_MATRIX[1].xyz), 0.0, 0.0),
-			vec4(0.0, 0.0, length(MODEL_MATRIX[2].xyz), 0.0),
-			vec4(0.0, 0.0, 0.0, 1.0));
-)";
-			}
-			code += "	MODELVIEW_NORMAL_MATRIX = mat3(MODELVIEW_MATRIX);\n";
-		} break;
-		case BILLBOARD_PARTICLES: {
-			// Make billboard and rotated by rotation.
-			code += R"(
-	// Billboard Mode: Particles
-	mat4 mat_world = mat4(
-			normalize(INV_VIEW_MATRIX[0]),
-			normalize(INV_VIEW_MATRIX[1]),
-			normalize(INV_VIEW_MATRIX[2]),
-			MODEL_MATRIX[3]);
-	mat_world = mat_world * mat4(
-			vec4(cos(INSTANCE_CUSTOM.x), -sin(INSTANCE_CUSTOM.x), 0.0, 0.0),
-			vec4(sin(INSTANCE_CUSTOM.x), cos(INSTANCE_CUSTOM.x), 0.0, 0.0),
-			vec4(0.0, 0.0, 1.0, 0.0),
-			vec4(0.0, 0.0, 0.0, 1.0));
-)";
-			// Set modelview.
-			code += "	MODELVIEW_MATRIX = VIEW_MATRIX * mat_world;\n";
-			if (flags[FLAG_BILLBOARD_KEEP_SCALE]) {
-				code += R"(
-	// Billboard Keep Scale: Enabled
-	MODELVIEW_MATRIX = MODELVIEW_MATRIX * mat4(
-			vec4(length(MODEL_MATRIX[0].xyz), 0.0, 0.0, 0.0),
-			vec4(0.0, length(MODEL_MATRIX[1].xyz), 0.0, 0.0),
-			vec4(0.0, 0.0, length(MODEL_MATRIX[2].xyz), 0.0),
-			vec4(0.0, 0.0, 0.0, 1.0));
-)";
-			}
-			// Set modelview normal and handle animation.
-			code += R"(
-	MODELVIEW_NORMAL_MATRIX = mat3(MODELVIEW_MATRIX);
-
+	// The billboard and fixed_size transforms come from the render modes emitted above.
+	if (billboard_mode == BILLBOARD_PARTICLES) {
+		code += R"(
+	// Billboard Mode: Particles (flipbook animation)
 	float h_frames = float(particles_anim_h_frames);
 	float v_frames = float(particles_anim_v_frames);
 	float particle_total_frames = float(particles_anim_h_frames * particles_anim_v_frames);
@@ -1366,38 +1317,6 @@ void vertex() {)";
 	}
 	UV /= vec2(h_frames, v_frames);
 	UV += vec2(mod(particle_frame, h_frames) / h_frames, floor((particle_frame + 0.5) / h_frames) / v_frames);
-)";
-		} break;
-		case BILLBOARD_MAX:
-			break; // Internal value, skip.
-	}
-
-	if (flags[FLAG_FIXED_SIZE]) {
-		code += R"(
-	// Fixed Size: Enabled
-	if (PROJECTION_MATRIX[3][3] != 0.0) {
-		// Orthogonal matrix; try to do about the same with viewport size.
-		float h = abs(1.0 / (2.0 * PROJECTION_MATRIX[1][1]));
-		// Consistent with vertical FOV (Keep Height).
-		float sc = (h * 2.0);
-		MODELVIEW_MATRIX[0] *= sc;
-		MODELVIEW_MATRIX[1] *= sc;
-		MODELVIEW_MATRIX[2] *= sc;
-	} else {
-		// Scale by depth.
-		float sc;
-		if (IS_MULTIVIEW) {
-			// Assuming stereo rendering.
-			// Moving in the z-plane gives the illusion of the object growing/shrinking in size.
-			// We need to take the full distance to camera to compensate.
-			sc = length((MODELVIEW_MATRIX)[3].xyz);
-		} else {
-			sc = -(MODELVIEW_MATRIX)[3].z;
-		}
-		MODELVIEW_MATRIX[0] *= sc;
-		MODELVIEW_MATRIX[1] *= sc;
-		MODELVIEW_MATRIX[2] *= sc;
-	}
 )";
 	}
 

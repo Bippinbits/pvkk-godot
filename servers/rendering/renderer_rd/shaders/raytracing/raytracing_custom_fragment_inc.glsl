@@ -6,10 +6,10 @@
 //   vec3  rt_hit_pos        -- world-space hit position
 //   vec2  rt_uv             -- interpolated UV
 //   vec2  rt_uv2            -- interpolated UV2
-//   vec3  rt_normal         -- world-space geometry normal (flipped for back-face)
+//   vec3  rt_normal         -- world-space geometry normal (flipped like raster DO_SIDE_CHECK)
 //   vec3  rt_tangent        -- world-space tangent
 //   vec3  rt_bitangent      -- world-space bitangent
-//   bool  rt_front_face     -- true if front-face hit
+//   bool  rt_front_face     -- raster FRONT_FACING of the hit
 //
 // Required bindings/types:
 //   materials[], CustomMaterialUniforms, scene_data_block
@@ -49,18 +49,35 @@ tangent = mat3(rt_world_to_object) * rt_tangent;
 binormal = mat3(rt_world_to_object) * rt_bitangent;
 uv_interp = rt_uv;
 uv2_interp = rt_uv2;
-color_interp = rt_color;
+color_interp = rt_color * fetch_instance_color(rt_geom, uint(gl_PrimitiveID));
 // VIEW is view-space in the rasterizer; rotate the incoming ray to match.
 view = -normalize(mat3(rt_view_matrix) * gl_WorldRayDirectionEXT);
 rt_front_facing = rt_front_face;
 rt_screen_uv = vec2(gl_LaunchIDEXT.xy) / vec2(gl_LaunchSizeEXT.xy);
 rt_frag_coord = vec4(gl_LaunchIDEXT.xy, 0.0, 1.0);
 
-rt_modelview_matrix = rt_view_matrix * read_model_matrix;
+mat4 rt_default_modelview_matrix = rt_view_matrix * read_model_matrix;
+rt_modelview_matrix = rt_default_modelview_matrix;
 rt_modelview_normal_matrix = mat3(rt_modelview_matrix);
+
+// Captured geometry already went through vertex(); re-running it must only produce the varyings.
+bool rt_captured = (rt_geom.flags & FLAG_CAPTURED) != 0u;
+vec3 rt_captured_vertex = vertex;
+vec3 rt_captured_normal = normal;
+vec3 rt_captured_tangent = tangent;
+vec3 rt_captured_binormal = binormal;
 
 // Run vertex shader (computes varyings, may modify built-ins).
 /* RT_CUSTOM_VERTEX_CALL */
+
+if (rt_captured) {
+	vertex = rt_captured_vertex;
+	normal = rt_captured_normal;
+	tangent = rt_captured_tangent;
+	binormal = rt_captured_binormal;
+	rt_modelview_matrix = rt_default_modelview_matrix;
+	rt_modelview_normal_matrix = mat3(rt_modelview_matrix);
+}
 
 // Post-vertex transform: object-space -> view-space (mirrors rasterizer post-vertex,
 // honoring MODELVIEW_MATRIX overrides from the vertex code).

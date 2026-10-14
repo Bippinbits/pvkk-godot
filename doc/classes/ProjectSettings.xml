@@ -3231,6 +3231,24 @@
 			Number of frames a skinned or vertex-displaced deformed-mesh BLAS is kept alive in the path tracer cache after its last visible frame. Once this threshold is exceeded the BLAS and its associated buffers are freed. Increase this value if deformed meshes flicker back into view after brief occlusion; decrease it to reclaim GPU memory sooner.
 			[b]Note:[/b] Requires a restart to take effect.
 		</member>
+		<member name="rendering/pathtracing/dynamic_blas_build_triangle_budget" type="int" setter="" getter="" default="500000">
+			Maximum number of triangles in full BLAS builds of dynamic geometry (GPU particles, camera-facing MultiMeshes) per frame, shared by all viewports. Items that need a periodic rebuild fall back to a refit once this budget is spent.
+		</member>
+		<member name="rendering/pathtracing/dynamic_blas_max_operations" type="int" setter="" getter="" default="2000">
+			Maximum number of BLAS builds plus refits of dynamic geometry per frame, shared by all viewports. Items beyond the budget keep last frame's BLAS; the most visible items are updated first.
+		</member>
+		<member name="rendering/pathtracing/dynamic_blas_update_triangle_budget" type="int" setter="" getter="" default="1500000">
+			Maximum number of triangles in BLAS refits of dynamic geometry per frame, shared by all viewports.
+		</member>
+		<member name="rendering/pathtracing/dynamic_max_stale_frames" type="int" setter="" getter="" default="30">
+			Dynamic geometry that has not been updated for this many frames is updated even when the visibility estimate says it can wait.
+		</member>
+		<member name="rendering/pathtracing/dynamic_offscreen_size_weight" type="float" setter="" getter="" default="0.25">
+			Priority weight of dynamic geometry outside the camera frustum, which only reflections, refractions and shadows can see. Lower values update on-screen geometry first when budgets run out.
+		</member>
+		<member name="rendering/pathtracing/dynamic_rebuild_interval_frames" type="int" setter="" getter="" default="4">
+			Number of frames after which refitted dynamic geometry gets a full BLAS rebuild, restoring the BVH quality that refits slowly lose as particles spread.
+		</member>
 		<member name="rendering/pathtracing/max_decals" type="int" setter="" getter="" default="1024">
 			Maximum number of [Decal]s the path tracer considers per frame, from [code]0[/code] to [code]65536[/code]. Decals around the camera, including those behind it, are gathered and the ones covering the largest solid angle are kept, preferring decals in front of the camera. Up to 4 decals are blended at any point; past that the bottom-most are dropped. Set to [code]0[/code] to compile decals out of the path tracing pipeline entirely. Changing between [code]0[/code] and a non-zero value switches pipelines, which may compile shaders. Changes take effect immediately.
 		</member>
@@ -3251,6 +3269,9 @@
 			Maximum total triangle count ([code]instance_count * triangles_per_surface[/code]) for a [MultiMesh] surface to use a single merged BLAS in the path tracer. When the combined triangle count exceeds this value, the path tracer falls back to one TLAS entry per instance sharing a common BLAS instead. Lower this value to reduce peak GPU memory for large MultiMeshes; raise it to prefer the merged path (which avoids per-instance TLAS overhead).
 			[b]Note:[/b] Requires a restart to take effect.
 		</member>
+		<member name="rendering/pathtracing/transparency_dominant_layer_alpha" type="float" setter="" getter="" default="0.5">
+			Minimum alpha the nearest transparent layer needs to become the pixel's dominant surface in the path tracer. The dominant surface writes depth and motion vectors instead of the geometry behind it, and blends into the DLSS Ray Reconstruction guides. Dense smoke and flipbook particles then move with their own motion instead of smearing with the background. Additive and subtractive layers never become dominant unless they use [code]depth_draw_always[/code]. [code]0[/code] disables dominance, so transparent layers keep the motion of what is behind them. Changes take effect immediately.
+		</member>
 		<member name="rendering/pathtracing/transparency_indirect_fade" type="float" setter="" getter="" default="0.0">
 			Distance in meters over which transparent layers fade out before reaching [member rendering/pathtracing/transparency_indirect_range]. A faded layer contributes and attenuates proportionally less. [code]0[/code] gives a hard cutoff. Changes take effect immediately.
 		</member>
@@ -3266,6 +3287,14 @@
 		<member name="rendering/pathtracing/use_simple_shadows" type="bool" setter="" getter="" default="false">
 			If [code]true[/code], shadow rays use Ray Queries instead of fully traced rays. Ray Queries are significantly cheaper but rely on a quick albedo texture fetch. Both paths use stochastic alpha coverage and tint transmitted light with the transparent material's albedo; generated or animated custom material outputs are more accurate with fully traced shadow rays.
 			[b]Note:[/b] Only has an effect when path tracing is enabled on the active [Environment].
+		</member>
+		<member name="rendering/pathtracing/vertex_capture_mode" type="int" setter="" getter="" default="0">
+			Controls which surfaces the path tracer vertex-captures: it runs the material's raster [code]vertex()[/code] function and traces the resulting geometry, so custom vertex displacement, hand-written [code]MODELVIEW_MATRIX[/code] billboards and particle trails match the rasterized image. Fixed-function [code]billboard[/code] render modes don't need a capture.
+			- [b]Automatic[/b] ([code]0[/code]): Captures shaders that write [code]VERTEX[/code], [code]MODELVIEW_MATRIX[/code] or [code]PROJECTION_MATRIX[/code] in [code]vertex()[/code], and shaders using [code]particle_trails[/code].
+			- [b]Opt-in[/b] ([code]1[/code]): Only captures shaders with [code]render_mode rt_vertex_dynamic[/code] or [code]rt_vertex_frozen[/code] and shaders using [code]particle_trails[/code].
+			- [b]Disabled[/b] ([code]2[/code]): Never captures; surfaces are traced with their undeformed mesh.
+			Per shader, [code]rt_vertex_auto[/code] (default) follows this setting, [code]rt_vertex_dynamic[/code] always captures unless this setting is [b]Disabled[/b], [code]rt_vertex_static[/code] never captures, and [code]rt_vertex_frozen[/code] captures like [code]rt_vertex_dynamic[/code] but keeps the first capture until the mesh, skeleton, blend shapes or MultiMesh and particle instances change, ignoring [code]TIME[/code], the camera, the node transform and uniforms. Changes take effect immediately and drop every kept capture.
+			A capture is kept until an input its [code]vertex()[/code] function reads changes: [code]TIME[/code] and global uniforms every frame, the camera (per viewport, each viewport keeps its own capture), the node transform, instance uniforms, material uniforms, or the skeleton and blend shapes. Recaptures share the [member rendering/pathtracing/dynamic_blas_max_operations] budget with other dynamic geometry.
 		</member>
 		<member name="rendering/pathtracing/volumetric_fog_shadows" type="bool" setter="" getter="" default="true">
 			If [code]true[/code], volumetric fog traces ray query shadows for shadowed lights when path tracing. If [code]false[/code], those lights scatter into the fog unoccluded, which is faster and useful to check whether geometry is blocking the fog lighting.
@@ -3393,6 +3422,9 @@
 		<member name="rendering/rendering_device/pipeline_cache/enable" type="bool" setter="" getter="" default="true">
 			Enable the pipeline cache that is saved to disk if the graphics API supports it.
 			[b]Note:[/b] This property is unable to control the pipeline caching the GPU driver itself does. Only turn this off along with deleting the contents of the driver's cache if you wish to simulate the experience a user will get when starting the game for the first time.
+		</member>
+		<member name="rendering/rendering_device/pipeline_cache/max_size_mb" type="int" setter="" getter="" default="1024">
+			Maximum size of the pipeline cache on disk. The cache grows with every new pipeline and is never pruned, so a larger cache file is discarded at startup and rebuilt, and saving stops once the cache grows past this size. Capped below 2 GiB, which the cache format cannot represent.
 		</member>
 		<member name="rendering/rendering_device/pipeline_cache/save_chunk_size_mb" type="float" setter="" getter="" default="3.0">
 			Determines at which interval pipeline cache is saved to disk. The lower the value, the more often it is saved.
