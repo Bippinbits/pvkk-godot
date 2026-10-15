@@ -88,10 +88,11 @@ void RTBlasTransformPool::clear() {
 	free_slots.clear();
 }
 
-// p_blas_alive is false when RD already freed the BLAS together with the mesh buffers it was built from.
-static void _free_blas_resources(RTBlasTransformPool &r_pool, RID &r_blas, RTBlasTransformPool::Slot *r_transforms, uint32_t p_count, bool p_blas_alive) {
-	if (p_blas_alive && r_blas.is_valid()) {
-		RD::get_singleton()->free_rid(r_blas);
+// RD frees a BLAS together with any mesh buffer it was built from, so the BLAS may already be gone.
+static void _free_blas_resources(RTBlasTransformPool &r_pool, RID &r_blas, RTBlasTransformPool::Slot *r_transforms, uint32_t p_count) {
+	RD *rd = RD::get_singleton();
+	if (rd->acceleration_structure_is_valid(r_blas)) {
+		rd->free_rid(r_blas);
 	}
 	r_blas = RID();
 	for (uint32_t i = 0; i < p_count; i++) {
@@ -810,13 +811,12 @@ uint64_t RenderRaytracing::mat_ubo_pool_get_address(uint32_t p_slot) const {
 // ---------------------------------------------------------------------------
 
 void RenderRaytracing::cleanup_caches() {
-	RD *rd = RD::get_singleton();
-
 	for (uint32_t i = 0; i < surface_chunks.size(); i++) {
 		if (surface_chunks[i]) {
 			for (uint32_t j = 0; j < RT_CACHE_CHUNK_SIZE; j++) {
 				RTCacheEntry *entry = &surface_chunks[i][j];
 				if (entry->ptr) {
+					_free_blas_resources(blas_transform_pool, entry->ptr->blas, &entry->ptr->blas_transform, 1);
 					memdelete(entry->ptr);
 					entry->ptr = nullptr;
 				}
@@ -826,15 +826,10 @@ void RenderRaytracing::cleanup_caches() {
 	}
 	surface_chunks.clear();
 
-	{
-		RendererRD::MeshStorage *mesh_storage = RendererRD::MeshStorage::get_singleton();
-		for (KeyValue<RTMeshGroupKey, RTMeshGroupEntry> &kv : mesh_groups) {
-			if (kv.value.blas.is_valid() && mesh_storage->owns_mesh(RID::from_uint64(kv.key.mesh_id))) {
-				rd->free_rid(kv.value.blas);
-			}
-		}
-		mesh_groups.clear();
+	for (KeyValue<RTMeshGroupKey, RTMeshGroupEntry> &kv : mesh_groups) {
+		_free_blas_resources(blas_transform_pool, kv.value.blas, kv.value.transforms.ptr(), kv.value.transforms.size());
 	}
+	mesh_groups.clear();
 
 	// Free all cached deformed surface data, including every vertex capture.
 	for (const RID &handle : deformed_pool.get_owned_list()) {
@@ -1211,8 +1206,7 @@ RTSurfaceData *RenderRaytracing::process_surface(
 	if (!entry->ptr) {
 		entry->ptr = memnew(RTSurfaceData);
 	} else {
-		// Version mismatch: old mesh was deleted, BLAS already cascade-freed by RD.
-		_free_blas_resources(blas_transform_pool, entry->ptr->blas, &entry->ptr->blas_transform, 1, entry->cached_rid_version == mesh_version);
+		_free_blas_resources(blas_transform_pool, entry->ptr->blas, &entry->ptr->blas_transform, 1);
 	}
 
 	RTSurfaceData *surf_data = entry->ptr;
@@ -2018,7 +2012,7 @@ void RenderRaytracing::_populate_surface_blas(
 	_assign_compression_transforms(blas_transform_pool, &r_surf_data->geometry, &as_geom, &r_surf_data->blas_transform, 1);
 	r_surf_data->blas = _create_blas({ &as_geom, 1 }, p_prefer_fast_build, p_allow_update, name, r_dirty_blas_list);
 	if (!r_surf_data->blas.is_valid()) {
-		_free_blas_resources(blas_transform_pool, r_surf_data->blas, &r_surf_data->blas_transform, 1, false);
+		_free_blas_resources(blas_transform_pool, r_surf_data->blas, &r_surf_data->blas_transform, 1);
 	}
 }
 
@@ -3223,7 +3217,7 @@ RTMeshGroupEntry *RenderRaytracing::_process_mesh_group(const RTMeshGroupKey &p_
 	}
 	cache_misses++;
 
-	_free_blas_resources(blas_transform_pool, entry->blas, entry->transforms.ptr(), entry->transforms.size(), true);
+	_free_blas_resources(blas_transform_pool, entry->blas, entry->transforms.ptr(), entry->transforms.size());
 
 	const uint32_t count = p_members.size();
 	entry->geometries.resize(count);
@@ -3251,7 +3245,7 @@ RTMeshGroupEntry *RenderRaytracing::_process_mesh_group(const RTMeshGroupKey &p_
 	const String name = "RT BLAS group [" + itos(RID::from_uint64(p_key.mesh_id).get_local_index()) + ":" + String::num_uint64(p_key.surface_mask, 16) + "]";
 	entry->blas = _create_blas(as_geoms, false, false, name, r_dirty_blas_list);
 	if (!entry->blas.is_valid()) {
-		_free_blas_resources(blas_transform_pool, entry->blas, entry->transforms.ptr(), count, false);
+		_free_blas_resources(blas_transform_pool, entry->blas, entry->transforms.ptr(), count);
 		mesh_groups.erase(p_key);
 		return nullptr;
 	}
@@ -3259,7 +3253,6 @@ RTMeshGroupEntry *RenderRaytracing::_process_mesh_group(const RTMeshGroupKey &p_
 }
 
 void RenderRaytracing::_trim_mesh_group_variants(uint64_t p_mesh_id) {
-	RendererRD::MeshStorage *mesh_storage = RendererRD::MeshStorage::get_singleton();
 	while (true) {
 		uint32_t variants = 0;
 		const RTMeshGroupKey *oldest = nullptr;
@@ -3280,7 +3273,7 @@ void RenderRaytracing::_trim_mesh_group_variants(uint64_t p_mesh_id) {
 		}
 		const RTMeshGroupKey key = *oldest;
 		RTMeshGroupEntry &entry = mesh_groups[key];
-		_free_blas_resources(blas_transform_pool, entry.blas, entry.transforms.ptr(), entry.transforms.size(), mesh_storage->owns_mesh(RID::from_uint64(p_mesh_id)));
+		_free_blas_resources(blas_transform_pool, entry.blas, entry.transforms.ptr(), entry.transforms.size());
 		mesh_groups.erase(key);
 	}
 }
@@ -3295,7 +3288,7 @@ void RenderRaytracing::_evict_dead_mesh_groups() {
 	}
 	for (const RTMeshGroupKey &key : dead) {
 		RTMeshGroupEntry &entry = mesh_groups[key];
-		_free_blas_resources(blas_transform_pool, entry.blas, entry.transforms.ptr(), entry.transforms.size(), false);
+		_free_blas_resources(blas_transform_pool, entry.blas, entry.transforms.ptr(), entry.transforms.size());
 		mesh_groups.erase(key);
 	}
 }

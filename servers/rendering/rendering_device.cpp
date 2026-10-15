@@ -536,6 +536,10 @@ RID RenderingDevice::tlas_create(uint32_t p_max_instance_count, BitField<Acceler
 	return id;
 }
 
+bool RenderingDevice::acceleration_structure_is_valid(RID p_acceleration_structure) {
+	return acceleration_structure_owner.owns(p_acceleration_structure);
+}
+
 static constexpr const char *ACCELERATION_STRUCTURE_BUILD_IN_LIST_ERROR = "Acceleration structures can't be built while a draw, compute or raytracing list is being created.";
 
 Error RenderingDevice::blas_build(RID p_blas) {

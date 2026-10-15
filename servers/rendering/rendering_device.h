@@ -1451,6 +1451,7 @@ public:
 
 	RID blas_create(Span<AccelerationStructureGeometry> p_geometries, BitField<AccelerationStructureFlagBits> p_flags);
 	RID tlas_create(uint32_t p_max_instance_count, BitField<AccelerationStructureFlagBits> p_flags);
+	bool acceleration_structure_is_valid(RID p_acceleration_structure);
 
 	typedef int64_t HitShaderBindingTableRange;
 
