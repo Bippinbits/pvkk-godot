@@ -115,6 +115,21 @@ TEST_CASE("[RID] 'get_local_index'") {
 	CHECK(RID::from_uint64(4'294'967'297).get_local_index() == 1);
 }
 
+TEST_CASE("[RID_Owner] 'owns'") {
+	RID_Owner<int, true> owner;
+	RID_Owner<int, true> other;
+	const RID rid = owner.make_rid(1);
+	const RID other_rid = other.make_rid(2);
+
+	CHECK(owner.owns(rid));
+	CHECK_FALSE(owner.owns(other_rid));
+	CHECK_FALSE(owner.owns(RID()));
+
+	owner.free(rid);
+	CHECK_FALSE(owner.owns(rid));
+	other.free(other_rid);
+}
+
 #ifdef THREADS_ENABLED
 // This case would let sanitizers realize data races.
 // Additionally, on purely weakly ordered architectures, it would detect synchronization issues
@@ -204,7 +219,7 @@ TEST_CASE("[RID_Owner] Thread safety") {
 #ifdef TSAN_ENABLED
 								__tsan_acquire(data); // We know not a race in practice.
 #endif
-								bool ok = true;
+								bool ok = rot->rid_owner.owns(rid);
 								for (uint32_t j = 0; j < Thread::CACHE_LINE_BYTES; j++) {
 									if (data->data[j] != expected_unique_byte) {
 										ok = false;
