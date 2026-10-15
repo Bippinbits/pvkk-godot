@@ -266,8 +266,6 @@ public:
 	Vector<uint8_t> buffer_get_data(RID p_buffer, uint32_t p_offset = 0, uint32_t p_size = 0); // This causes stall, only use to retrieve large buffers for saving.
 	Error buffer_get_data_async(RID p_buffer, const Callable &p_callback, uint32_t p_offset = 0, uint32_t p_size = 0);
 	uint64_t buffer_get_device_address(RID p_buffer);
-	// True when p_buffer is tracked by the draw graph, which happens once anything but its initial upload wrote it.
-	bool buffer_is_mutable(RID p_buffer);
 	uint8_t *buffer_persistent_map_advance(RID p_buffer);
 	void buffer_flush(RID p_buffer);
 
@@ -277,7 +275,6 @@ public:
 		RID buffer;
 		uint64_t address = 0;
 		uint64_t size = 0;
-		bool written = false; // A command of the draw graph being recorded writes the buffer.
 
 		bool operator<(const BufferAddressRange &p_other) const { return address < p_other.address; }
 	};
@@ -1343,12 +1340,18 @@ private:
 		RDD::AccelerationStructureType type = {};
 		RDG::ResourceTracker *draw_tracker = nullptr;
 
-		// BLAS/TLAS are weakly linked, as opposed to RD dependencies.
+		// BLAS/TLAS are weakly linked, as opposed to RD dependencies. Builds of acceleration_structure_build_batch() add no links.
 		HashSet<RID> acceleration_structure_dependencies;
 		bool invalidated = true;
+		uint64_t build_serial = 0; // The acceleration_structure_build_serial of the last build or refit.
 
-		// Scratch buffer used during build, owned by the AS.
+		// Scratch buffer used by tracked builds, owned by the AS. Batched builds use acceleration_structure_scratch.
 		RDD::BufferID scratch_buffer;
+
+#ifdef DEV_ENABLED
+		// TLAS last built by acceleration_structure_build_batch(): the BLASes its instances reference.
+		LocalVector<RID> batch_blases;
+#endif
 
 		// --- Bottom Level ---
 		Vector<RDG::ResourceTracker *> draw_trackers;
@@ -1367,7 +1370,34 @@ private:
 		LocalVector<InstanceBuffer> instance_buffers;
 	};
 
+	// Scratch memory shared by the builds of acceleration_structure_build_batch(), handed out front to back. When the rest
+	// is too small, the buffer is replaced by one twice as large, up to max_size. At max_size the next build waits for
+	// the earlier ones and starts over at the front.
+	struct AccelerationStructureScratch {
+		RDD::BufferID buffer;
+		uint64_t size = 0;
+		uint64_t max_size = 0; // rendering/rendering_device/acceleration_structure/max_scratch_buffer_size_mb.
+		uint64_t used = 0; // Bytes handed out since the last barrier or growth.
+		uint64_t batch_peak = 0; // Most bytes handed out at once by the last batch.
+		uint32_t batch_rollovers = 0; // Barriers the last batch needed because the buffer was full.
+	};
+
+	// The acceleration_structure_build_batch() being recorded.
+	struct AccelerationStructureBatch {
+		LocalVector<RDG::RecordedAccelerationStructureBuild> builds;
+		bool barrier_pending = false; // The next build must wait for the earlier ones.
+	};
+
+	AccelerationStructureScratch acceleration_structure_scratch;
+	AccelerationStructureBatch acceleration_structure_batch;
+	// Bumped by every tracked build or refit and by every batch, so the order of builds can be compared.
+	uint64_t acceleration_structure_build_serial = 0;
+
+	bool _any_list_active() const;
 	Error _acceleration_structure_scratch_buffer_create(AccelerationStructure *p_acceleration_structure);
+	Error _acceleration_structure_scratch_grow(uint64_t p_size);
+	Error _acceleration_structure_batch_push(RDG::RecordedAccelerationStructureBuild &r_build);
+	Error _blas_batch_add(RID p_blas, bool p_refit);
 	void _blas_remove_tlas_dependencies(AccelerationStructure *p_blas, RID p_blas_id);
 	void _tlas_remove_blas_dependencies(AccelerationStructure *p_tlas, RID p_tlas_id);
 
@@ -1436,15 +1466,37 @@ public:
 	Error blas_build(RID p_blas);
 	Error blas_update(RID p_blas);
 	Error tlas_build(RID p_tlas, Span<AccelerationStructureInstance> p_instances);
+
+	// A TLAS of acceleration_structure_build_batch() and the instances it is built from.
+	struct TLASBuild {
+		RID tlas;
+		Span<AccelerationStructureInstance> instances;
+	};
+
+	// Records BLAS builds, BLAS refits and then TLAS builds as one untracked command; see the definition for the contract.
+	Error acceleration_structure_build_batch(Span<RID> p_blas_builds, Span<RID> p_blas_refits, Span<TLASBuild> p_tlas_builds);
+
+	// Shared scratch memory of acceleration_structure_build_batch(), in bytes.
+	struct AccelerationStructureScratchUsage {
+		uint64_t used = 0; // The most the last batch held at once.
+		uint64_t size = 0; // Size of the buffer; 0 until the first batch.
+		uint32_t rollovers = 0; // Barriers the last batch needed because the buffer was full.
+	};
+	AccelerationStructureScratchUsage acceleration_structure_get_scratch_usage() const;
+	// Orders every command recorded before it, including those of earlier frames, ahead of every command recorded after
+	// it, and makes all their writes visible to all later accesses. For accesses the draw graph can't see, such as reads
+	// through device addresses and the builds of acceleration_structure_build_batch().
+	void untracked_barrier();
 #ifdef DEV_ENABLED
-	// True when p_blas is valid and built, and nothing invalidated it since.
-	bool blas_is_built(RID p_blas);
-	// Appends the buffers p_blas was created from that a command of the draw graph being recorded writes.
-	void blas_get_written_input_buffers(RID p_blas, LocalVector<RID> &r_buffers);
+	// Appends the BLASes that p_tlas, last built by acceleration_structure_build_batch(), references and that were freed,
+	// rebuilt or refit since: tracing p_tlas would walk them.
+	void tlas_get_stale_blases(RID p_tlas, LocalVector<RID> &r_stale);
 #endif
 
 private:
-	Error _tlas_validate_instances(Span<AccelerationStructureInstance> p_instances);
+	Error _tlas_validate_instances(const AccelerationStructure *p_tlas, Span<AccelerationStructureInstance> p_instances);
+	Error _tlas_batch_add(RID p_tlas, Span<AccelerationStructureInstance> p_instances);
+	Error _tlas_write_instances(AccelerationStructure *p_tlas, RID p_tlas_id, Span<AccelerationStructureInstance> p_instances, LocalVector<RDG::ResourceTracker *> *r_blas_trackers, RDG::RecordedAccelerationStructureBuild &r_build);
 
 	/**********************************/
 	/**** HIT SHADER BINDING TABLE ****/
@@ -1680,7 +1732,6 @@ public:
 	void raytracing_list_bind_raytracing_pipeline(RaytracingListID p_list, RID p_raytracing_pipeline);
 	void raytracing_list_bind_uniform_set(RaytracingListID p_list, RID p_uniform_set, uint32_t p_index);
 	void raytracing_list_set_push_constant(RaytracingListID p_list, const void *p_data, uint32_t p_data_size);
-	void raytracing_list_add_buffer_dependency(RaytracingListID p_list, RID p_buffer, bool p_writable = false);
 	void raytracing_list_trace_rays(RaytracingListID p_list, uint32_t p_raygen_shader_index, RID p_hit_sbt, uint32_t p_width, uint32_t p_height, uint32_t p_depth);
 	void raytracing_list_end();
 
@@ -1735,7 +1786,6 @@ public:
 	void compute_list_bind_compute_pipeline(ComputeListID p_list, RID p_compute_pipeline);
 	void compute_list_bind_uniform_set(ComputeListID p_list, RID p_uniform_set, uint32_t p_index);
 	void compute_list_set_push_constant(ComputeListID p_list, const void *p_data, uint32_t p_data_size);
-	void compute_list_add_buffer_dependency(ComputeListID p_list, RID p_buffer, bool p_writable = false);
 	void compute_list_dispatch(ComputeListID p_list, uint32_t p_x_groups, uint32_t p_y_groups, uint32_t p_z_groups);
 	void compute_list_dispatch_threads(ComputeListID p_list, uint32_t p_x_threads, uint32_t p_y_threads, uint32_t p_z_threads);
 	void compute_list_dispatch_indirect(ComputeListID p_list, RID p_buffer, uint32_t p_offset);

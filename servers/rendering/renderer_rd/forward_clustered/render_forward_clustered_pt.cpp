@@ -28,6 +28,69 @@
 /* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                 */
 /**************************************************************************/
 
+// ---------------------------------------------------------------------------
+// Path tracer synchronization
+// ---------------------------------------------------------------------------
+//
+// Most of the path traced scene is read through raw device addresses: the hit shaders and the RT fog shadows fetch
+// vertices, indices, attributes, instance data and material uniforms from the addresses in RT_GeometryData and
+// RT_MaterialData, and BLAS builds read their vertex and index buffers the same way. The draw graph only sees
+// resources bound through uniform sets, vertex and index bindings and RD calls, so it can't order these accesses.
+// Instead of tracking them one by one, every view runs in fixed phases separated by full barriers. A full barrier
+// orders every command recorded before it, including those of earlier views and frames, ahead of every command
+// recorded after it. No dependency has to be declared anywhere.
+//
+// The phases of one view, as recorded by _render_scene():
+//
+//   1. Captures and merges. _record_rt_captures() draws deformed surfaces into the capture arena. build_tlas() then
+//      copies them into their cache entries and bakes MultiMesh and particle surfaces into merged buffers. Everything
+//      this phase reads and writes is bound or copied through RD, so the graph orders it. Only this phase writes data
+//      that is later read through device addresses.
+//   -- barrier --  (recorded by RD::acceleration_structure_build_batch())
+//   2. Builds. One batch: all dirty BLAS builds, then all BLAS refits, then both TLASes of the view. The batch adds
+//      barriers of its own: one before the TLAS builds, which read the BLASes, and one each time the shared scratch
+//      buffer is full at its maximum size. The work recorded after the batch overlaps it: the geometry and material
+//      tables, decal volumes, scene UBO, sky setup, pre-opaque compositor effects, lights and clusters. None of it may
+//      read what the batch builds or write what the batch reads.
+//   -- barrier --  (untracked_barrier() before the volumetric fog)
+//   3. Readers. The volumetric fog, the trace and the copies of its output. Nothing here may write a buffer that is
+//      read through a device address.
+//   -- barrier --  (untracked_barrier() after the trace, when the view has an rt_state)
+//
+// Each barrier protects:
+//   - Before the builds: they read, through device addresses, the vertices phase 1 wrote and the mesh data other
+//     systems wrote earlier. It also keeps them behind earlier batches, which used the same scratch memory and BLASes.
+//   - Before the readers: the fog and the trace read the structures just built. The batch is untracked, so binding
+//     the TLAS in a uniform set doesn't order the trace after its build. It also keeps the reads of the batch ahead of
+//     the writes of later views and frames.
+//   - After the trace: the captures and merges of later views, and other systems in later frames (particles,
+//     MultiMesh buffers, mesh surface updates), rewrite buffers the fog and the trace read through device addresses.
+//     Their writes are tracked, but the graph doesn't know those buffers were read.
+//
+// Phase 1 needs no barrier in front of it: earlier batches are behind the barrier before their readers, and earlier
+// fog and traces behind the barrier after their trace.
+//
+// What doesn't need a barrier:
+//   - Initial buffer contents. Buffers created with data are uploaded by transfer workers, and
+//     RD::buffer_get_device_address() makes the frame wait for that upload. Taking the address is enough.
+//   - TLAS instances. The CPU writes them into mapped buffers that aren't reused until their frame is done.
+//   - Anything bound through a uniform set (tables, lights, decals, params, textures): the graph orders it as usual.
+//
+// Acceleration structures don't reference each other: unlike RD::tlas_build(), the batch adds no BLAS to TLAS links.
+// Rebuilding or refitting a BLAS leaves every TLAS built from it stale until that TLAS is rebuilt. That's safe because
+// every view rebuilds both of its TLASes in its own batch, after its BLAS updates and before its trace, so a BLAS
+// updated by a later view only affects TLASes that were already traced. A BLAS may appear only once per batch, since
+// the builds of a batch run concurrently. The decal TLAS is the exception: build_decal_volumes() uses the tracked
+// RD::blas_build() and RD::tlas_build(), which the graph orders by itself.
+//
+// Cost: three full barriers per view plus the ones in the batch. Each drains the queue; only the work recorded between
+// the batch and the barrier before the readers overlaps the builds.
+//
+// Checks: in DEV builds, rendering/pathtracing/debug/strict_validation verifies the addresses in the tables and that
+// no TLAS is traced after a BLAS it references was freed, rebuilt or refit (render_raytracing_validation.h). Missing
+// barriers are not detected. A new pass belongs in the phase matching what it reads and writes; otherwise it needs a
+// barrier of its own.
+
 #include "render_forward_clustered_pt.h"
 
 #include "core/config/project_settings.h"
@@ -189,7 +252,8 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 	// sky shader into the RT sky texture before the trace dispatch.
 	bool pt_sky_screen = false;
 
-	if (rb_data.is_valid() && raytracing && raytracing->get_shader()) {
+	const bool rt_available = rb_data.is_valid() && raytracing && raytracing->get_shader();
+	if (rt_available) {
 		RENDER_TIMESTAMP("Build Acceleration Structures");
 		RID rt_environment = p_render_data->environment.is_valid() ? p_render_data->environment : RID();
 		const bool fog_enabled = rt_environment.is_valid() && environment_get_fog_enabled(rt_environment);
@@ -375,6 +439,10 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 		// Pathtraced transparency leaves no raster surface to receive decals.
 		_setup_lights_cluster_decals(p_render_data, pt_directional_light_count, pt_positional_light_count, !pt_transparency);
 
+		if (rt_available) {
+			// The fog and the trace read what the batch built. Recorded this late so the work above can overlap the builds.
+			RD::get_singleton()->untracked_barrier();
+		}
 		RENDER_TIMESTAMP("Update Volumetric Fog");
 		_update_pt_volumetric_fog(p_render_data, rt_state, pt_directional_light_count, pt_positional_light_count);
 	}
@@ -401,7 +469,11 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 	}
 
 	// Execute raytracing (replaces the opaque + motion vector pass). Without a built TLAS and its uniform set there is nothing valid to trace.
-	if (rb_data.is_valid() && raytracing && raytracing->get_shader() && rt_state && rt_uniform_set.is_valid()) {
+	bool trace = rb_data.is_valid() && raytracing && raytracing->get_shader() && rt_state && rt_uniform_set.is_valid();
+#ifdef RT_VALIDATION_ENABLED
+	trace = trace && raytracing->rtv_validate_trace(rt_state);
+#endif
+	if (trace) {
 		RD::get_singleton()->draw_command_begin_label("Raytracing");
 		RENDER_TIMESTAMP("TLAS Build");
 
@@ -428,9 +500,6 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 			RD::get_singleton()->raytracing_list_bind_uniform_set(raytracing_list, bindless_set, 1);
 		}
 
-		// Make sure BDA referenced buffers are registered as dependencies -- these cannot be inferred by the draw graph.
-		raytracing->register_raytracing_buffer_dependencies(raytracing_list, rt_state);
-
 		// Raytracing dispatches at internal (pre-upscale) size
 		Size2i rt_size = rb->get_internal_size();
 		RD::get_singleton()->raytracing_list_trace_rays(raytracing_list, 0, raytracing->get_shader()->get_hit_sbt(rt_flags), rt_size.width, rt_size.height, 1);
@@ -447,6 +516,12 @@ void RenderForwardClusteredPT::_render_scene(RenderDataRD *p_render_data, const 
 		}
 
 		raytracing->copy_output_texture(p_render_data);
+	}
+
+	if (rt_state) {
+		// The captures and merges of later views, and other systems in later frames (particles, MultiMeshes, mesh
+		// updates), rewrite buffers the fog and the trace read through device addresses.
+		RD::get_singleton()->untracked_barrier();
 	}
 
 	{

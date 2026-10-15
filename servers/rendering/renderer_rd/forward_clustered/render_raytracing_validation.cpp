@@ -77,7 +77,6 @@ static const RD::BufferAddressRange *_rt_find_buffer(Span<RD::BufferAddressRange
 
 void RTValidation::check_view(const RTValidationView &p_view, LocalVector<String> &r_issues) const {
 	ERR_FAIL_COND(p_view.geometry_sources.size() != p_view.geometries.size() || p_view.material_sources.size() != p_view.materials.size());
-	ERR_FAIL_NULL(p_view.declared);
 
 	const auto check_address = [&](uint64_t p_address, uint64_t p_extent, RID p_source, const char *p_table, uint32_t p_index, const char *p_field) {
 		if (p_address == 0) {
@@ -101,10 +100,6 @@ void RTValidation::check_view(const RTValidationView &p_view, LocalVector<String
 		const uint64_t end = p_address - range->address + MAX(p_extent, (uint64_t)1);
 		if (end > range->size) {
 			r_issues.push_back(where + vformat(" reads %d bytes past the end of buffer (RID %d).", (int64_t)(end - range->size), (int64_t)range->buffer.get_id()));
-		}
-		if (range->written && !p_view.declared->has(range->buffer)) {
-			r_issues.push_back(where + vformat(" reads buffer (RID %d), which this frame's graph writes, but no traversal declares it: the read is not ordered after the write.",
-											   (int64_t)range->buffer.get_id()));
 		}
 	};
 
@@ -152,17 +147,6 @@ void RTValidation::check_view(const RTValidationView &p_view, LocalVector<String
 		}
 	}
 
-	for (const RTInPlaceBlas &blas : p_view.in_place_blases) {
-		bool ordered = false;
-		for (uint32_t i = 0; !ordered && i < blas.written_inputs.size(); i++) {
-			ordered = p_view.declared->has(blas.written_inputs[i]);
-		}
-		if (!ordered) {
-			r_issues.push_back(vformat("BLAS (RID %d) is rewritten in place, but none of its inputs is written in this frame's graph and declared by the traversals: an earlier trace may still walk it.",
-					(int64_t)blas.blas.get_id()));
-		}
-	}
-
 	for (const String &issue : pending) {
 		r_issues.push_back(issue);
 	}
@@ -174,6 +158,29 @@ void RTValidation::check_tlas(Span<uint32_t> p_custom_indices, uint32_t p_geomet
 			r_issues.push_back(vformat("%s instance %d starts at geometry %d of %d.", p_tlas_name, i, p_custom_indices[i], p_geometry_count));
 		}
 	}
+}
+
+void RTValidation::check_tlas_blases(Span<RID> p_stale_blases, const char *p_tlas_name, LocalVector<String> &r_issues) const {
+	for (const RID &blas : p_stale_blases) {
+		r_issues.push_back(vformat("%s references BLAS (RID %d), which was freed, rebuilt or refit after the TLAS was built: the trace would walk it.",
+				p_tlas_name, (int64_t)blas.get_id()));
+	}
+}
+
+bool RTValidation::report(const LocalVector<String> &p_issues) {
+	if (p_issues.is_empty()) {
+		return true;
+	}
+	constexpr uint32_t MAX_PRINTED = 16;
+	uint32_t printed = 0;
+	for (const String &issue : p_issues) {
+		if (printed < MAX_PRINTED && is_new_issue(issue)) {
+			ERR_PRINT("Path tracing strict validation: " + issue);
+			printed++;
+		}
+	}
+	WARN_PRINT_ONCE(vformat("Path tracing strict validation found %d problem(s); views with problems are not traced. Each problem is reported once.", (int64_t)p_issues.size()));
+	return false;
 }
 
 bool RTValidation::is_new_issue(const String &p_issue) {
@@ -205,28 +212,11 @@ RID RenderRaytracing::_rtv_material_source(const RTMaterialData *p_mat_data) con
 	return p_mat_data->uniform_buffer.is_valid() ? p_mat_data->uniform_buffer : mat_ubo_pool_buffer;
 }
 
-bool RenderRaytracing::_rtv_validate_view(const RTViewportState *p_state, Span<RID> p_built_blases, Span<RID> p_refit_blases) {
-	RD *rd = RD::get_singleton();
-
-	LocalVector<RID> declared_list;
-	collect_device_address_buffers(p_state, declared_list);
-	HashSet<RID> declared;
-	for (const RID &buffer : declared_list) {
-		declared.insert(buffer);
-	}
+bool RenderRaytracing::_rtv_validate_view(const RTViewportState *p_state) {
+	ERR_FAIL_NULL_V(p_state, false);
 
 	LocalVector<RD::BufferAddressRange> buffers;
-	rd->buffer_get_device_address_ranges(buffers);
-
-	LocalVector<RTInPlaceBlas> in_place;
-	for (const Span<RID> &list : { p_built_blases, p_refit_blases }) {
-		for (const RID &blas : list) {
-			if (rd->blas_is_built(blas)) {
-				in_place.push_back({ blas, {} });
-				rd->blas_get_written_input_buffers(blas, in_place[in_place.size() - 1].written_inputs);
-			}
-		}
-	}
+	RD::get_singleton()->buffer_get_device_address_ranges(buffers);
 
 	RTValidationView view;
 	view.geometries = geometry_data;
@@ -234,29 +224,36 @@ bool RenderRaytracing::_rtv_validate_view(const RTViewportState *p_state, Span<R
 	view.materials = material_data;
 	view.material_sources = material_sources;
 	view.bindless_texture_count = bindless_block ? bindless_block->get_texture_count() : 0;
-	view.declared = &declared;
 	view.buffers = buffers;
-	view.in_place_blases = in_place;
 
 	RTValidation &validation = rt_validation();
 	LocalVector<String> issues;
 	validation.check_view(view, issues);
 	validation.check_tlas(tlas_instances.custom_indices, geometry_data.size(), "Opaque TLAS", issues);
 	validation.check_tlas(tlas_transparent_instances.custom_indices, geometry_data.size(), "Transparent TLAS", issues);
-	if (issues.is_empty()) {
+	return validation.report(issues);
+}
+
+bool RenderRaytracing::rtv_validate_trace(const RTViewportState *p_state) {
+	RTValidation &validation = rt_validation();
+	if (!validation.strict) {
 		return true;
 	}
+	ERR_FAIL_NULL_V(p_state, false);
 
-	constexpr uint32_t MAX_PRINTED = 16;
-	uint32_t printed = 0;
-	for (const String &issue : issues) {
-		if (printed < MAX_PRINTED && validation.is_new_issue(issue)) {
-			ERR_PRINT("Path tracing strict validation: " + issue);
-			printed++;
-		}
+	const struct {
+		RID tlas;
+		const char *name;
+	} tlases[] = { { p_state->tlas, "Opaque TLAS" }, { p_state->tlas_transparent, "Transparent TLAS" } };
+
+	LocalVector<String> issues;
+	LocalVector<RID> stale;
+	for (const auto &tlas : tlases) {
+		stale.clear();
+		RD::get_singleton()->tlas_get_stale_blases(tlas.tlas, stale);
+		validation.check_tlas_blases(stale, tlas.name, issues);
 	}
-	WARN_PRINT_ONCE(vformat("Path tracing strict validation found %d problem(s); views with problems are not traced. Each problem is reported once.", (int64_t)issues.size()));
-	return false;
+	return validation.report(issues);
 }
 
 } // namespace RendererSceneRenderImplementation

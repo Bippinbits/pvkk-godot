@@ -609,6 +609,7 @@ struct RTDeformedCacheEntry {
 	RID owned_vb_full;
 	uint32_t owned_vb_full_capacity = 0; // Bytes; grow-only.
 	RID prev_pos_vb;
+	uint64_t prev_pos_vb_address = 0; // Device address of prev_pos_vb, taken when it is allocated.
 	uint32_t prev_pos_vb_capacity = 0; // Bytes; grow-only.
 	// Copy of the mesh index buffer: RD frees a BLAS with its input buffers, so the BLAS must not read mesh-owned memory.
 	RID owned_ib;
@@ -693,6 +694,7 @@ struct RTMergedMMEntry {
 	uint32_t idx_capacity = 0;
 
 	RID prev_pos_buffer; ///< Previous-frame float3 positions (N*V) for motion vectors.
+	uint64_t prev_pos_address = 0; ///< Device address of prev_pos_buffer, taken when it is allocated.
 	uint32_t prev_pos_capacity_bytes = 0;
 	uint32_t motion_frame = UINT32_MAX; ///< Frame prev_pos_buffer was baked for; stale on any other frame.
 
@@ -703,6 +705,8 @@ struct RTMergedMMEntry {
 	uint64_t cached_mm_last_change = 0;
 	bool blas_built_once = false;
 	bool indexed = false; // selects MODE_INDEXED vs MODE_NON_INDEXED variant
+	RTSurfaceData surface; ///< Traced geometry over the merged buffers, without motion vectors or BLAS.
+	bool surface_valid = false; ///< Cleared by structure changes; `surface` is rebuilt by the next traced use.
 	RTMergeBillboardParams baked_billboard; ///< Billboard inputs of the last bake (camera-dependent entries only).
 	RTCaptureState capture; ///< Vertex capture held by this entry, for captured MultiMesh and particle surfaces.
 };
@@ -858,7 +862,6 @@ struct RTViewportState {
 
 	RID geometry_buffer;
 	uint32_t geometry_buffer_capacity = 0;
-	LocalVector<RID> instance_data_buffers; // Non-owning BDA read dependencies for this viewport's geometry.
 	RID material_buffer;
 	uint32_t material_buffer_capacity = 0;
 	RID motion_index_buffer;
@@ -902,6 +905,7 @@ struct RTViewportState {
 class RenderRaytracing {
 	friend class RenderForwardClustered;
 	friend class RenderForwardClusteredPT;
+	friend class RTTlasBuilder;
 
 	RenderForwardClustered *owner = nullptr;
 	SceneShaderRaytracing *shader = nullptr;
@@ -946,17 +950,7 @@ class RenderRaytracing {
 	LocalVector<MMSurfaceHandles> mm_handles;
 
 	RID_Owner<RTDeformedCacheEntry> deformed_pool;
-	LocalVector<RID> deformed_active_this_frame;
-
-	// Mutable mesh storage buffers of surfaces refreshed this render frame. Region updates (Sprite3D, Label3D) write them
-	// in the draw graph and the trace reads them through device addresses, so every view of the frame declares them.
-	// Buffers only written by their initial upload stay out, so declaring doesn't make them mutable.
-	LocalVector<RID> refreshed_mesh_buffers;
-	uint32_t refreshed_mesh_buffers_frame = UINT32_MAX;
-	void _declare_refreshed_surface_buffers(const RTGeometrySources &p_sources);
-
 	RID_Owner<RTMergedMMEntry> merged_mm_pool;
-	LocalVector<RID> merged_mm_active_this_frame;
 
 	RTDeformedCacheEntry *_access_deformed_slot(RID &r_handle);
 	RTDeformedCacheEntry *_access_capture_entry(RID &r_handle);
@@ -971,6 +965,7 @@ class RenderRaytracing {
 	// Mesh surfaces use deformed_pool entries, MultiMesh and particle surfaces merged_mm_pool entries.
 	RID capture_arena;
 	uint32_t capture_arena_capacity = 0;
+	uint64_t capture_arena_used = 0; // Bytes the current view's capture requests take.
 	uint64_t capture_arena_window_peak = 0; // Largest view's arena size since capture_arena_window_start.
 	uint64_t capture_arena_window_start = 0; // OS ticks in msec.
 	void _reserve_capture_arena(uint64_t p_size);
@@ -1000,12 +995,17 @@ class RenderRaytracing {
 	};
 	LocalVector<CaptureCandidate> capture_candidates; // Per-view scratch: captured surfaces that are out of date.
 	LocalVector<RTVertexCapture::DrawParams> capture_params; // Per-view scratch.
-	HashMap<const void *, CaptureBinding> capture_bindings; // Per-view scratch, by surface.
+	LocalVector<CaptureBinding> capture_bindings; // Per-view scratch, indexed by the surface's rt_capture_binding.
+	uint64_t capture_view = 1; // Number of the view capture_bindings belongs to; bumped when they are cleared. Surfaces start at 0.
+	void _clear_capture_bindings();
+	void _bind_capture(const void *p_surf, const CaptureBinding &p_binding);
+	CaptureBinding *_capture_binding(const void *p_surf);
 	void _update_capture_mode(RTVertexCapture::Mode p_mode);
 	static RTVertexCapture::Stamps _capture_inputs(const void *p_surface_cache, uint32_t p_dependencies, const RTVertexCapture::Stamps &p_view, const RTVertexCapture::Layout &p_layout, uint64_t p_instances);
 	RTCaptureState *_capture_state(const CaptureBinding &p_binding);
 	void _reset_capture_entry(const CaptureBinding &p_binding);
 	void _free_capture_entry_map(HashMap<RTMMSurfaceKey, RID> &r_map, bool p_merged);
+	RTMaterialData *_surface_material(const void *p_surf);
 	bool _surface_hit_group_ready(const void *p_surf, uint32_t p_rt_flags);
 	CaptureBinding *_commit_capture(const void *p_surf, LocalVector<RTCaptureRequest> &r_captures, RTCaptureRequest *&r_recorded);
 	bool _resolve_captured_source(const void *p_surf, LocalVector<RTCaptureRequest> &r_captures, RTDeformedGeometrySource &r_source);
@@ -1026,6 +1026,8 @@ class RenderRaytracing {
 	// Dynamic Geometry debug view. Fed only while a viewport uses it; shared by viewports, since a BLAS updated by one is traced by all.
 	RTDynamicGeometryDebug dynamic_geometry_debug;
 	void _annotate_dynamic_geometry(const LocalVector<RID> &p_built, const LocalVector<RID> &p_refit);
+	// Writes the scratch and capture arena use of the view just built to its render info.
+	void _record_memory_info(const RenderDataRD *p_render_data) const;
 
 	// Unconverged state traced during frame not_ready_frame, accumulated over its viewports.
 	uint64_t not_ready_frame = UINT64_MAX;
@@ -1151,9 +1153,7 @@ class RenderRaytracing {
 	void mat_ubo_pool_update(uint32_t p_slot, const void *p_data, uint32_t p_size);
 	uint64_t mat_ubo_pool_get_address(uint32_t p_slot) const;
 
-	// Dedicated uniform buffers of materials that don't fit a pool slot. Shaders only read them through their
-	// address, so every trace declares them; that also makes the frame wait for their initial upload.
-	HashSet<RID> mat_dedicated_buffers;
+	// Frees the uniform buffer of a material that didn't fit a pool slot.
 	void _mat_free_dedicated_buffer(RTMaterialData *p_mat_data);
 
 	// Cache helpers.
@@ -1200,9 +1200,15 @@ class RenderRaytracing {
 			LocalVector<RID> &r_dirty_blas_update_list,
 			RTSurfaceData *r_surf_data);
 	void update_procedural_blas(RTProceduralState *p_state, LocalVector<RID> &r_dirty_blas_list);
-	LocalVector<RD::AccelerationStructureInstance> tlas_instance_scratch; // Reused by _build_one_tlas().
+	// Instances of the opaque or decal TLAS, and of the transparent TLAS, as handed to RD.
+	LocalVector<RD::AccelerationStructureInstance> tlas_instance_scratch;
+	LocalVector<RD::AccelerationStructureInstance> tlas_transparent_instance_scratch;
+	// Creates r_tlas, or recreates it when p_instances outgrew it, and converts p_instances into r_instances.
+	void _prepare_tlas(RID &r_tlas, uint32_t &r_max_instances, const RTInstanceArrays &p_instances, const String &p_name, LocalVector<RD::AccelerationStructureInstance> &r_instances);
+	// Prepares and builds r_tlas on its own, tracked by RD.
 	Error _build_one_tlas(RID &r_tlas, uint32_t &r_max_instances, const RTInstanceArrays &p_instances, const String &p_name);
-	/// Builds the dirty BLASes and both TLASes. On error the TLASes are invalidated and must not be traced this frame.
+	/// Builds the dirty BLASes and both TLASes in one batch, behind a full barrier. Nothing may read them before the
+	/// next untracked_barrier(). On error the TLASes are invalidated and must not be traced this frame.
 	Error build_acceleration_structures(RTViewportState *p_state, const LocalVector<RID> &p_dirty_blas_list, const LocalVector<RID> &p_dirty_blas_update_list);
 	void finalize_buffers(RTViewportState *p_state);
 	void prepare_frame();
@@ -1212,9 +1218,8 @@ class RenderRaytracing {
 	void _rtv_begin_view();
 	// The buffer the uniform address of p_mat_data was taken from, or a null RID when it has none.
 	RID _rtv_material_source(const RTMaterialData *p_mat_data) const;
-	// Runs the strict checks on the view about to be built; false when the view must not be traced.
-	// p_built_blases and p_refit_blases are the BLASes queued for this view.
-	bool _rtv_validate_view(const RTViewportState *p_state, Span<RID> p_built_blases, Span<RID> p_refit_blases);
+	// Runs the strict checks on the tables of the view just built; false when the view must not be traced.
+	bool _rtv_validate_view(const RTViewportState *p_state);
 
 	// Strict validation only: parallel to geometry_data and material_data.
 	LocalVector<RTGeometrySources> geometry_sources;
@@ -1278,10 +1283,13 @@ public:
 	RID dlss_rr_get_normal_roughness(RenderSceneBuffersRD *p_render_buffers) const;
 	RID dlss_rr_get_specular_hit_dist(RenderSceneBuffersRD *p_render_buffers) const;
 
-	void collect_device_address_buffers(const RTViewportState *p_state, LocalVector<RID> &r_buffers);
-
 	BitField<RSE::RenderingNotReadyReason> get_not_ready_reasons() const;
-	void register_raytracing_buffer_dependencies(RD::RaytracingListID p_list, const RTViewportState *p_state);
+
+#ifdef RT_VALIDATION_ENABLED
+	/// Under strict validation, false when a BLAS that a TLAS of p_state references was freed, rebuilt or refit after
+	/// the TLAS was built, so the trace must be skipped. Call right before tracing.
+	bool rtv_validate_trace(const RTViewportState *p_state);
+#endif
 
 	SceneShaderRaytracing *get_shader() const { return shader; }
 

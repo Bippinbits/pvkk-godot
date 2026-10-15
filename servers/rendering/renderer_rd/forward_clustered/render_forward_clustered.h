@@ -66,6 +66,7 @@ class RenderForwardClustered : public RendererSceneRenderRD {
 	friend SceneShaderForwardClustered;
 	friend SceneShaderRaytracing;
 	friend class RenderRaytracing;
+	friend class RTTlasBuilder;
 
 protected:
 	enum {
@@ -584,6 +585,9 @@ protected:
 		RID rt_material;
 
 		mutable RID rt_deformed_handle;
+		// Index into RenderRaytracing::capture_bindings, valid while rt_capture_view is that view's number.
+		mutable uint32_t rt_capture_binding = 0;
+		mutable uint64_t rt_capture_view = 0;
 
 		GeometryInstanceSurfaceDataCache *next = nullptr;
 		GeometryInstanceForwardClustered *owner = nullptr;

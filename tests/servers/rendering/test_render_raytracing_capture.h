@@ -42,7 +42,7 @@ static RTVertexCapture::ShaderTraits make_traits(RTVertexCapture::ShaderOverride
 	RTVertexCapture::ShaderTraits traits;
 	traits.override_mode = p_override;
 	traits.writes_vertex = p_writes_vertex;
-	traits.writes_modelview_or_projection = p_writes_modelview;
+	traits.writes_modelview = p_writes_modelview;
 	traits.particle_trails = p_trails;
 	return traits;
 }

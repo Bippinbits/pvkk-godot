@@ -3290,7 +3290,7 @@
 		</member>
 		<member name="rendering/pathtracing/vertex_capture_mode" type="int" setter="" getter="" default="0">
 			Controls which surfaces the path tracer vertex-captures: it runs the material's raster [code]vertex()[/code] function and traces the resulting geometry, so custom vertex displacement, hand-written [code]MODELVIEW_MATRIX[/code] billboards and particle trails match the rasterized image. Fixed-function [code]billboard[/code] render modes don't need a capture.
-			- [b]Automatic[/b] ([code]0[/code]): Captures shaders that write [code]VERTEX[/code], [code]MODELVIEW_MATRIX[/code] or [code]PROJECTION_MATRIX[/code] in [code]vertex()[/code], and shaders using [code]particle_trails[/code].
+			- [b]Automatic[/b] ([code]0[/code]): Captures shaders that write [code]VERTEX[/code] or [code]MODELVIEW_MATRIX[/code] in [code]vertex()[/code], and shaders using [code]particle_trails[/code].
 			- [b]Opt-in[/b] ([code]1[/code]): Only captures shaders with [code]render_mode rt_vertex_dynamic[/code] or [code]rt_vertex_frozen[/code] and shaders using [code]particle_trails[/code].
 			- [b]Disabled[/b] ([code]2[/code]): Never captures; surfaces are traced with their undeformed mesh.
 			Per shader, [code]rt_vertex_auto[/code] (default) follows this setting, [code]rt_vertex_dynamic[/code] always captures unless this setting is [b]Disabled[/b], [code]rt_vertex_static[/code] never captures, and [code]rt_vertex_frozen[/code] captures like [code]rt_vertex_dynamic[/code] but keeps the first capture until the mesh, skeleton, blend shapes or MultiMesh and particle instances change, ignoring [code]TIME[/code], the camera, the node transform and uniforms. Changes take effect immediately and drop every kept capture.
@@ -3348,6 +3348,9 @@
 		</member>
 		<member name="rendering/renderer/rendering_method.web" type="String" setter="" getter="" default="&quot;gl_compatibility&quot;">
 			Override for [member rendering/renderer/rendering_method] on web.
+		</member>
+		<member name="rendering/rendering_device/acceleration_structure/max_scratch_buffer_size_mb" type="int" setter="" getter="" default="256">
+			The maximum size in megabytes of the scratch buffer shared by acceleration structures built together in one batch, as the path tracer does. Builds take consecutive ranges of it. The buffer starts small and doubles whenever the rest is too small, until it reaches this size; after that, the next build waits for the previous ones and starts over at the beginning. Larger values let more builds run concurrently. A single build that needs more than this grows the buffer to fit and prints a warning.
 		</member>
 		<member name="rendering/rendering_device/d3d12/agility_sdk_version" type="int" setter="" getter="" default="618">
 			Version code of the [url=https://devblogs.microsoft.com/directx/directx12agility/]Direct3D 12 Agility SDK[/url] to use ([code]D3D12SDKVersion[/code]). This must match the [i]minor[/i] version that is installed next to the editor binary and in the export templates directory for the current editor version. For example, if you have [code]1.618.5[/code] installed, you need to input [code]618[/code] here.

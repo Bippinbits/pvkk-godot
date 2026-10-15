@@ -2039,11 +2039,25 @@ void MaterialStorage::shader_free(RID p_rid) {
 	shader_owner.free(p_rid);
 }
 
+void MaterialStorage::Shader::update_rt_hashes() {
+	const String &source = code_rt.is_empty() ? code : code_rt;
+	if (source.is_empty()) {
+		code_rt_hash = 0;
+		code_rt_hash_b = 0;
+		return;
+	}
+	// Two passes of hash64 with different bookends produce a 128-bit identity.
+	// Birthday problem is negligible for any realistic project shader count at 128 bit.
+	code_rt_hash = (String("RT_HG_A|") + source + "|A_END").hash64();
+	code_rt_hash_b = (String("RT_HG_B|") + source + "|B_END").hash64();
+}
+
 void MaterialStorage::shader_set_code(RID p_shader, const String &p_code) {
 	Shader *shader = shader_owner.get_or_null(p_shader);
 	ERR_FAIL_NULL(shader);
 
 	shader->code = p_code;
+	shader->update_rt_hashes();
 	String mode_string = ShaderLanguage::get_shader_type(p_code);
 
 	ShaderType new_type;
@@ -2126,17 +2140,7 @@ void MaterialStorage::shader_set_code_rt(RID p_shader, const String &p_code_rt) 
 
 	const bool changed = shader->code_rt != p_code_rt;
 	shader->code_rt = p_code_rt;
-	if (p_code_rt.is_empty()) {
-		shader->code_rt_hash = 0;
-		shader->code_rt_hash_b = 0;
-	} else {
-		// Two passes of hash64 with different bookends produce a 128-bit identity.
-		// Birthday problem is negligible for any realistic project shader count at 128 bit.
-		const String wrapped_a = String("RT_HG_A|") + p_code_rt + "|A_END";
-		const String wrapped_b = String("RT_HG_B|") + p_code_rt + "|B_END";
-		shader->code_rt_hash = wrapped_a.hash64();
-		shader->code_rt_hash_b = wrapped_b.hash64();
-	}
+	shader->update_rt_hashes();
 
 	// Always forward: the preceding `shader_set_code()` reset rt_* to raster
 	// mirrors, so we must re-establish the RT classification even when the
@@ -2425,25 +2429,12 @@ String MaterialStorage::material_get_shader_code_rt(RID p_material) const {
 
 uint64_t MaterialStorage::material_get_shader_code_rt_hash(RID p_material) const {
 	const Material *material = material_owner.get_or_null(p_material);
-	if (material && material->shader) {
-		if (material->shader->code_rt_hash != 0) {
-			return material->shader->code_rt_hash;
-		}
-		return material->shader->code.hash64();
-	}
-	return 0;
+	return material && material->shader ? material->shader->code_rt_hash : 0;
 }
 
 uint64_t MaterialStorage::material_get_shader_code_rt_hash_b(RID p_material) const {
 	const Material *material = material_owner.get_or_null(p_material);
-	if (material && material->shader) {
-		if (material->shader->code_rt_hash_b != 0) {
-			return material->shader->code_rt_hash_b;
-		}
-		const String wrapped_b = String("RT_HG_B|") + material->shader->code + "|B_END";
-		return wrapped_b.hash64();
-	}
-	return 0;
+	return material && material->shader ? material->shader->code_rt_hash_b : 0;
 }
 
 void MaterialStorage::material_set_param(RID p_material, const StringName &p_param, const Variant &p_value) {

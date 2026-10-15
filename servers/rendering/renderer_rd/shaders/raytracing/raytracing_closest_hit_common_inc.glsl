@@ -686,6 +686,64 @@ bool sample_surface_continuation(HitData h, MaterialResult m, vec3 N, vec3 V, in
 	return true;
 }
 
+#ifdef DLSS_RR_ENABLED
+/// Distance to the mirror-reflection hit for the specular hit-distance guide, -1.0 for
+/// rough surfaces and misses. Deterministic: RR guides must never carry sampling noise.
+float dlss_rr_specular_hit_distance(vec3 p_hit_pos, vec3 N, vec3 V, float p_roughness, uint p_mask) {
+	if (p_roughness >= MAX_DENOISER_SPECULAR_HIT_THRESHOLD) {
+		return -1.0;
+	}
+	vec3 spec_dir = reflect(-V, N);
+	rayQueryEXT spec_rq;
+	rayQueryInitializeEXT(spec_rq, tlas, RT_RAY_FLAGS | gl_RayFlagsTerminateOnFirstHitEXT,
+			p_mask, offset_ray_origin(p_hit_pos, spec_dir), 0.001, spec_dir, 10000.0);
+	while (rayQueryProceedEXT(spec_rq)) {
+		if (rayQueryGetIntersectionTypeEXT(spec_rq, false) == gl_RayQueryCandidateIntersectionTriangleEXT &&
+				ray_query_alpha_test(
+						RT_RQ_GEOMETRY_IDX(spec_rq, false),
+						rayQueryGetIntersectionPrimitiveIndexEXT(spec_rq, false),
+						rayQueryGetIntersectionBarycentricsEXT(spec_rq, false))) {
+			rayQueryConfirmIntersectionEXT(spec_rq);
+		}
+	}
+	return rayQueryGetIntersectionTypeEXT(spec_rq, true) != gl_RayQueryCommittedIntersectionNoneEXT
+			? rayQueryGetIntersectionTEXT(spec_rq, true)
+			: -1.0;
+}
+
+/// Composites a peel layer's RR guides over the ones stored for this pixel. p_cover is
+/// how much of what is behind the layer it hides. A premultiplied layer adds its albedos
+/// unscaled and takes over normal, roughness and hit distance by its share of the
+/// specular albedo, so its guides stay continuous at any alpha.
+void dlss_rr_composite_peel_guides(HitData h, MaterialResult m, vec3 N, vec3 V, float NdotV, float p_cover, bool p_premultiplied) {
+	ivec2 pixel = ivec2(gl_LaunchIDEXT.xy);
+	float source_weight = p_premultiplied ? 1.0 : p_cover;
+	float behind = 1.0 - p_cover;
+
+	vec3 diffuse = imageLoad(dlss_rr_diffuse_albedo, pixel).rgb * behind +
+			DLSSRR_computeDiffuseAlbedo(m.albedo, m.metalness) * source_weight;
+	imageStore(dlss_rr_diffuse_albedo, pixel, vec4(DLSSRR_encodeDiffuseAlbedo(diffuse), 1.0));
+
+	vec3 layer_specular = source_weight * DLSSRR_computeSpecularAlbedo(
+			m.albedo, m.metalness, material_specular_to_f0(m.specular), m.roughness, NdotV);
+	vec3 specular = imageLoad(dlss_rr_specular_albedo, pixel).rgb * behind + layer_specular;
+	imageStore(dlss_rr_specular_albedo, pixel, vec4(clamp(specular, vec3(0.04), vec3(1.0)), 1.0));
+
+	float share = p_premultiplied ? luminance(layer_specular) / max(luminance(specular), 1e-4) : p_cover;
+	vec4 prev_nr = imageLoad(dlss_rr_normal_roughness, pixel);
+	imageStore(dlss_rr_normal_roughness, pixel, vec4(normalize(mix(prev_nr.xyz, N, share)), mix(prev_nr.w, m.roughness, share)));
+
+	float layer_hit_dist = dlss_rr_specular_hit_distance(h.hit_pos, N, V, m.roughness, RT_VIS_MASK | RT_TMASK_TRANSPARENT);
+	float prev_hit_dist = imageLoad(dlss_rr_specular_hit_dist, pixel).x;
+	float hit_dist = mix(prev_hit_dist, layer_hit_dist, share);
+	if (prev_hit_dist < 0.0 || layer_hit_dist < 0.0) {
+		// Negative means no hit: keep whichever distance is valid instead of blending toward it.
+		hit_dist = max(prev_hit_dist, layer_hit_dist);
+	}
+	imageStore(dlss_rr_specular_hit_dist, pixel, vec4(hit_dist));
+}
+#endif // DLSS_RR_ENABLED
+
 /// Production shading: emissive + NEE direct lighting + BRDF importance sampling + next bounce.
 /// Also handles DLSS-RR G-buffer output on primary ray.
 void shade_and_bounce(HitData h, MaterialResult m) {
@@ -732,68 +790,40 @@ void shade_and_bounce(HitData h, MaterialResult m) {
 			}
 			// Add/Sub don't attenuate the destination (peel_alpha above), but they
 			// still need a chance at their own indirect bounce so they can pick up
-			// GI/sky ambient like every other blend class does.
-			continuation_alpha = material_alpha;
+			// GI/sky ambient like every other blend class does. Premult adds its
+			// direct light unscaled by alpha, so its bounce must be unscaled too.
+			continuation_alpha = (bclass == RT_BLEND_CLASS_PREMULT) ? 1.0 : material_alpha;
 			if (bclass != RT_BLEND_CLASS_ADD && bclass != RT_BLEND_CLASS_SUB) {
-				ps.radiance += branch_fog * continuation_alpha;
+				ps.radiance += branch_fog * material_alpha;
 			}
 
 			// Dominant surface: the first peel layer on the primary segment
 			// with alpha >= the dominant layer alpha owns depth/velocity and
 			// blends into RR guides. depth_draw_always owns depth regardless of its alpha.
+			// Premult reflects at full strength at any alpha, so it always
+			// composites into the RR guides.
 			float dominant_alpha = get_rt_param(RT_PARAM_TRANSPARENCY_DOMINANT_LAYER_ALPHA);
-			if (get_total_bounces(ps.packed_bounces_flags) == 0u && is_sample_zero(ps.packed_bounces_flags) &&
-					(ps.packed_bounces_flags & PEEL_FIRST_LAYER_FLAG) != 0u &&
-					(depth_barrier || (dominant_alpha > 0.0 && peel_alpha >= dominant_alpha))) {
+			bool primary_first_layer = get_total_bounces(ps.packed_bounces_flags) == 0u && is_sample_zero(ps.packed_bounces_flags) &&
+					(ps.packed_bounces_flags & PEEL_FIRST_LAYER_FLAG) != 0u;
+			bool dominant = depth_barrier || (dominant_alpha > 0.0 && peel_alpha >= dominant_alpha);
+			if (primary_first_layer && dominant) {
 				rt_store_ndc_depth(h.hit_pos);
 				rt_store_velocity(h.hit_pos);
-#ifdef DLSS_RR_ENABLED
-				ivec2 peel_pixel = ivec2(gl_LaunchIDEXT.xy);
-				float guide_alpha = depth_barrier ? material_alpha : peel_alpha;
-				vec3 layer_diffuse = DLSSRR_encodeDiffuseAlbedo(DLSSRR_computeDiffuseAlbedo(m.albedo, m.metalness));
-				vec4 prev_diffuse = imageLoad(dlss_rr_diffuse_albedo, peel_pixel);
-				imageStore(dlss_rr_diffuse_albedo, peel_pixel, vec4(mix(prev_diffuse.rgb, layer_diffuse, guide_alpha), 1.0));
-				vec4 prev_nr = imageLoad(dlss_rr_normal_roughness, peel_pixel);
-				vec3 blended_n = normalize(mix(prev_nr.xyz, N, guide_alpha));
-				imageStore(dlss_rr_normal_roughness, peel_pixel, vec4(blended_n, mix(prev_nr.w, m.roughness, guide_alpha)));
-				vec3 layer_specular = DLSSRR_computeSpecularAlbedo(
-						m.albedo, m.metalness, material_specular_to_f0(m.specular), m.roughness, NdotV);
-				vec4 prev_specular = imageLoad(dlss_rr_specular_albedo, peel_pixel);
-				imageStore(dlss_rr_specular_albedo, peel_pixel,
-						vec4(mix(prev_specular.rgb, clamp(layer_specular, vec3(0.04), vec3(1.0)), guide_alpha), 1.0));
-
-				if (m.roughness < MAX_DENOISER_SPECULAR_HIT_THRESHOLD) {
-					vec3 spec_dir = reflect(-V, N);
-					vec3 spec_origin = offset_ray_origin(h.hit_pos, spec_dir);
-					rayQueryEXT spec_rq;
-					rayQueryInitializeEXT(spec_rq, tlas, RT_RAY_FLAGS | gl_RayFlagsTerminateOnFirstHitEXT,
-							RT_VIS_MASK | RT_TMASK_TRANSPARENT, spec_origin, 0.001, spec_dir, 10000.0);
-					while (rayQueryProceedEXT(spec_rq)) {
-						if (rayQueryGetIntersectionTypeEXT(spec_rq, false) == gl_RayQueryCandidateIntersectionTriangleEXT &&
-								ray_query_alpha_test(
-										RT_RQ_GEOMETRY_IDX(spec_rq, false),
-										rayQueryGetIntersectionPrimitiveIndexEXT(spec_rq, false),
-										rayQueryGetIntersectionBarycentricsEXT(spec_rq, false))) {
-							rayQueryConfirmIntersectionEXT(spec_rq);
-						}
-					}
-					if (rayQueryGetIntersectionTypeEXT(spec_rq, true) != gl_RayQueryCommittedIntersectionNoneEXT) {
-						float layer_spec_hit_dist = rayQueryGetIntersectionTEXT(spec_rq, true);
-						vec4 prev_spec_hit_dist = imageLoad(dlss_rr_specular_hit_dist, peel_pixel);
-						imageStore(dlss_rr_specular_hit_dist, peel_pixel,
-								vec4(mix(prev_spec_hit_dist.x, layer_spec_hit_dist, guide_alpha)));
-					}
-				}
-#endif
 			}
+#ifdef DLSS_RR_ENABLED
+			bool premultiplied = bclass == RT_BLEND_CLASS_PREMULT;
+			if (primary_first_layer && (dominant || premultiplied)) {
+				dlss_rr_composite_peel_guides(h, m, N, V, NdotV, depth_barrier ? material_alpha : peel_alpha, premultiplied);
+			}
+#endif
 		}
 		ps.packed_bounces_flags = set_peel_alpha(ps.packed_bounces_flags, peel_alpha);
 		if (depth_barrier) {
 			ps.packed_bounces_flags |= PEEL_DEPTH_BARRIER_HIT_FLAG;
 		}
 		ps.packed_bounces_flags &= ~PEEL_HAS_CONTINUATION_FLAG;
-		// Continue with probability alpha rather than scaling throughput by it, so faint
-		// layers rarely spawn a full indirect path.
+		// Continue with probability continuation_alpha rather than scaling throughput by
+		// it, so faint layers rarely spawn a full indirect path.
 		if (rand(ps.rng_state) < continuation_alpha && sample_surface_continuation(h, m, N, V, ps)) {
 			ps.packed_bounces_flags |= PEEL_HAS_CONTINUATION_FLAG;
 		}
@@ -825,31 +855,7 @@ void shade_and_bounce(HitData h, MaterialResult m) {
 		imageStore(dlss_rr_specular_albedo, pixel, vec4(clamp(specular_albedo, vec3(0.04), vec3(1.0)), 1.0)); // match UNORM8 like before - fixes some issues with garbling..
 
 		imageStore(dlss_rr_normal_roughness, pixel, vec4(N, m.roughness));
-
-		// Specular hit distance via inline ray query (only for smooth surfaces).
-		float spec_hit_dist = -1.0;
-		if (m.roughness < MAX_DENOISER_SPECULAR_HIT_THRESHOLD) {
-			vec3 spec_dir = reflect(-V, N);
-			vec3 spec_origin = offset_ray_origin(h.hit_pos, spec_dir);
-
-			rayQueryEXT spec_rq;
-			rayQueryInitializeEXT(spec_rq, tlas, RT_RAY_FLAGS | gl_RayFlagsTerminateOnFirstHitEXT,
-					RT_VIS_MASK, spec_origin, 0.001, spec_dir, 10000.0);
-			while (rayQueryProceedEXT(spec_rq)) {
-				if (rayQueryGetIntersectionTypeEXT(spec_rq, false) == gl_RayQueryCandidateIntersectionTriangleEXT) {
-					if (ray_query_alpha_test(
-								RT_RQ_GEOMETRY_IDX(spec_rq, false),
-								rayQueryGetIntersectionPrimitiveIndexEXT(spec_rq, false),
-								rayQueryGetIntersectionBarycentricsEXT(spec_rq, false))) {
-						rayQueryConfirmIntersectionEXT(spec_rq);
-					}
-				}
-			}
-			if (rayQueryGetIntersectionTypeEXT(spec_rq, true) != gl_RayQueryCommittedIntersectionNoneEXT) {
-				spec_hit_dist = rayQueryGetIntersectionTEXT(spec_rq, true);
-			}
-		}
-		imageStore(dlss_rr_specular_hit_dist, pixel, vec4(spec_hit_dist));
+		imageStore(dlss_rr_specular_hit_dist, pixel, vec4(dlss_rr_specular_hit_distance(h.hit_pos, N, V, m.roughness, RT_VIS_MASK)));
 	}
 #endif
 

@@ -3508,6 +3508,11 @@ void Node3DEditorViewport::_notification(int p_what) {
 					if (rt_captured > 0) {
 						text += "\n" + vformat(TTR("RT Captures: %d (%d verts)"), rt_captured, rt_info(Viewport::RENDER_INFO_RT_CAPTURED_VERTICES));
 					}
+					auto rt_mb = [&](Viewport::RenderInfo p_kb_info) {
+						return (int64_t(rt_info(p_kb_info)) + 999) / 1000;
+					};
+					text += "\n" + vformat(TTR("RT AS Scratch: %04d / %04d MB (%03d rollovers)"), rt_mb(Viewport::RENDER_INFO_RT_SCRATCH_USED_KB), rt_mb(Viewport::RENDER_INFO_RT_SCRATCH_SIZE_KB), rt_info(Viewport::RENDER_INFO_RT_SCRATCH_ROLLOVERS));
+					text += "\n" + vformat(TTR("RT Capture Arena: %04d / %04d MB"), rt_mb(Viewport::RENDER_INFO_RT_CAPTURE_ARENA_USED_KB), rt_mb(Viewport::RENDER_INFO_RT_CAPTURE_ARENA_SIZE_KB));
 				}
 
 				info_label->set_text(text);

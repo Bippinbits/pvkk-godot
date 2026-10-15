@@ -136,8 +136,6 @@ bool RTFogShadows::prepare(RenderRaytracing *p_raytracing, RTViewportState *p_st
 	r_shadows.pipeline = pipelines[rays - 1].get_rid();
 	r_shadows.uniform_set = p_state->fog_shadows_uniform_set;
 	r_shadows.bindless_uniform_set = bindless_set;
-	r_shadows.device_address_buffers.clear();
-	p_raytracing->collect_device_address_buffers(p_state, r_shadows.device_address_buffers);
 	return true;
 }
 

@@ -39,29 +39,30 @@
 // stale address, a freed buffer or a missing barrier shows up as a GPU fault or garbage instead of an error.
 // RTValidation catches these on the CPU before the view is submitted.
 //
-// It keeps no registry of its own. Buffer liveness, addresses, sizes and writes in the draw graph being recorded
-// come from RD::buffer_get_device_address_ranges(); BLAS state and inputs from RD::blas_is_built() and
-// RD::blas_get_written_input_buffers(). Freeing, creating or writing a buffer therefore needs no bookkeeping.
+// Ordering is not checked: device address reads aren't tracked at all. The path tracer runs in phases separated by
+// full barriers instead, as described at the top of render_forward_clustered_pt.cpp.
+//
+// It keeps no registry of its own. Buffer liveness, addresses and sizes come from RD::buffer_get_device_address_ranges(),
+// and outdated BLASes of a TLAS from RD::tlas_get_stale_blases(). Freeing or creating a buffer therefore needs no
+// bookkeeping.
 //
 // Availability:
 //   - Exists only in DEV_ENABLED builds (profile debug or fulldebug). Elsewhere every hook compiles to nothing.
 //   - Runs only while rendering/pathtracing/debug/strict_validation is on. A view with problems is not traced:
-//     _rtv_validate_view() fails and build_tlas() returns null. Each distinct problem is printed once.
+//     _rtv_validate_view() fails and build_tlas() returns null, or rtv_validate_trace() fails right before the trace.
+//     Each distinct problem is printed once.
 //
 // Rules for render_raytracing.cpp:
 //   1. Every device address written into RT_GeometryData comes from _rt_buffer_address(buffer, sources.field), which
 //      records the buffer it was taken from in the entry's RTGeometrySources. push_tlas_entry() carries the sources
 //      into the frame tables. Material uniform addresses are matched against RTMaterialData::uniform_buffer, or the
 //      material UBO pool when it is unset.
-//   2. Every buffer read through a device address and written in the draw graph before the trace must be returned by
-//      collect_device_address_buffers(), which feeds the raytracing list's buffer dependencies.
-//   3. Custom material texture slots written into uniform blocks go through RT_VALIDATE(rt_validation().check_texture_slot(...)).
+//   2. Custom material texture slots written into uniform blocks go through RT_VALIDATE(rt_validation().check_texture_slot(...)).
 //
 // What gets reported: addresses outside any live buffer (stale or freed), addresses inside a different buffer than the
 // one recorded (freed and memory reused), addresses with no recorded buffer (rule 1 missed), reads past the end of a
-// buffer, buffers written in the graph but not declared (rule 2 missed), bindless texture indices out of range, TLAS
-// custom indices past the geometry table, and BLASes rewritten in place without a written and declared input, which
-// earlier traces of the frame may still walk. RD itself rejects TLAS instances of freed or unbuilt BLASes.
+// buffer, bindless texture indices out of range, TLAS custom indices past the geometry table, and TLASes traced after
+// a BLAS they reference was freed, rebuilt or refit. RD itself rejects TLAS instances of freed or unbuilt BLASes.
 //
 // Please run with strict validation on after any change to buffer lifetime, table layout or BLAS scheduling.
 
@@ -92,12 +93,6 @@ struct RT_GeometryData;
 struct RT_MaterialData;
 struct RTGeometrySources;
 
-// A BLAS rebuilt or refit in place: it was built before, so traces recorded earlier in the frame may still walk it.
-struct RTInPlaceBlas {
-	RID blas;
-	LocalVector<RID> written_inputs; // Its input buffers written in the draw graph being recorded.
-};
-
 // What check_view() inspects for one view.
 struct RTValidationView {
 	Span<RT_GeometryData> geometries;
@@ -105,9 +100,7 @@ struct RTValidationView {
 	Span<RT_MaterialData> materials;
 	Span<RID> material_sources; // Parallel to `materials`: the buffer each uniform_address was taken from.
 	uint32_t bindless_texture_count = 0;
-	const HashSet<RID> *declared = nullptr; // Buffers the traversals declare as read through device addresses.
 	Span<RD::BufferAddressRange> buffers; // From RD::buffer_get_device_address_ranges().
-	Span<RTInPlaceBlas> in_place_blases;
 };
 
 // CPU-side checks of what the path tracer hands to the GPU, run before submission.
@@ -122,11 +115,15 @@ public:
 	// Problems are reported with the current view.
 	void check_texture_slot(const String &p_name, uint32_t p_offset, uint32_t p_block_size, uint32_t p_index, uint32_t p_bindless_texture_count);
 
-	// Checks the view's geometry and material tables and its in-place BLAS writes. Appends one message per problem to r_issues.
+	// Checks the view's geometry and material tables. Appends one message per problem to r_issues.
 	void check_view(const RTValidationView &p_view, LocalVector<String> &r_issues) const;
 	// Checks that each custom index of a TLAS's instances is inside the geometry table.
 	void check_tlas(Span<uint32_t> p_custom_indices, uint32_t p_geometry_count, const char *p_tlas_name, LocalVector<String> &r_issues) const;
+	// Reports each BLAS of RD::tlas_get_stale_blases() for a TLAS about to be traced.
+	void check_tlas_blases(Span<RID> p_stale_blases, const char *p_tlas_name, LocalVector<String> &r_issues) const;
 
+	// Prints the issues not reported before; true when there are none, so the view may be traced.
+	bool report(const LocalVector<String> &p_issues);
 	// True the first time p_issue is passed, so persistent problems are reported once.
 	bool is_new_issue(const String &p_issue);
 

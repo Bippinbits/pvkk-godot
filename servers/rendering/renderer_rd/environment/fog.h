@@ -358,12 +358,12 @@ public:
 	static int get_process_shader_group() { return _get_fog_shader_group(); }
 	static int get_process_shader_group_count() { return VolumetricFogShader::SHADER_GROUP_MAX; }
 
-	// Replaces shadow map lookups of the density pass with ray queries, set 1 and 2 are owned by the caller.
+	// Replaces shadow map lookups of the density pass with ray queries, set 1 and 2 are owned by the caller. The caller
+	// also orders the buffers read through device addresses, which the draw graph can't see.
 	struct VolumetricFogRayQueryShadows {
 		RID pipeline;
 		RID uniform_set;
 		RID bindless_uniform_set;
-		LocalVector<RID> device_address_buffers;
 	};
 
 	struct VolumetricFogSettings {

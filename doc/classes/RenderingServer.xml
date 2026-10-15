@@ -5375,7 +5375,22 @@
 		<constant name="VIEWPORT_RENDER_INFO_RT_PENDING_SURFACES" value="15" enum="ViewportRenderInfo">
 			Number of surfaces left out of the ray tracing scene this frame because their hit shaders are still compiling (ray tracing only). Zero once every visible material is ready.
 		</constant>
-		<constant name="VIEWPORT_RENDER_INFO_MAX" value="16" enum="ViewportRenderInfo">
+		<constant name="VIEWPORT_RENDER_INFO_RT_SCRATCH_USED_KB" value="16" enum="ViewportRenderInfo">
+			Most scratch memory, in kilobytes, that this frame's acceleration structure builds used at once (ray tracing only).
+		</constant>
+		<constant name="VIEWPORT_RENDER_INFO_RT_SCRATCH_SIZE_KB" value="17" enum="ViewportRenderInfo">
+			Size, in kilobytes, of the scratch buffer shared by acceleration structure builds (ray tracing only). It grows up to [member ProjectSettings.rendering/rendering_device/acceleration_structure/max_scratch_buffer_size_mb].
+		</constant>
+		<constant name="VIEWPORT_RENDER_INFO_RT_SCRATCH_ROLLOVERS" value="18" enum="ViewportRenderInfo">
+			Number of barriers this frame's acceleration structure builds needed because the scratch buffer was full at its maximum size (ray tracing only). Raise [member ProjectSettings.rendering/rendering_device/acceleration_structure/max_scratch_buffer_size_mb] if this is often above zero.
+		</constant>
+		<constant name="VIEWPORT_RENDER_INFO_RT_CAPTURE_ARENA_USED_KB" value="19" enum="ViewportRenderInfo">
+			Memory, in kilobytes, taken by this frame's vertex captures in the capture arena (ray tracing only).
+		</constant>
+		<constant name="VIEWPORT_RENDER_INFO_RT_CAPTURE_ARENA_SIZE_KB" value="20" enum="ViewportRenderInfo">
+			Size, in kilobytes, of the vertex capture arena (ray tracing only).
+		</constant>
+		<constant name="VIEWPORT_RENDER_INFO_MAX" value="21" enum="ViewportRenderInfo">
 			Represents the size of the [enum ViewportRenderInfo] enum.
 		</constant>
 		<constant name="VIEWPORT_RENDER_INFO_TYPE_VISIBLE" value="0" enum="ViewportRenderInfoType">

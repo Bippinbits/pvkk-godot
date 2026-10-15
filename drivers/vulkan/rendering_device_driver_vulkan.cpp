@@ -31,6 +31,7 @@
 #include "rendering_device_driver_vulkan.h"
 
 #include "core/config/project_settings.h"
+#include "core/error/error_backtrace.h"
 #include "core/io/marshalls.h"
 #include "vulkan_hooks.h"
 
@@ -1446,6 +1447,10 @@ Error RenderingDeviceDriverVulkan::_initialize_device(const LocalVector<VkDevice
 		raytracing_validation_features.pNext = create_info_next;
 		raytracing_validation_features.rayTracingValidation = raytracing_capabilities.validation;
 		create_info_next = &raytracing_validation_features;
+		rt_validation_tracker = &context_driver->rt_validation_tracker_get();
+		print_line("Vulkan: NVIDIA ray tracing validation enabled; messages are printed as Vulkan validation errors, annotated with the acceleration structures they reference.");
+	} else if (Engine::get_singleton()->is_raytracing_validation_enabled()) {
+		WARN_PRINT("Vulkan: --raytracing-validation was requested, but the driver doesn't expose VK_NV_ray_tracing_validation.");
 	}
 
 	VkPhysicalDeviceVulkan11Features vulkan_1_1_features = {};
@@ -2108,6 +2113,13 @@ RDD::BufferID RenderingDeviceDriverVulkan::buffer_create(uint64_t p_size, BitFie
 	buf_info->allocation.handle = allocation;
 	buf_info->allocation.size = alloc_info.size;
 	buf_info->size = original_size;
+	if (p_usage.has_flag(BUFFER_USAGE_DEVICE_ADDRESS_BIT)) {
+		// Memory is bound once at creation, so the address never changes.
+		VkBufferDeviceAddressInfo address_info = {};
+		address_info.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+		address_info.buffer = vk_buffer;
+		buf_info->device_address = vkGetBufferDeviceAddress(vk_device, &address_info);
+	}
 
 	return BufferID(buf_info);
 }
@@ -2223,11 +2235,8 @@ void RenderingDeviceDriverVulkan::buffer_flush(BufferID p_buffer) {
 
 uint64_t RenderingDeviceDriverVulkan::buffer_get_device_address(BufferID p_buffer) {
 	const BufferInfo *buf_info = (const BufferInfo *)p_buffer.id;
-	VkBufferDeviceAddressInfo address_info = {};
-	address_info.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
-	address_info.pNext = nullptr;
-	address_info.buffer = buf_info->vk_buffer;
-	return vkGetBufferDeviceAddress(vk_device, &address_info);
+	DEV_ASSERT(buf_info->device_address != 0 && "Buffer was not created with BUFFER_USAGE_DEVICE_ADDRESS_BIT.");
+	return buf_info->device_address;
 }
 
 /*****************/
@@ -6438,6 +6447,9 @@ void RenderingDeviceDriverVulkan::_acceleration_structure_create(VkAccelerationS
 	ERR_FAIL_COND_MSG(err, vformat("Couldn't create Vulkan raytracing acceleration structure (VkResult error %d).", err));
 	r_accel_info->build_info.dstAccelerationStructure = r_accel_info->vk_acceleration_structure;
 	r_accel_info->cached_device_address = buffer_get_device_address(buffer);
+	if (rt_validation_tracker) {
+		rt_validation_tracker->add(r_accel_info->cached_device_address, p_type == VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR);
+	}
 #endif
 }
 
@@ -6445,6 +6457,9 @@ void RenderingDeviceDriverVulkan::acceleration_structure_free(AccelerationStruct
 #if VULKAN_RAYTRACING_ENABLED
 	AccelerationStructureInfo *accel_info = (AccelerationStructureInfo *)p_acceleration_structure.id;
 	ERR_FAIL_NULL_MSG(accel_info, "Vulkan raytracing acceleration structure input parameter is not valid.");
+	if (rt_validation_tracker) {
+		rt_validation_tracker->erase(accel_info->cached_device_address);
+	}
 	if (accel_info->buffer) {
 		buffer_free(accel_info->buffer);
 	}
@@ -6459,6 +6474,20 @@ uint32_t RenderingDeviceDriverVulkan::acceleration_structure_get_scratch_size_by
 	AccelerationStructureInfo *accel_info = (AccelerationStructureInfo *)p_acceleration_structure.id;
 	ERR_FAIL_NULL_V_MSG(accel_info, 0, "Vulkan raytracing acceleration structure input parameter is not valid.");
 	return accel_info->scratch_size;
+}
+
+void RenderingDeviceDriverVulkan::acceleration_structure_debug_record_build(AccelerationStructureID p_acceleration_structure, bool p_update, uint64_t p_frame) {
+	if (!rt_validation_tracker) {
+		return;
+	}
+	const AccelerationStructureInfo *accel_info = (const AccelerationStructureInfo *)p_acceleration_structure.id;
+	ERR_FAIL_NULL_MSG(accel_info, "Vulkan raytracing acceleration structure input parameter is not valid.");
+
+	void *stack[RTValidationTracker::MAX_STACK_FRAMES];
+	// Skip this function so the stack starts in RenderingDevice.
+	const uint32_t stack_size = backtrace_capture(stack, RTValidationTracker::MAX_STACK_FRAMES, 1);
+	const RTValidationTracker::BuildOperation operation = p_update ? RTValidationTracker::BUILD_OPERATION_UPDATE : RTValidationTracker::BUILD_OPERATION_BUILD;
+	rt_validation_tracker->record_build(accel_info->cached_device_address, operation, p_frame, Span<void *>(stack, stack_size));
 }
 
 VkStridedDeviceAddressRegionKHR RenderingDeviceDriverVulkan::_sbt_to_vk_strided_device_address_region(const ShaderBindingTable &p_sbt) {
@@ -6476,7 +6505,7 @@ VkStridedDeviceAddressRegionKHR RenderingDeviceDriverVulkan::_sbt_to_vk_strided_
 
 // ----- COMMANDS -----
 
-void RenderingDeviceDriverVulkan::command_build_blas(CommandBufferID p_cmd_buffer, AccelerationStructureID p_acceleration_structure, BufferID p_scratch_buffer) {
+void RenderingDeviceDriverVulkan::command_build_blas(CommandBufferID p_cmd_buffer, AccelerationStructureID p_acceleration_structure, BufferID p_scratch_buffer, uint64_t p_scratch_offset) {
 #if VULKAN_RAYTRACING_ENABLED
 	const CommandBufferInfo *command_buffer = (const CommandBufferInfo *)p_cmd_buffer.id;
 	AccelerationStructureInfo *accel_info = (AccelerationStructureInfo *)p_acceleration_structure.id;
@@ -6485,7 +6514,7 @@ void RenderingDeviceDriverVulkan::command_build_blas(CommandBufferID p_cmd_buffe
 	build_info->mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
 	build_info->srcAccelerationStructure = VK_NULL_HANDLE;
 	build_info->dstAccelerationStructure = accel_info->vk_acceleration_structure;
-	VkDeviceAddress scratch_address = buffer_get_device_address(p_scratch_buffer);
+	VkDeviceAddress scratch_address = buffer_get_device_address(p_scratch_buffer) + p_scratch_offset;
 	build_info->scratchData.deviceAddress = _align_up_address(scratch_address, accel_info->scratch_alignment);
 
 	const VkAccelerationStructureBuildRangeInfoKHR *range_infos = accel_info->range_infos.ptr();
@@ -6494,7 +6523,7 @@ void RenderingDeviceDriverVulkan::command_build_blas(CommandBufferID p_cmd_buffe
 #endif
 }
 
-void RenderingDeviceDriverVulkan::command_update_blas(CommandBufferID p_cmd_buffer, AccelerationStructureID p_acceleration_structure, BufferID p_scratch_buffer) {
+void RenderingDeviceDriverVulkan::command_update_blas(CommandBufferID p_cmd_buffer, AccelerationStructureID p_acceleration_structure, BufferID p_scratch_buffer, uint64_t p_scratch_offset) {
 #if VULKAN_RAYTRACING_ENABLED
 	const CommandBufferInfo *command_buffer = (const CommandBufferInfo *)p_cmd_buffer.id;
 	AccelerationStructureInfo *accel_info = (AccelerationStructureInfo *)p_acceleration_structure.id;
@@ -6503,7 +6532,7 @@ void RenderingDeviceDriverVulkan::command_update_blas(CommandBufferID p_cmd_buff
 	build_info->mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR;
 	build_info->srcAccelerationStructure = accel_info->vk_acceleration_structure;
 	build_info->dstAccelerationStructure = accel_info->vk_acceleration_structure;
-	VkDeviceAddress scratch_address = buffer_get_device_address(p_scratch_buffer);
+	VkDeviceAddress scratch_address = buffer_get_device_address(p_scratch_buffer) + p_scratch_offset;
 	build_info->scratchData.deviceAddress = _align_up_address(scratch_address, accel_info->scratch_alignment);
 
 	const VkAccelerationStructureBuildRangeInfoKHR *range_infos = accel_info->range_infos.ptr();
@@ -6512,7 +6541,7 @@ void RenderingDeviceDriverVulkan::command_update_blas(CommandBufferID p_cmd_buff
 #endif
 }
 
-void RenderingDeviceDriverVulkan::command_build_tlas(CommandBufferID p_cmd_buffer, AccelerationStructureID p_acceleration_structure, BufferID p_scratch_buffer, BufferID p_instance_buffer, uint32_t p_instance_offset, uint32_t p_instance_count) {
+void RenderingDeviceDriverVulkan::command_build_tlas(CommandBufferID p_cmd_buffer, AccelerationStructureID p_acceleration_structure, BufferID p_scratch_buffer, uint64_t p_scratch_offset, BufferID p_instance_buffer, uint32_t p_instance_offset, uint32_t p_instance_count) {
 #if VULKAN_RAYTRACING_ENABLED
 	const CommandBufferInfo *command_buffer = (const CommandBufferInfo *)p_cmd_buffer.id;
 	AccelerationStructureInfo *accel_info = (AccelerationStructureInfo *)p_acceleration_structure.id;
@@ -6521,7 +6550,7 @@ void RenderingDeviceDriverVulkan::command_build_tlas(CommandBufferID p_cmd_buffe
 	accel_info->range_infos[0].primitiveCount = p_instance_count;
 
 	VkAccelerationStructureBuildGeometryInfoKHR *build_info = &accel_info->build_info;
-	VkDeviceAddress scratch_address = buffer_get_device_address(p_scratch_buffer);
+	VkDeviceAddress scratch_address = buffer_get_device_address(p_scratch_buffer) + p_scratch_offset;
 	build_info->scratchData.deviceAddress = _align_up_address(scratch_address, accel_info->scratch_alignment);
 
 	const VkAccelerationStructureBuildRangeInfoKHR *range_infos = accel_info->range_infos.ptr();
@@ -7433,6 +7462,9 @@ void RenderingDeviceDriverVulkan::set_object_name(ObjectType p_type, ID p_driver
 		case OBJECT_TYPE_ACCELERATION_STRUCTURE: {
 			const AccelerationStructureInfo *asi = (const AccelerationStructureInfo *)p_driver_id.id;
 			_set_object_name(VK_OBJECT_TYPE_ACCELERATION_STRUCTURE_KHR, (uint64_t)asi->vk_acceleration_structure, p_name);
+			if (rt_validation_tracker) {
+				rt_validation_tracker->set_name(asi->cached_device_address, p_name);
+			}
 		} break;
 		case OBJECT_TYPE_RAYTRACING_PIPELINE: {
 			_set_object_name(VK_OBJECT_TYPE_PIPELINE, (uint64_t)p_driver_id.id, p_name);

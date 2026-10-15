@@ -85,8 +85,8 @@ public:
 		ShaderOverride override_mode = OVERRIDE_AUTO;
 		// User code writes VERTEX in vertex(). The injected fixed-function billboard doesn't count.
 		bool writes_vertex = false;
-		// User code writes MODELVIEW_MATRIX or PROJECTION_MATRIX in vertex().
-		bool writes_modelview_or_projection = false;
+		// User code writes MODELVIEW_MATRIX in vertex(). PROJECTION_MATRIX writes don't count: captures are taken in view space.
+		bool writes_modelview = false;
 		// The shader uses the particle_trails render mode.
 		bool particle_trails = false;
 		// Dependencies of vertex(), filled in by the path tracer on first capture. Reset with the traits when the code changes.
@@ -178,7 +178,7 @@ public:
 		if (p_traits.override_mode == OVERRIDE_DYNAMIC || p_traits.override_mode == OVERRIDE_FROZEN || p_traits.particle_trails) {
 			return true;
 		}
-		return p_mode == MODE_AUTOMATIC && (p_traits.writes_vertex || p_traits.writes_modelview_or_projection);
+		return p_mode == MODE_AUTOMATIC && (p_traits.writes_vertex || p_traits.writes_modelview);
 	}
 
 	// Byte layout of one capture in the capture arena: float3 positions of every point (instance * V + vertex),

@@ -180,8 +180,10 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	actions.usage_flag_pointers["ANISOTROPY"] = &uses_tangent;
 	actions.usage_flag_pointers["ANISOTROPY_FLOW"] = &uses_tangent;
 
-	actions.write_flag_pointers["MODELVIEW_MATRIX"] = &writes_modelview_or_projection;
-	actions.write_flag_pointers["PROJECTION_MATRIX"] = &writes_modelview_or_projection;
+	bool writes_modelview = false;
+	bool writes_projection = false;
+	actions.write_flag_pointers["MODELVIEW_MATRIX"] = &writes_modelview;
+	actions.write_flag_pointers["PROJECTION_MATRIX"] = &writes_projection;
 	actions.write_flag_pointers["VERTEX"] = &uses_vertex;
 	actions.write_flag_pointers["POSITION"] = &uses_position;
 	actions.write_flag_pointers["Z_CLIP_SCALE"] = &uses_z_clip_scale;
@@ -229,7 +231,8 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	billboard.mode = RenderingBillboard::Mode(billboard_modei);
 	rt_capture.override_mode = RTVertexCapture::ShaderOverride(rt_vertexi);
 	rt_capture.writes_vertex = uses_vertex;
-	rt_capture.writes_modelview_or_projection = writes_modelview_or_projection;
+	writes_modelview_or_projection = writes_modelview || writes_projection;
+	rt_capture.writes_modelview = writes_modelview;
 	rt_capture.particle_trails = uses_particle_trails;
 	if (depth_test_disabledi) {
 		depth_test = DEPTH_TEST_DISABLED;
