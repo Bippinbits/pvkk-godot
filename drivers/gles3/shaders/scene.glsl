@@ -2027,6 +2027,7 @@ void main() {
 	float premul_alpha = 1.0;
 #endif // PREMUL_ALPHA_USED
 	vec4 fog = vec4(0.0);
+	float global_fog_influence = 1.;
 #if defined(CUSTOM_RADIANCE_USED)
 	vec4 custom_radiance = vec4(0.0);
 #endif
@@ -2550,7 +2551,7 @@ void main() {
 	fog.xy = unpackHalf2x16(fog_rg);
 	fog.zw = unpackHalf2x16(fog_ba);
 
-	frag_color.rgb = mix(frag_color.rgb, fog.rgb, fog.a);
+	frag_color.rgb = mix(frag_color.rgb, mix(frag_color.rgb, fog.rgb, fog.a), global_fog_influence);
 #endif // !FOG_DISABLED
 
 	// Tonemap before writing as we are writing to an sRGB framebuffer
@@ -2822,7 +2823,7 @@ void main() {
 	fog.xy = unpackHalf2x16(fog_rg);
 	fog.zw = unpackHalf2x16(fog_ba);
 
-	additive_light_color *= (1.0 - fog.a);
+	additive_light_color *= mix(1.0, 1.0 - fog.a, global_fog_influence);
 #endif // !FOG_DISABLED
 
 	// Tonemap before writing as we are writing to an sRGB framebuffer
