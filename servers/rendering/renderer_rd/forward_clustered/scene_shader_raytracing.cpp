@@ -227,6 +227,7 @@ void SceneShaderRaytracing::ShaderData::_create_pipeline(PipelineKey p_pipeline_
 
 	RID pipeline = RD::get_singleton()->render_pipeline_create(shader_rid, p_pipeline_key.framebuffer_format_id, p_pipeline_key.vertex_format_id, primitive_rd, raster_state, multisample_state, depth_stencil_state, blend_state, 0, 0, specialization_constants);
 	ERR_FAIL_COND(pipeline.is_null());
+	RD::get_singleton()->set_resource_name(pipeline, vformat("RT raster pipeline [version=%d, key=0x%x]", p_pipeline_key.version, p_pipeline_key.hash()));
 
 	pipeline_hash_map.add_compiled_pipeline(p_pipeline_key.hash(), pipeline);
 }
@@ -1059,6 +1060,7 @@ bool SceneShaderRaytracing::_ensure_variant_compile_context(uint32_t p_rt_flags)
 
 	RID base_shader_rd = RD::get_singleton()->shader_create_from_bytecode(base_binary);
 	ERR_FAIL_COND_V(!base_shader_rd.is_valid(), false);
+	RD::get_singleton()->set_resource_name(base_shader_rd, vformat("RT base shader [flags=0x%x]", p_rt_flags));
 
 	PipelineBundle &bundle = pipeline_bundles[p_rt_flags];
 	bundle.base_shader = base_shader_rd;
@@ -1470,6 +1472,7 @@ void SceneShaderRaytracing::_build_pipeline_worker(PipelineBuildTask *p_task) {
 			p_task->new_ready_mask[i] = false;
 			continue;
 		}
+		RD::get_singleton()->set_resource_name(rid, vformat("RT hit group shader [hg=%d, flags=0x%x]", i, p_task->rt_flags));
 		p_task->new_per_hg_shaders[i] = rid;
 		p_task->new_ready_mask[i] = true;
 		created_here.push_back(rid);

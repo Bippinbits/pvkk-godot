@@ -401,7 +401,7 @@ _FORCE_INLINE_ static uint32_t _rt_indices_to_primitives(RSE::PrimitiveType p_pr
 	return (p_indices - subtractor[p_primitive]) / divisor[p_primitive];
 }
 
-static void _rt_update_or_grow_storage(RID &r_buffer, uint32_t &r_capacity, const void *p_data, uint32_t p_size) {
+static void _rt_update_or_grow_storage(RID &r_buffer, uint32_t &r_capacity, const void *p_data, uint32_t p_size, const char *p_name) {
 	if (p_size == 0) {
 		return;
 	}
@@ -414,6 +414,7 @@ static void _rt_update_or_grow_storage(RID &r_buffer, uint32_t &r_capacity, cons
 		init.resize(p_size);
 		memcpy(init.ptrw(), p_data, p_size);
 		r_buffer = RD::get_singleton()->storage_buffer_create(p_size, init);
+		RD::get_singleton()->set_resource_name(r_buffer, p_name);
 	} else {
 		RD::get_singleton()->buffer_update(r_buffer, 0, p_size, p_data);
 	}
@@ -474,6 +475,7 @@ void RenderRaytracing::initialize(RenderForwardClustered *p_owner) {
 	for (int i = 0; i < MergeShader::MODE_MAX; i++) {
 		mm_merge_shader.version_shader[i] = mm_merge_shader.shader.version_get_shader(mm_merge_shader.version, i);
 		mm_merge_shader.pipeline[i] = RD::get_singleton()->compute_pipeline_create(mm_merge_shader.version_shader[i]);
+		RD::get_singleton()->set_resource_name(mm_merge_shader.pipeline[i], "RT MM merge pipeline [mode=" + itos(i) + "]");
 	}
 }
 
@@ -1673,7 +1675,7 @@ void RenderRaytracing::prepare_vertex_captures(const RenderDataRD *p_render_data
 		return;
 	}
 
-	_rt_update_or_grow_storage(capture_params_buffer, capture_params_capacity, capture_params.ptr(), capture_params.size() * sizeof(RTVertexCapture::DrawParams));
+	_rt_update_or_grow_storage(capture_params_buffer, capture_params_capacity, capture_params.ptr(), capture_params.size() * sizeof(RTVertexCapture::DrawParams), "RT vertex capture params");
 }
 
 // Adds 50% headroom past p_size, at most MAX_HEADROOM, so ramping capture sizes don't reallocate every frame. Never
@@ -2311,6 +2313,7 @@ void RenderRaytracing::update_procedural_blas(RTProceduralState *p_state, LocalV
 		_free_rid_if_valid(p_state->gpu_buffer);
 		p_state->gpu_buffer = RD::get_singleton()->storage_buffer_create(required_bytes, aabb_bytes,
 				0, RD::BUFFER_CREATION_DEVICE_ADDRESS_BIT | RD::BUFFER_CREATION_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT);
+		RD::get_singleton()->set_resource_name(p_state->gpu_buffer, "RT procedural AABB buffer");
 		p_state->gpu_buffer_capacity = required_bytes;
 		p_state->aabb_count = aabb_count;
 		needs_new_blas = true;
@@ -2329,6 +2332,7 @@ void RenderRaytracing::update_procedural_blas(RTProceduralState *p_state, LocalV
 		geom.geometry.aabbs.count = aabb_count;
 		geom.geometry.aabbs.stride = 24; // VkAabbPositionsKHR: two float3 (min, max).
 		p_state->blas = RD::get_singleton()->blas_create({ &geom, 1 }, RD::ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT);
+		RD::get_singleton()->set_resource_name(p_state->blas, "RT procedural BLAS");
 	}
 
 	// BDA for shader access.
@@ -2833,13 +2837,13 @@ void RenderRaytracing::_prepare_tlas(RID &r_tlas, uint32_t &r_max_instances, con
 void RenderRaytracing::finalize_buffers(RTViewportState *p_state) {
 	// Grow-only uploads. Callers must not free these in prepare_frame().
 	_rt_update_or_grow_storage(p_state->geometry_buffer, p_state->geometry_buffer_capacity,
-			geometry_data.ptr(), geometry_data.size() * sizeof(RT_GeometryData));
+			geometry_data.ptr(), geometry_data.size() * sizeof(RT_GeometryData), "RT Geometry Buffer");
 	_rt_update_or_grow_storage(p_state->material_buffer, p_state->material_buffer_capacity,
-			material_data.ptr(), material_data.size() * sizeof(RT_MaterialData));
+			material_data.ptr(), material_data.size() * sizeof(RT_MaterialData), "RT Material Buffer");
 	_rt_update_or_grow_storage(p_state->motion_index_buffer, p_state->motion_index_buffer_capacity,
-			motion_indices.ptr(), motion_indices.size() * sizeof(int32_t));
+			motion_indices.ptr(), motion_indices.size() * sizeof(int32_t), "RT Motion Index Buffer");
 	_rt_update_or_grow_storage(p_state->motion_transform_buffer, p_state->motion_transform_buffer_capacity,
-			motion_transforms.ptr(), motion_transforms.size() * sizeof(RT_InstanceMotionData));
+			motion_transforms.ptr(), motion_transforms.size() * sizeof(RT_InstanceMotionData), "RT Motion Transform Buffer");
 }
 
 // ---------------------------------------------------------------------------
@@ -3030,6 +3034,7 @@ bool RenderRaytracing::_build_merged_mm_blas(
 		}
 		RID merge_uniform_set = rd->uniform_set_create(uniforms, mm_merge_shader.version_shader[mode], 0, /*p_linear_pool=*/true);
 		ERR_FAIL_COND_V(!merge_uniform_set.is_valid(), false);
+		rd->set_resource_name(merge_uniform_set, "RT MM merge uniform set");
 		uint32_t tbn_stride_words = tbn_stride / 4;
 		// In the merged vertex buffer the TBN block starts after all N*V float3 positions.
 		uint32_t dst_tbn_base_words = instance_count * vertex_count * 3;
@@ -3929,7 +3934,7 @@ void RTTlasBuilder::_upload_merge_billboards() {
 		state->merge_billboards.push_back(RTMergeBillboardParams());
 	}
 	_rt_update_or_grow_storage(state->merge_billboard_buffer, state->merge_billboard_buffer_capacity,
-			state->merge_billboards.ptr(), state->merge_billboards.size() * sizeof(RTMergeBillboardParams));
+			state->merge_billboards.ptr(), state->merge_billboards.size() * sizeof(RTMergeBillboardParams), "RT MM merge billboard params");
 }
 
 // Resolves the merged entry of every collected surface, then lets the scheduler pick an action for every dynamic one.
@@ -5057,6 +5062,9 @@ RID RenderRaytracing::update_uniform_set(RTViewportState *p_state, const RenderD
 				RenderForwardClustered::SCENE_UNIFORM_SET,
 				/*p_linear_pool=*/true);
 		p_state->scene_uniform_set = result;
+		if (result.is_valid()) {
+			RD::get_singleton()->set_resource_name(result, "RT Scene Uniform Set");
+		}
 
 		// === SET 1: Bindless textures ===
 		if (bindless_block && bindless_block->is_initialized()) {

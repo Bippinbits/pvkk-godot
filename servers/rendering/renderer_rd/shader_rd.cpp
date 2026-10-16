@@ -419,6 +419,9 @@ void ShaderRD::_compile_variant(uint32_t p_variant, CompileData p_data) {
 	{
 		p_data.version->variants.write[variant] = RD::get_singleton()->shader_create_from_bytecode_with_samplers(shader_data, p_data.version->variants[variant], immutable_samplers);
 		p_data.version->variant_data.write[variant] = shader_data;
+		if (p_data.version->variants[variant].is_valid()) {
+			RD::get_singleton()->set_resource_name(p_data.version->variants[variant], name + ":" + itos(variant));
+		}
 	}
 }
 
@@ -680,6 +683,7 @@ bool ShaderRD::_load_from_cache(Version *p_version, int p_group) {
 			}
 
 			p_version->variants.write[variant_id] = shader;
+			RD::get_singleton()->set_resource_name(shader, name + ":" + itos(variant_id));
 		}
 	}
 

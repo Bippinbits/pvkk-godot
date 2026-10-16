@@ -164,6 +164,7 @@ DLSSEffect::DLSSEffect() {
 	shaders.mvec_decode_shader.initialize(modes, "");
 	shaders.mvec_decode_version = shaders.mvec_decode_shader.version_create();
 	shaders.mvec_decode_pipeline = RD::get_singleton()->compute_pipeline_create(shaders.mvec_decode_shader.version_get_shader(shaders.mvec_decode_version, 0));
+	RD::get_singleton()->set_resource_name(shaders.mvec_decode_pipeline, "DLSS Motion Vector Decode Pipeline");
 }
 
 DLSSEffect::~DLSSEffect() {

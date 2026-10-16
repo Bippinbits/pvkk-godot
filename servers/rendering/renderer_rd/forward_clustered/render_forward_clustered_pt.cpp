@@ -732,6 +732,7 @@ void RenderForwardClusteredPT::_record_rt_captures(const RenderDataRD *p_render_
 
 	if (rt_capture_framebuffer.is_null()) {
 		rt_capture_framebuffer = RD::get_singleton()->framebuffer_create_empty(Size2i(1, 1), RD::TEXTURE_SAMPLES_1, RD::get_singleton()->framebuffer_format_create_empty());
+		RD::get_singleton()->set_resource_name(rt_capture_framebuffer, "RT Vertex Capture Framebuffer");
 	}
 
 	RD::DrawListID draw_list = RD::get_singleton()->draw_list_begin(rt_capture_framebuffer);

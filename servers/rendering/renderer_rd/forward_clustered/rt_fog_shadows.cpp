@@ -106,6 +106,7 @@ bool RTFogShadows::prepare(RenderRaytracing *p_raytracing, RTViewportState *p_st
 
 	if (p_state->fog_shadows_ubo.is_null()) {
 		p_state->fog_shadows_ubo = RD::get_singleton()->uniform_buffer_create(sizeof(ParamsUBO));
+		RD::get_singleton()->set_resource_name(p_state->fog_shadows_ubo, "RT Fog Shadows UBO");
 	}
 
 	ParamsUBO params = {};
@@ -129,6 +130,7 @@ bool RTFogShadows::prepare(RenderRaytracing *p_raytracing, RTViewportState *p_st
 	if (p_state->fog_shadows_uniform_set.is_null()) {
 		return false;
 	}
+	RD::get_singleton()->set_resource_name(p_state->fog_shadows_uniform_set, "RT Fog Shadows Uniform Set");
 
 	int rays = GLOBAL_GET_CACHED(int, "rendering/pathtracing/volumetric_fog_positional_shadow_rays");
 	rays = CLAMP(rays, 1, int(MAX_POSITIONAL_SHADOW_RAYS));
