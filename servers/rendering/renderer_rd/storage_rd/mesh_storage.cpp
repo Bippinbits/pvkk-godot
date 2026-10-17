@@ -2170,7 +2170,11 @@ void MeshStorage::_multimesh_set_buffer(RID p_multimesh, const Vector<float> &p_
 			cache_size *= 2;
 		}
 		multimesh->data_cache.resize(cache_size);
-		memset(multimesh->data_cache.ptrw(), 0, cache_size * sizeof(float));
+		// Both motion vector halves start as p_buffer, so the first frame reads as no motion.
+		float *w = multimesh->data_cache.ptrw();
+		for (uint32_t ofs = 0; ofs < cache_size; ofs += p_buffer.size()) {
+			memcpy(w + ofs, p_buffer.ptr(), p_buffer.size() * sizeof(float));
+		}
 		uint32_t region_count = Math::division_round_up((uint32_t)multimesh->instances, (uint32_t)MULTIMESH_DIRTY_REGION_SIZE);
 		multimesh->data_cache_dirty_regions = memnew_arr(bool, region_count);
 		memset(multimesh->data_cache_dirty_regions, 0, region_count * sizeof(bool));

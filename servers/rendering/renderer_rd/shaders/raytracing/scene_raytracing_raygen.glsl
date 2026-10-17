@@ -230,9 +230,10 @@ void main() {
 				uint continuation_rng = ps.rng_state;
 
 				float T_total = 1.0;
-				uint layer_cap = (bounce == 0u || is_singular_path(flags_entry))
-						? min(uint(get_rt_param(RT_PARAM_MAX_TRANSPARENCY_LAYERS)), 64u)
-						: 1u;
+				uint layer_param = bounce == 0u ? RT_PARAM_MAX_TRANSPARENCY_LAYERS
+						: is_singular_path(flags_entry) ? RT_PARAM_MAX_TRANSPARENCY_LAYERS_REFLECTION
+														: RT_PARAM_MAX_TRANSPARENCY_LAYERS_INDIRECT;
+				uint layer_cap = min(uint(get_rt_param(layer_param)), 64u);
 				float peel_tmin = 0.001;
 				for (uint l = 0u; l < layer_cap && T_total > (1.0 / 256.0) && peel_tmin < seg_end; l++) {
 					ps.hit_t = -1.0;
@@ -724,14 +725,14 @@ void main() {
 	vec3 tangent_space_normal = vec3(0.0, 0.0, 1.0);
 	vec3 final_normal = h.geometry_normal;
 	if ((mat.flags & RT_MAT_FLAG_HAS_NORMAL_MAP) != 0u) {
-		vec3 normal_sample = material_uv_sample(mat.normal_texture_idx, muv, mat.flags).rgb;
+		vec3 normal_sample = material_uv_sample(mat.normal_texture, muv, mat.flags).rgb;
 		tangent_space_normal.xy = normal_sample.xy * 2.0 - 1.0;
 		tangent_space_normal.z = sqrt(max(0.0, 1.0 - dot(tangent_space_normal.xy, tangent_space_normal.xy)));
 		final_normal = apply_normal_map(h, tangent_space_normal, mat.normal_map_depth);
 	}
 
 	// Texture sampling.
-	vec4 albedo_tex = material_uv_sample(mat.albedo_texture_idx, muv, mat.flags);
+	vec4 albedo_tex = material_uv_sample(mat.albedo_texture, muv, mat.flags);
 	vec3 albedo = albedo_tex.rgb * mat.albedo_color.rgb;
 	vec2 roughness_metallic = material_roughness_metallic(mat, muv);
 	float roughness = roughness_metallic.x;
@@ -745,7 +746,7 @@ void main() {
 	m.alpha = albedo_tex.a * mat.albedo_color.a;
 	m.roughness = roughness;
 	m.metalness = metalness;
-	m.specular = mat.specular;
+	m.specular = rt_material_surface_params(mat).z;
 	m.emissive = emissive;
 	m.normal = final_normal;
 	m.backlight = vec3(0.0); // TODO: wire up BaseMaterial3D's "Back Lighting" for RT (raster-only today).
@@ -758,7 +759,8 @@ void main() {
 				vec4(0.0, 0.0, 0.0, 1.0)));
 		vec3 fade_view_pos = (fade_view_mat * vec4(h.hit_pos, 1.0)).xyz;
 		if ((mat.flags & RT_MAT_FLAG_DISTANCE_FADE) != 0u) {
-			m.alpha *= clamp(smoothstep(mat.distance_fade_min, mat.distance_fade_max, length(fade_view_pos)), 0.0, 1.0);
+			vec2 distance_fade = unpackHalf2x16(mat.distance_fade);
+			m.alpha *= clamp(smoothstep(distance_fade.x, distance_fade.y, length(fade_view_pos)), 0.0, 1.0);
 		}
 		if ((mat.flags & RT_MAT_FLAG_PROXIMITY_FADE) != 0u && (payload.packed_bounces_flags & PEEL_RAY_FLAG) != 0u) {
 			// Peel rays carry the segment's opaque NDC depth; 0.0 = far (no fade).
@@ -911,18 +913,24 @@ void main() {
 		}
 
 		MaterialUV muv = material_uv_from_world(mat, geom, fetch_uv(geom, i0, i1, i2, bary), world_pos, world_normal);
-		vec4 albedo_tex = material_uv_sample(mat.albedo_texture_idx, muv, mat.flags);
+		vec4 albedo_tex = material_uv_sample(mat.albedo_texture, muv, mat.flags);
 		hit_alpha = albedo_tex.a * mat.albedo_color.a;
 		hit_tint = clamp(albedo_tex.rgb * mat.albedo_color.rgb, vec3(0.0), vec3(1.0));
 	}
 #endif
+	hit_alpha = rt_entry_alpha(mat, hit_alpha, scissor_threshold >= 0.0 ? scissor_threshold : 0.5);
 
 	uint blend_class = (mat.flags & RT_MAT_BLEND_CLASS_MASK) >> RT_MAT_BLEND_CLASS_SHIFT;
 	if (blend_class == RT_BLEND_CLASS_PREMULT && hit_alpha > 1e-6) {
 		hit_tint = clamp(hit_tint / hit_alpha, vec3(0.0), vec3(1.0));
 	}
 
-	if (scissor_threshold >= 0.0) {
+	if ((mat.flags & RT_MAT_FLAG_INSTANCE_FADE) != 0u) {
+		// rt_entry_alpha() zeroes scissored texels; the fade alone never reaches 0 (fully faded entries are culled).
+		if (hit_alpha <= 0.0) {
+			ignoreIntersectionEXT;
+		}
+	} else if (scissor_threshold >= 0.0) {
 		if (hit_alpha < scissor_threshold) {
 			ignoreIntersectionEXT;
 		}

@@ -136,10 +136,10 @@ void RTValidation::check_view(const RTValidationView &p_view, LocalVector<String
 			continue;
 		}
 		constexpr uint32_t TEXTURE_FIELDS = 6;
-		const uint32_t indices[TEXTURE_FIELDS] = { material.albedo_texture_idx, material.normal_texture_idx, material.roughness_texture_idx,
-			material.metallic_texture_idx, material.ao_texture_idx, material.emission_texture_idx };
-		const char *names[TEXTURE_FIELDS] = { "albedo_texture_idx", "normal_texture_idx", "roughness_texture_idx",
-			"metallic_texture_idx", "ao_texture_idx", "emission_texture_idx" };
+		const uint32_t indices[TEXTURE_FIELDS] = { material.albedo_texture.index, material.normal_texture.index, material.roughness_texture.index,
+			material.metallic_texture.index, material.ao_texture.index, material.emission_texture.index };
+		const char *names[TEXTURE_FIELDS] = { "albedo_texture", "normal_texture", "roughness_texture",
+			"metallic_texture", "ao_texture", "emission_texture" };
 		for (uint32_t t = 0; t < TEXTURE_FIELDS; t++) {
 			if (indices[t] >= p_view.bindless_texture_count) {
 				r_issues.push_back(vformat("materials[%d].%s = %d is outside the %d bindless textures.", i, names[t], indices[t], p_view.bindless_texture_count));

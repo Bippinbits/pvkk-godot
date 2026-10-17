@@ -24,7 +24,7 @@
 #define RT_PARAM_SAMPLE_COUNT 1 // rt_params[0].y - Samples per pixel
 #define RT_PARAM_MAX_BOUNCES 2 // rt_params[0].z - Maximum ray bounces
 #define RT_PARAM_DENOISER 3 // rt_params[0].w - Denoiser selection (0=none, 1=DLSS RR)
-#define RT_PARAM_MAX_TRANSPARENCY_LAYERS 4 // rt_params[1].x - per-segment peel budget for all blend modes (0 = transparency off)
+#define RT_PARAM_MAX_TRANSPARENCY_LAYERS 4 // rt_params[1].x - primary-segment peel budget for all blend modes (0 = transparency off)
 #define RT_PARAM_TRANSPARENCY_MAX_BOUNCE 5 // rt_params[1].y - last bounce with transparency handling
 #define RT_PARAM_TRANSPARENT_COUNT 6 // rt_params[1].z - instances in the unified TLAS transparent camera lane
 #define RT_PARAM_TRANSPARENCY_INDIRECT_RANGE 7 // rt_params[1].w - max peel distance on non-singular bounces (0 = unlimited)
@@ -39,6 +39,8 @@
 #define RT_PARAM_DECAL_COUNT 16 // rt_params[4].x - decals in the decal volume TLAS
 #define RT_PARAM_DECAL_MODE 17 // rt_params[4].y - RT_DECAL_MODE_*: which path vertices receive decals
 #define RT_PARAM_TRANSPARENCY_DOMINANT_LAYER_ALPHA 18 // rt_params[4].z - min alpha of the first peel layer to own depth/velocity (0 = never)
+#define RT_PARAM_MAX_TRANSPARENCY_LAYERS_REFLECTION 19 // rt_params[4].w - peel budget on singular (mirror) bounce segments
+#define RT_PARAM_MAX_TRANSPARENCY_LAYERS_INDIRECT 20 // rt_params[5].x - peel budget on other indirect segments
 
 // RT_PARAM_VIS_MODE values. Must match Environment::PathtracingDebugMode.
 #define RT_VIS_TRANSPARENCY_LAYERS 23

@@ -1270,20 +1270,20 @@ SceneShaderRaytracing::PipelineBuildTask *SceneShaderRaytracing::_make_pipeline_
 		if (fragment_code.is_empty() && entry.is_procedural) {
 			fragment_code =
 					"vec2 mat_uv = uv_interp * rt_mat.uv1_scale.xy + rt_mat.uv1_offset.xy;\n"
-					"vec4 albedo_tex = sample_material_texture(rt_mat.albedo_texture_idx, mat_uv, rt_mat.flags);\n"
+					"vec4 albedo_tex = sample_material_texture(rt_mat.albedo_texture, mat_uv, rt_mat.flags);\n"
 					"albedo = albedo_tex.rgb * rt_mat.albedo_color.rgb;\n"
 					"alpha = albedo_tex.a * rt_mat.albedo_color.a;\n"
 					"vec2 roughness_metallic = material_roughness_metallic_from_texels(rt_mat,\n"
-					"        sample_material_texture(rt_mat.roughness_texture_idx, mat_uv, rt_mat.flags),\n"
-					"        sample_material_texture(rt_mat.metallic_texture_idx, mat_uv, rt_mat.flags));\n"
+					"        sample_material_texture(rt_mat.roughness_texture, mat_uv, rt_mat.flags),\n"
+					"        sample_material_texture(rt_mat.metallic_texture, mat_uv, rt_mat.flags));\n"
 					"roughness = roughness_metallic.x;\n"
 					"metallic = roughness_metallic.y;\n"
 					"if ((rt_mat.flags & 1u) != 0u) {\n"
-					"    normal_map = sample_material_texture(rt_mat.normal_texture_idx, mat_uv, rt_mat.flags).rgb;\n"
+					"    normal_map = sample_material_texture(rt_mat.normal_texture, mat_uv, rt_mat.flags).rgb;\n"
 					"    normal_map_depth = rt_mat.normal_map_depth;\n"
 					"}\n"
 					"if ((rt_mat.flags & 2u) != 0u) {\n"
-					"    emission = sample_material_texture(rt_mat.emission_texture_idx, mat_uv, rt_mat.flags).rgb\n"
+					"    emission = sample_material_texture(rt_mat.emission_texture, mat_uv, rt_mat.flags).rgb\n"
 					"             * rt_mat.emission_color * rt_mat.emission_strength;\n"
 					"}\n";
 		}

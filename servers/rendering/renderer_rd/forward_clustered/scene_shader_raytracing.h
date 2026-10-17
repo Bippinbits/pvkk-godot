@@ -113,7 +113,7 @@ public:
 	constexpr static uint32_t RT_MAX_RECURSION_DEPTH = 2;
 
 	// Size of the float params buffer, injected into the RT shaders as RT_PARAM_COUNT.
-	static constexpr int RT_PARAM_COUNT = 20;
+	static constexpr int RT_PARAM_COUNT = 24;
 	static_assert(RT_PARAM_COUNT % 4 == 0, "rt_params is a std140 vec4 array.");
 
 	// Pathtracing parameter indices for the params buffer.
@@ -141,6 +141,8 @@ public:
 	static constexpr int RT_PARAM_DECAL_COUNT = 16;
 	static constexpr int RT_PARAM_DECAL_MODE = 17; // RTDecalMode.
 	static constexpr int RT_PARAM_TRANSPARENCY_DOMINANT_LAYER_ALPHA = 18; // 0 = transparent layers never own depth/velocity.
+	static constexpr int RT_PARAM_MAX_TRANSPARENCY_LAYERS_REFLECTION = 19;
+	static constexpr int RT_PARAM_MAX_TRANSPARENCY_LAYERS_INDIRECT = 20;
 
 	// Which path vertices receive decals (rendering/pathtracing/decals). Must match RT_DECAL_MODE_* in GLSL.
 	enum RTDecalMode {

@@ -139,36 +139,93 @@ struct RT_InstanceMotionData {
 };
 static_assert(sizeof(RT_InstanceMotionData) == 48, "RT_InstanceMotionData must be 48 bytes");
 
-// Must match GLSL MaterialData (std430, 144 bytes).
+// Must match GLSL MaterialData (std430, 128 bytes). Bitfields fill from the low bit on every supported compiler,
+// which test_render_raytracing.h checks; GLSL unpacks them with the accessors in raytracing_data_inc.glsl.
 struct alignas(16) RT_MaterialData {
-	uint32_t albedo_texture_idx;
-	uint32_t normal_texture_idx;
-	uint32_t roughness_texture_idx; // texture_roughness, or texture_orm for ORMMaterial3D.
-	uint32_t emission_texture_idx;
+	/// Bits of the bindless texture index (GLSL rt_texture_index()) in every *_texture; 0 = white.
+	static constexpr uint32_t TEXTURE_INDEX_BITS = 24;
+
+	struct {
+		uint32_t index : TEXTURE_INDEX_BITS;
+		uint32_t instance_transparency : 8; // Fade of the TLAS entry's instance (GLSL rt_instance_alpha()), see rt_instance_transparency().
+	} albedo_texture;
+	struct {
+		uint32_t index : TEXTURE_INDEX_BITS;
+		uint32_t unused : 8;
+	} normal_texture;
+	struct { // texture_roughness, or texture_orm for ORMMaterial3D.
+		uint32_t index : TEXTURE_INDEX_BITS;
+		uint32_t channel : 8; // RTTextureChannel (GLSL rt_texture_channel()).
+	} roughness_texture;
+	struct {
+		uint32_t index : TEXTURE_INDEX_BITS;
+		uint32_t unused : 8;
+	} emission_texture;
 	float albedo_color[4];
 	float emission_color[3];
 	float emission_strength;
 	float uv1_scale[3];
 	float normal_map_depth; // Strength [0..N], default 1.0 (not Z-depth).
 	float uv1_offset[3];
-	float specular; // Dielectric specular [0..1], default 0.5 -> F0 = 0.04.
-	float metallic;
-	float roughness;
-	uint32_t uv2_scale_xy; // fp16x2. UV2 transform: identity unless triplanar or applied by the vertex stage.
+	struct { // BaseMaterial3D scalars in [0, 1] as unorm8 (GLSL rt_material_surface_params()), see rt_unorm8().
+		uint32_t roughness : 8;
+		uint32_t metallic : 8;
+		uint32_t specular : 8; // Dielectric specular, default 0.5 -> F0 = 0.04.
+		uint32_t unused : 8;
+	} surface_params;
+	// UV2 transform, fp16 (see rt_material_set_packed_uv()): identity unless triplanar or applied by the vertex stage.
+	struct {
+		uint32_t x : 16;
+		uint32_t y : 16;
+	} uv2_scale_xy;
 	uint32_t flags;
 	uint64_t uniform_address; // BDA for custom shader uniform buffer (0 = none).
-	uint32_t blend_sharpness; // fp16x2: UV1, UV2 triplanar per-axis blend exponents, default 1.0.
+	struct { // fp16 triplanar per-axis blend exponents, default 1.0.
+		uint32_t uv1 : 16;
+		uint32_t uv2 : 16;
+	} blend_sharpness;
+	struct { // fp16 BaseMaterial3D distance_fade_min_distance, distance_fade_max_distance.
+		uint32_t min_distance : 16;
+		uint32_t max_distance : 16;
+	} distance_fade;
 	float proximity_fade_distance;
-	float distance_fade_min;
-	float distance_fade_max;
-	uint32_t uv2_offset_xy; // fp16x2, modulo 1.
-	uint32_t uv2_scale_offset_z; // fp16x2: scale.z, offset.z (modulo 1).
-	uint32_t metallic_texture_idx; // texture_metallic, or texture_orm for ORMMaterial3D.
-	uint32_t ao_texture_idx; // texture_ambient_occlusion (or texture_orm) when AO is enabled; 0 (white) otherwise.
-	uint32_t texture_channels; // RTTextureChannel per texture, see rt_material_texture_channels().
+	struct { // fp16, modulo 1.
+		uint32_t x : 16;
+		uint32_t y : 16;
+	} uv2_offset_xy;
+	struct { // fp16, offset modulo 1.
+		uint32_t scale : 16;
+		uint32_t offset : 16;
+	} uv2_scale_offset_z;
+	struct { // texture_metallic, or texture_orm for ORMMaterial3D.
+		uint32_t index : TEXTURE_INDEX_BITS;
+		uint32_t channel : 8; // RTTextureChannel (GLSL rt_texture_channel()).
+	} metallic_texture;
+	struct { // texture_ambient_occlusion (or texture_orm) when AO is enabled; 0 (white) otherwise.
+		uint32_t index : TEXTURE_INDEX_BITS;
+		uint32_t channel : 8; // RTTextureChannel (GLSL rt_texture_channel()).
+	} ao_texture;
 	uint32_t pad;
 };
-static_assert(sizeof(RT_MaterialData) == 144, "RT_MaterialData must be 144 bytes for std430");
+static_assert(sizeof(RT_MaterialData) == 128, "RT_MaterialData must be 128 bytes for std430, with every bitfield struct in one uint");
+static_assert(BindlessBlock::MAX_BINDLESS_TEXTURES <= (1u << RT_MaterialData::TEXTURE_INDEX_BITS), "Bindless texture indices must fit RT_MaterialData textures");
+
+/// p_value clamped to [0, 1] as GLSL unpackUnorm4x8() reads one byte.
+constexpr uint32_t rt_unorm8(float p_value) {
+	return uint32_t((p_value < 0.0f ? 0.0f : (p_value > 1.0f ? 1.0f : p_value)) * 255.0f + 0.5f);
+}
+
+/// RT_MaterialData::albedo_texture.instance_transparency of an instance drawn with p_alpha (force_alpha * parent_fade_alpha), 0 = opaque.
+constexpr uint32_t rt_instance_transparency(float p_alpha) {
+	return 255u - rt_unorm8(p_alpha);
+}
+
+/// Stores BaseMaterial3D's roughness, metallic and specular in r_mat.surface_params.
+constexpr void rt_material_set_surface_params(RT_MaterialData &r_mat, float p_roughness, float p_metallic, float p_specular) {
+	r_mat.surface_params.roughness = rt_unorm8(p_roughness);
+	r_mat.surface_params.metallic = rt_unorm8(p_metallic);
+	r_mat.surface_params.specular = rt_unorm8(p_specular);
+}
 
 /// BaseMaterial3D::TextureChannel values (matches GLSL RT_TEXTURE_CHANNEL_* in raytracing_data_inc.glsl).
 enum RTTextureChannel : uint32_t {
@@ -178,11 +235,6 @@ enum RTTextureChannel : uint32_t {
 	RT_TEXTURE_CHANNEL_ALPHA,
 	RT_TEXTURE_CHANNEL_GRAYSCALE,
 };
-
-/// Packs the channels BaseMaterial3D reads from its roughness, metallic and AO textures (3 bits each).
-constexpr uint32_t rt_material_texture_channels(RTTextureChannel p_roughness, RTTextureChannel p_metallic, RTTextureChannel p_ao) {
-	return uint32_t(p_roughness) | (uint32_t(p_metallic) << 3) | (uint32_t(p_ao) << 6);
-}
 
 /// Inverse of BaseMaterial3D's texture channel masks: one-hot, or thirds for grayscale.
 constexpr RTTextureChannel rt_texture_channel_from_mask(float p_r, float p_g, float p_b, float p_a) {
@@ -198,20 +250,19 @@ constexpr RTTextureChannel rt_texture_channel_from_mask(float p_r, float p_g, fl
 	return p_a > 0.0f ? RT_TEXTURE_CHANNEL_ALPHA : RT_TEXTURE_CHANNEL_RED;
 }
 
-/// Two floats as GLSL unpackHalf2x16() reads them: p_x in the low half.
-inline uint32_t rt_pack_half2(float p_x, float p_y) {
-	return uint32_t(Math::make_half_float(p_x)) | (uint32_t(Math::make_half_float(p_y)) << 16);
-}
-
 /// Stores the fp16 addressing fields. Material textures always repeat in RT, so the UV2 offset is
 /// reduced modulo 1, which keeps its fp16 error below 2^-11.
 inline void rt_material_set_packed_uv(RT_MaterialData &r_mat, float p_uv1_blend_sharpness,
 		const Vector3 &p_uv2_scale, const Vector3 &p_uv2_offset, float p_uv2_blend_sharpness) {
 	const Vector3 offset = p_uv2_offset - p_uv2_offset.floor();
-	r_mat.uv2_scale_xy = rt_pack_half2(p_uv2_scale.x, p_uv2_scale.y);
-	r_mat.uv2_offset_xy = rt_pack_half2(offset.x, offset.y);
-	r_mat.uv2_scale_offset_z = rt_pack_half2(p_uv2_scale.z, offset.z);
-	r_mat.blend_sharpness = rt_pack_half2(p_uv1_blend_sharpness, p_uv2_blend_sharpness);
+	r_mat.uv2_scale_xy.x = Math::make_half_float(p_uv2_scale.x);
+	r_mat.uv2_scale_xy.y = Math::make_half_float(p_uv2_scale.y);
+	r_mat.uv2_offset_xy.x = Math::make_half_float(offset.x);
+	r_mat.uv2_offset_xy.y = Math::make_half_float(offset.y);
+	r_mat.uv2_scale_offset_z.scale = Math::make_half_float(p_uv2_scale.z);
+	r_mat.uv2_scale_offset_z.offset = Math::make_half_float(offset.z);
+	r_mat.blend_sharpness.uv1 = Math::make_half_float(p_uv1_blend_sharpness);
+	r_mat.blend_sharpness.uv2 = Math::make_half_float(p_uv2_blend_sharpness);
 }
 
 /// White, rough, non-emissive dielectric with identity UV transforms and no textures.
@@ -224,9 +275,7 @@ inline RT_MaterialData rt_material_data_default() {
 		d.uv1_scale[i] = 1.0f;
 	}
 	d.normal_map_depth = 1.0f;
-	d.specular = 0.5f;
-	d.roughness = 1.0f;
-	d.texture_channels = rt_material_texture_channels(RT_TEXTURE_CHANNEL_RED, RT_TEXTURE_CHANNEL_RED, RT_TEXTURE_CHANNEL_RED);
+	rt_material_set_surface_params(d, 1.0f, 0.0f, 0.5f);
 	rt_material_set_packed_uv(d, 1.0f, Vector3(1, 1, 1), Vector3(), 1.0f);
 	return d;
 }
@@ -277,29 +326,32 @@ enum {
 	RT_MAT_FLAG_POINT_FILTER = 4u,
 	RT_MAT_FLAG_TRIPLANAR = 8u,
 	RT_MAT_FLAG_TRIPLANAR_WORLD = 16u,
-	// Blend class of transparent surfaces (bits 5-7); opaque surfaces leave 0.
-	RT_MAT_BLEND_CLASS_SHIFT = 5u,
+	RT_MAT_FLAG_DEPTH_DRAW_ALWAYS = 32u,
+	RT_MAT_FLAG_UNSHADED = 64u,
+	RT_MAT_FLAG_TRANSPARENT = 128u,
+	RT_MAT_FLAG_ALPHA_SCISSOR = 256u,
+	RT_MAT_FLAG_PROXIMITY_FADE = 512u,
+	RT_MAT_FLAG_DISTANCE_FADE = 1024u,
+	RT_MAT_FLAG_FOG_DISABLED = 2048u,
+	RT_MAT_FLAG_NO_RAY_QUERY_ALPHA = 4096u,
+	RT_MAT_FLAG_EMISSION_ADD = 8192u,
+	RT_MAT_FLAG_EMISSION_UV2 = 16384u,
+	RT_MAT_FLAG_UV2_TRIPLANAR = 32768u,
+	RT_MAT_FLAG_UV2_TRIPLANAR_WORLD = 65536u,
+	// Opaque material traced as transparent only because of the instance fade; it ignores material alpha like raster.
+	RT_MAT_FLAG_INSTANCE_FADE = 131072u,
+	// Multi-bit fields fill the top bits so new single-bit flags can grow upward.
+	// Blend class of transparent surfaces (bits 25-27); opaque surfaces leave 0.
+	RT_MAT_BLEND_CLASS_SHIFT = 25u,
 	RT_MAT_BLEND_CLASS_MIX = 0u,
 	RT_MAT_BLEND_CLASS_ADD = 1u,
 	RT_MAT_BLEND_CLASS_SUB = 2u,
 	RT_MAT_BLEND_CLASS_OIT = 3u,
 	RT_MAT_BLEND_CLASS_MUL = 4u,
 	RT_MAT_BLEND_CLASS_PREMULT = 5u,
-	RT_MAT_FLAG_DEPTH_DRAW_ALWAYS = 256u,
-	RT_MAT_FLAG_UNSHADED = 512u,
-	RT_MAT_FLAG_TRANSPARENT = 1024u,
-	RT_MAT_FLAG_ALPHA_SCISSOR = 2048u,
-	RT_MAT_FLAG_PROXIMITY_FADE = 4096u,
-	RT_MAT_FLAG_DISTANCE_FADE = 8192u,
-	RT_MAT_FLAG_FOG_DISABLED = 16384u,
-	RT_MAT_FLAG_NO_RAY_QUERY_ALPHA = 32768u,
-	RT_MAT_FLAG_EMISSION_ADD = 65536u,
-	RT_MAT_FLAG_EMISSION_UV2 = 131072u,
-	RT_MAT_FLAG_UV2_TRIPLANAR = 262144u,
-	RT_MAT_FLAG_UV2_TRIPLANAR_WORLD = 524288u,
-	// Diffuse mode (bits 20-21) and specular mode (bits 22-23), matching GODOT_DIFFUSE_* / GODOT_SPECULAR_* in brdf_inc.glsl.
-	RT_MAT_DIFFUSE_MODE_SHIFT = 20u,
-	RT_MAT_SPECULAR_MODE_SHIFT = 22u,
+	// Diffuse mode (bits 28-29) and specular mode (bits 30-31), matching GODOT_DIFFUSE_* / GODOT_SPECULAR_* in brdf_inc.glsl.
+	RT_MAT_DIFFUSE_MODE_SHIFT = 28u,
+	RT_MAT_SPECULAR_MODE_SHIFT = 30u,
 	RT_MAT_DIFFUSE_LAMBERT = 0u,
 	RT_MAT_DIFFUSE_BURLEY = 1u,
 	RT_MAT_DIFFUSE_LAMBERT_WRAP = 2u,

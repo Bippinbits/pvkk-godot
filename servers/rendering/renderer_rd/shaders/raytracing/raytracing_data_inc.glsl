@@ -75,45 +75,48 @@ struct InstanceMotionData {
 #define RT_MAT_FLAG_POINT_FILTER 4u
 #define RT_MAT_FLAG_TRIPLANAR 8u
 #define RT_MAT_FLAG_TRIPLANAR_WORLD 16u
+#define RT_MAT_FLAG_DEPTH_DRAW_ALWAYS 32u
+#define RT_MAT_FLAG_UNSHADED 64u
+#define RT_MAT_FLAG_TRANSPARENT 128u
+#define RT_MAT_FLAG_ALPHA_SCISSOR 256u
+#define RT_MAT_FLAG_PROXIMITY_FADE 512u
+#define RT_MAT_FLAG_DISTANCE_FADE 1024u
+#define RT_MAT_FLAG_FOG_DISABLED 2048u
+#define RT_MAT_FLAG_NO_RAY_QUERY_ALPHA 4096u
+#define RT_MAT_FLAG_EMISSION_ADD 8192u
+#define RT_MAT_FLAG_EMISSION_UV2 16384u
+#define RT_MAT_FLAG_UV2_TRIPLANAR 32768u
+#define RT_MAT_FLAG_UV2_TRIPLANAR_WORLD 65536u
+#define RT_MAT_FLAG_INSTANCE_FADE 131072u
 
-// Blend class of transparent surfaces (bits 5-7). Opaque surfaces leave 0.
-#define RT_MAT_BLEND_CLASS_SHIFT 5u
-#define RT_MAT_BLEND_CLASS_MASK (7u << 5u)
+// Multi-bit fields fill the top bits so new single-bit flags can grow upward.
+// Blend class of transparent surfaces (bits 25-27). Opaque surfaces leave 0.
+#define RT_MAT_BLEND_CLASS_SHIFT 25u
+#define RT_MAT_BLEND_CLASS_MASK (7u << RT_MAT_BLEND_CLASS_SHIFT)
 #define RT_BLEND_CLASS_MIX 0u
 #define RT_BLEND_CLASS_ADD 1u
 #define RT_BLEND_CLASS_SUB 2u
 #define RT_BLEND_CLASS_OIT 3u
 #define RT_BLEND_CLASS_MUL 4u
 #define RT_BLEND_CLASS_PREMULT 5u
-#define RT_MAT_FLAG_DEPTH_DRAW_ALWAYS 256u
-#define RT_MAT_FLAG_UNSHADED 512u
-#define RT_MAT_FLAG_TRANSPARENT 1024u
-#define RT_MAT_FLAG_ALPHA_SCISSOR 2048u
-#define RT_MAT_FLAG_PROXIMITY_FADE 4096u
-#define RT_MAT_FLAG_DISTANCE_FADE 8192u
-#define RT_MAT_FLAG_FOG_DISABLED 16384u
-#define RT_MAT_FLAG_NO_RAY_QUERY_ALPHA 32768u
-#define RT_MAT_FLAG_EMISSION_ADD 65536u
-#define RT_MAT_FLAG_EMISSION_UV2 131072u
-#define RT_MAT_FLAG_UV2_TRIPLANAR 262144u
-#define RT_MAT_FLAG_UV2_TRIPLANAR_WORLD 524288u
-// Godot diffuse mode (bits 20-21) and specular mode (bits 22-23), values GODOT_DIFFUSE_* / GODOT_SPECULAR_*.
-#define RT_MAT_DIFFUSE_MODE_SHIFT 20u
-#define RT_MAT_SPECULAR_MODE_SHIFT 22u
+// Godot diffuse mode (bits 28-29) and specular mode (bits 30-31), values GODOT_DIFFUSE_* / GODOT_SPECULAR_*.
+#define RT_MAT_DIFFUSE_MODE_SHIFT 28u
+#define RT_MAT_SPECULAR_MODE_SHIFT 30u
 #define RT_MAT_SHADING_MODE_MASK 3u
 
-// MaterialData::texture_channels (must match RTTextureChannel in render_raytracing.h).
+// Texture channel of the roughness, metallic and AO textures (must match RTTextureChannel in render_raytracing.h).
 #define RT_TEXTURE_CHANNEL_GRAYSCALE 4u
-#define RT_TEXTURE_CHANNEL_ROUGHNESS_SHIFT 0u
-#define RT_TEXTURE_CHANNEL_METALLIC_SHIFT 3u
-#define RT_TEXTURE_CHANNEL_AO_SHIFT 6u
-#define RT_TEXTURE_CHANNEL_MASK 7u
+
+// Bitfields of C++ RT_MaterialData, unpacked by the accessors below. *_texture: bindless index in bits 0-23
+// (RT_MaterialData::TEXTURE_INDEX_BITS), channel or albedo instance transparency in bits 24-31.
+#define RT_TEXTURE_INDEX_BITS 24u
+#define RT_TEXTURE_INDEX_MASK 0xFFFFFFu
 
 struct MaterialData {
-	uint albedo_texture_idx;
-	uint normal_texture_idx;
-	uint roughness_texture_idx; // texture_roughness, or texture_orm for ORMMaterial3D.
-	uint emission_texture_idx;
+	uint albedo_texture; // Bits 24-31: transparency of the TLAS entry's instance, see rt_instance_alpha().
+	uint normal_texture;
+	uint roughness_texture; // texture_roughness, or texture_orm for ORMMaterial3D.
+	uint emission_texture;
 
 	vec4 albedo_color;
 	vec3 emission_color;
@@ -122,22 +125,47 @@ struct MaterialData {
 	vec3 uv1_scale; // UV1 scale (default 1,1,1)
 	float normal_map_depth; // Normal map strength (default 1.0)
 	vec3 uv1_offset; // UV1 offset (default 0,0,0)
-	float specular; // Dielectric specular [0..1], default 0.5 -> F0 = 0.04.
+	uint surface_params; // unorm8x4: roughness, metallic, specular, unused. See rt_material_surface_params().
 
-	float metallic;
-	float roughness;
 	uint uv2_scale_xy; // fp16x2. UV2 transform: identity unless triplanar or applied by the vertex stage.
 	uint flags; // See RT_MAT_FLAG_*.
-
 	uint64_t uniform_address; // BDA for custom shader uniform buffer (0 = none)
+
 	uint blend_sharpness; // fp16x2: UV1, UV2 triplanar per-axis blend exponents (default 1.0)
+	uint distance_fade; // fp16x2: distance_fade_min, distance_fade_max.
 	float proximity_fade_distance;
-	float distance_fade_min;
-	float distance_fade_max;
 	uint uv2_offset_xy; // fp16x2, modulo 1.
 	uint uv2_scale_offset_z; // fp16x2: scale.z, offset.z (modulo 1).
-	uint metallic_texture_idx; // texture_metallic, or texture_orm for ORMMaterial3D.
-	uint ao_texture_idx; // AO texture when AO is enabled; 0 (white) otherwise.
-	uint texture_channels; // RT_TEXTURE_CHANNEL_* for roughness, metallic, AO (3 bits each).
+	uint metallic_texture; // texture_metallic, or texture_orm for ORMMaterial3D.
+	uint ao_texture; // AO texture when AO is enabled; 0 (white) otherwise.
 	uint pad;
 };
+
+/// Bindless index of a MaterialData *_texture.
+uint rt_texture_index(uint p_texture) {
+	return p_texture & RT_TEXTURE_INDEX_MASK;
+}
+
+/// RT_TEXTURE_CHANNEL_* of a MaterialData roughness, metallic or AO texture.
+uint rt_texture_channel(uint p_texture) {
+	return p_texture >> RT_TEXTURE_INDEX_BITS;
+}
+
+/// GeometryInstance3D transparency and visibility-parent fade of the TLAS entry, scaling surface alpha.
+float rt_instance_alpha(MaterialData p_mat) {
+	return 1.0 - float(p_mat.albedo_texture >> RT_TEXTURE_INDEX_BITS) / 255.0;
+}
+
+/// Coverage of material alpha p_alpha on the TLAS entry. Opaque materials traced as transparent only for the
+/// instance fade (RT_MAT_FLAG_INSTANCE_FADE) ignore material alpha like raster, except for their alpha scissor.
+float rt_entry_alpha(MaterialData p_mat, float p_alpha, float p_scissor_threshold) {
+	if ((p_mat.flags & RT_MAT_FLAG_INSTANCE_FADE) != 0u) {
+		p_alpha = (p_mat.flags & RT_MAT_FLAG_ALPHA_SCISSOR) != 0u && p_alpha < p_scissor_threshold ? 0.0 : 1.0;
+	}
+	return p_alpha * rt_instance_alpha(p_mat);
+}
+
+/// BaseMaterial3D roughness, metallic, specular (x, y, z).
+vec3 rt_material_surface_params(MaterialData p_mat) {
+	return unpackUnorm4x8(p_mat.surface_params).xyz;
+}

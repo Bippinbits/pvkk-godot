@@ -11,8 +11,9 @@ vec4 ray_query_surface(uint geometry_idx, uint primitive_id, vec2 candidate_bary
 
 	MaterialData mat = materials[geometry_idx];
 	uv = uv * mat.uv1_scale.xy + mat.uv1_offset.xy;
-	vec4 albedo = textureLod(sampler2D(bindless_textures[nonuniformEXT(mat.albedo_texture_idx)], SAMPLER_LINEAR_WITH_MIPMAPS_REPEAT), uv, lod);
+	vec4 albedo = textureLod(sampler2D(bindless_textures[nonuniformEXT(rt_texture_index(mat.albedo_texture))], SAMPLER_LINEAR_WITH_MIPMAPS_REPEAT), uv, lod);
 	albedo *= mat.albedo_color;
+	albedo.a = rt_entry_alpha(mat, albedo.a, 0.5);
 	if ((mat.flags & RT_MAT_BLEND_CLASS_MASK) == RT_BLEND_CLASS_PREMULT && albedo.a > 1e-6) {
 		albedo.rgb /= albedo.a;
 	}
@@ -47,8 +48,9 @@ vec3 ray_query_shadow_transmittance(vec3 origin, vec3 direction, float t_min, fl
 		}
 
 		bool transparent_shadow = (mat_flags & RT_MAT_FLAG_TRANSPARENT) != 0u;
-		// The albedo sample below would be meaningless, so like raster, cast no shadow.
-		if (transparent_shadow && (mat_flags & RT_MAT_FLAG_NO_RAY_QUERY_ALPHA) != 0u) {
+		// The albedo sample below would be meaningless, so like raster, cast no shadow. Faded opaque
+		// materials only need the instance fade.
+		if (transparent_shadow && (mat_flags & (RT_MAT_FLAG_NO_RAY_QUERY_ALPHA | RT_MAT_FLAG_INSTANCE_FADE)) == RT_MAT_FLAG_NO_RAY_QUERY_ALPHA) {
 			continue;
 		}
 

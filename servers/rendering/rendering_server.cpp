@@ -3868,6 +3868,8 @@ void RenderingServer::init() {
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/pathtracing/debug_heatmap_opacity", PROPERTY_HINT_RANGE, "0,1,0.01"), 0.35);
 	// Transparency budgets are live UBO parameters.
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/pathtracing/max_transparency_layers", PROPERTY_HINT_RANGE, "0,64,1"), 4);
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/pathtracing/max_transparency_layers_reflection", PROPERTY_HINT_RANGE, "0,64,1"), 4);
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/pathtracing/max_transparency_layers_indirect", PROPERTY_HINT_RANGE, "0,64,1"), 1);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/pathtracing/transparency_max_bounce", PROPERTY_HINT_RANGE, "0,8,1"), 2);
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/pathtracing/transparency_indirect_range", PROPERTY_HINT_RANGE, "0,10000,0.1,or_greater,suffix:m"), 0.0);
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/pathtracing/transparency_indirect_fade", PROPERTY_HINT_RANGE, "0,1000,0.1,or_greater,suffix:m"), 0.0);

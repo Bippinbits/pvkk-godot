@@ -355,7 +355,7 @@ vec3 debug_directional_shadow_blocker(vec3 p_geometry_normal) {
 			continue;
 		}
 		bool transparent = (mat_flags & RT_MAT_FLAG_TRANSPARENT) != 0u;
-		if (transparent && (mat_flags & RT_MAT_FLAG_NO_RAY_QUERY_ALPHA) != 0u) {
+		if (transparent && (mat_flags & (RT_MAT_FLAG_NO_RAY_QUERY_ALPHA | RT_MAT_FLAG_INSTANCE_FADE)) == RT_MAT_FLAG_NO_RAY_QUERY_ALPHA) {
 			continue;
 		}
 		vec4 surface = ray_query_surface(geometry_idx, rayQueryGetIntersectionPrimitiveIndexEXT(rq, false), rayQueryGetIntersectionBarycentricsEXT(rq, false), 0.0);
@@ -747,6 +747,8 @@ void dlss_rr_composite_peel_guides(HitData h, MaterialResult m, vec3 N, vec3 V, 
 /// Production shading: emissive + NEE direct lighting + BRDF importance sampling + next bounce.
 /// Also handles DLSS-RR G-buffer output on primary ray.
 void shade_and_bounce(HitData h, MaterialResult m) {
+	// Any-hit already rejected alpha-scissored texels.
+	m.alpha = rt_entry_alpha(materials[h.geometry_idx], m.alpha, 0.0);
 	PathState ps = path_unpack(payload);
 	// Every surface bounds this ray segment, even if it cannot continue the path.
 	ps.hit_t = gl_HitTEXT;

@@ -112,36 +112,74 @@ TEST_CASE("[RenderRaytracing] The default material is a non-emissive dielectric 
 	const RT_MaterialData d = rt_material_data_default();
 	CHECK(d.flags == 0u);
 	CHECK(d.emission_strength == 0.0f);
-	CHECK(d.emission_texture_idx == 0u);
+	CHECK(d.emission_texture.index == 0u);
 	CHECK(d.albedo_color[3] == 1.0f);
-	CHECK(d.roughness == 1.0f);
-	CHECK(d.specular == 0.5f);
+	CHECK(d.albedo_texture.index == 0u);
+	CHECK(d.albedo_texture.instance_transparency == 0u);
+	CHECK(d.surface_params.roughness == 255u);
+	CHECK(d.surface_params.metallic == 0u);
+	CHECK(d.surface_params.specular == 128u);
 	for (int i = 0; i < 3; i++) {
 		CHECK(d.emission_color[i] == 0.0f);
 		CHECK(d.uv1_scale[i] == 1.0f);
 		CHECK(d.uv1_offset[i] == 0.0f);
 	}
-	CHECK(d.uv2_scale_xy == rt_pack_half2(1.0f, 1.0f));
-	CHECK(d.uv2_offset_xy == 0u);
-	CHECK(d.uv2_scale_offset_z == rt_pack_half2(1.0f, 0.0f));
-	CHECK(d.blend_sharpness == rt_pack_half2(1.0f, 1.0f));
-}
-
-static float unpack_half(uint32_t p_packed, bool p_high) {
-	return Math::half_to_float(uint16_t(p_high ? p_packed >> 16 : p_packed & 0xFFFFu));
+	CHECK(Math::half_to_float(d.uv2_scale_xy.x) == 1.0f);
+	CHECK(Math::half_to_float(d.uv2_scale_xy.y) == 1.0f);
+	CHECK(Math::half_to_float(d.uv2_scale_offset_z.scale) == 1.0f);
+	CHECK(d.uv2_scale_offset_z.offset == 0u);
+	CHECK(d.uv2_offset_xy.x == 0u);
+	CHECK(d.uv2_offset_xy.y == 0u);
+	CHECK(Math::half_to_float(d.blend_sharpness.uv1) == 1.0f);
+	CHECK(Math::half_to_float(d.blend_sharpness.uv2) == 1.0f);
 }
 
 TEST_CASE("[RenderRaytracing] Packed UV fields round-trip, with the UV2 offset reduced modulo 1") {
 	RT_MaterialData d = rt_material_data_default();
 	rt_material_set_packed_uv(d, 8.0f, Vector3(2.0f, 0.5f, 4.0f), Vector3(3.25f, -0.75f, 1.5f), 40.0f);
-	CHECK(unpack_half(d.uv2_scale_xy, false) == 2.0f);
-	CHECK(unpack_half(d.uv2_scale_xy, true) == 0.5f);
-	CHECK(unpack_half(d.uv2_scale_offset_z, false) == 4.0f);
-	CHECK(unpack_half(d.uv2_offset_xy, false) == 0.25f);
-	CHECK(unpack_half(d.uv2_offset_xy, true) == 0.25f);
-	CHECK(unpack_half(d.uv2_scale_offset_z, true) == 0.5f);
-	CHECK(unpack_half(d.blend_sharpness, false) == 8.0f);
-	CHECK(unpack_half(d.blend_sharpness, true) == 40.0f);
+	CHECK(Math::half_to_float(d.uv2_scale_xy.x) == 2.0f);
+	CHECK(Math::half_to_float(d.uv2_scale_xy.y) == 0.5f);
+	CHECK(Math::half_to_float(d.uv2_scale_offset_z.scale) == 4.0f);
+	CHECK(Math::half_to_float(d.uv2_offset_xy.x) == 0.25f);
+	CHECK(Math::half_to_float(d.uv2_offset_xy.y) == 0.25f);
+	CHECK(Math::half_to_float(d.uv2_scale_offset_z.offset) == 0.5f);
+	CHECK(Math::half_to_float(d.blend_sharpness.uv1) == 8.0f);
+	CHECK(Math::half_to_float(d.blend_sharpness.uv2) == 40.0f);
+}
+
+template <typename T>
+static uint32_t as_uint(const T &p_bitfields) {
+	static_assert(sizeof(T) == sizeof(uint32_t));
+	uint32_t word = 0;
+	memcpy(&word, &p_bitfields, sizeof(word));
+	return word;
+}
+
+TEST_CASE("[RenderRaytracing] Material bitfields fill from the low bit, as the GLSL accessors unpack them") {
+	RT_MaterialData d = {};
+	d.roughness_texture.index = BindlessBlock::MAX_BINDLESS_TEXTURES - 1;
+	d.roughness_texture.channel = RT_TEXTURE_CHANNEL_GRAYSCALE;
+	CHECK(as_uint(d.roughness_texture) == ((BindlessBlock::MAX_BINDLESS_TEXTURES - 1) | (uint32_t(RT_TEXTURE_CHANNEL_GRAYSCALE) << RT_MaterialData::TEXTURE_INDEX_BITS)));
+
+	d.albedo_texture.index = 7;
+	d.albedo_texture.instance_transparency = 0xAB;
+	CHECK(as_uint(d.albedo_texture) == (7u | (0xABu << RT_MaterialData::TEXTURE_INDEX_BITS)));
+
+	rt_material_set_surface_params(d, 1.0f, 0.0f, 0.5f);
+	CHECK(as_uint(d.surface_params) == (255u | (128u << 16)));
+
+	// unpackHalf2x16() reads x from the low half.
+	d.uv2_scale_xy.x = 0x1234;
+	d.uv2_scale_xy.y = 0xABCD;
+	CHECK(as_uint(d.uv2_scale_xy) == 0xABCD1234u);
+}
+
+TEST_CASE("[RenderRaytracing] Instance transparency is zero when opaque and saturates outside [0, 1]") {
+	CHECK(rt_instance_transparency(1.0f) == 0u);
+	CHECK(rt_instance_transparency(0.0f) == 255u);
+	CHECK(rt_instance_transparency(0.5f) == 127u);
+	CHECK(rt_instance_transparency(2.0f) == 0u);
+	CHECK(rt_instance_transparency(-1.0f) == 255u);
 }
 
 TEST_CASE("[RenderRaytracing] Light distance fade is full before the begin distance and smoothstepped to zero over the length") {
@@ -251,11 +289,20 @@ TEST_CASE("[RenderRaytracing] Strict validation checks TLAS instances and bindle
 	CHECK(issues.size() == 3);
 
 	RT_MaterialData material = rt_material_data_default();
-	material.albedo_texture_idx = 7;
+	material.albedo_texture.index = 7;
 	const RT_MaterialData materials[] = { material };
 	issues.clear();
 	validation.check_view(Span<RT_GeometryData>(), materials, 4, HashSet<RID>(), issues);
 	CHECK(issues.size() == 1);
+
+	// The instance transparency is not part of the bindless index.
+	RT_MaterialData faded = rt_material_data_default();
+	faded.albedo_texture.index = 3;
+	faded.albedo_texture.instance_transparency = rt_instance_transparency(0.0f);
+	const RT_MaterialData faded_materials[] = { faded };
+	issues.clear();
+	validation.check_view(Span<RT_GeometryData>(), faded_materials, 4, HashSet<RID>(), issues);
+	CHECK(issues.is_empty());
 
 	issues.clear();
 	validation.check_texture_slot("tex", 60, 64, 3, 4);

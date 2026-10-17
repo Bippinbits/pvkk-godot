@@ -267,6 +267,18 @@ static RTMergeBillboardParams _rt_merge_billboard_params(const RenderingBillboar
 	return params;
 }
 
+// Transform of the MultiMesh instance record at p_record (row-major 3x4).
+static Transform3D _rt_mm_record_transform(const float *p_record) {
+	Transform3D xform;
+	for (int row = 0; row < 3; row++) {
+		xform.basis.rows[row][0] = p_record[row * 4 + 0];
+		xform.basis.rows[row][1] = p_record[row * 4 + 1];
+		xform.basis.rows[row][2] = p_record[row * 4 + 2];
+		xform.origin[row] = p_record[row * 4 + 3];
+	}
+	return xform;
+}
+
 static bool _rt_multimesh_source(RID p_multimesh, RTInstanceSource &r_source) {
 	RendererRD::MeshStorage *mesh_storage = RendererRD::MeshStorage::get_singleton();
 	if (mesh_storage->multimesh_get_transform_format(p_multimesh) != RSE::MULTIMESH_TRANSFORM_3D) {
@@ -2423,12 +2435,12 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 	// Albedo is a color texture - needs sRGB->linear conversion
 	RID albedo_rd = get_material_texture("texture_albedo", true);
 	if (albedo_rd.is_valid()) {
-		mat.albedo_texture_idx = bindless_block->add_texture(albedo_rd);
+		mat.albedo_texture.index = bindless_block->add_texture(albedo_rd);
 	}
 
 	RID normal_rd = get_material_texture("texture_normal");
 	if (normal_rd.is_valid()) {
-		mat.normal_texture_idx = bindless_block->add_texture(normal_rd);
+		mat.normal_texture.index = bindless_block->add_texture(normal_rd);
 		mat.flags |= RT_MAT_FLAG_HAS_NORMAL_MAP;
 
 		Variant normal_scale_var = material_storage->material_get_param(p_material_rid, "normal_scale");
@@ -2454,22 +2466,27 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 		Vector4 mask = v;
 		return rt_texture_channel_from_mask(mask.x, mask.y, mask.z, mask.w);
 	};
+	auto set_texture = [](auto &r_texture, uint32_t p_index, RTTextureChannel p_channel) {
+		r_texture.index = p_index;
+		r_texture.channel = p_channel;
+	};
 
 	// Roughness, metallic and AO, sampled like BaseMaterial3D's generated fragment code.
 	const bool ao_enabled = rt_state.ambient_occlusion;
 	if (rt_state.orm) {
 		const uint32_t orm_idx = get_texture_idx("texture_orm");
-		mat.roughness_texture_idx = orm_idx;
-		mat.metallic_texture_idx = orm_idx;
-		mat.ao_texture_idx = ao_enabled ? orm_idx : 0u;
-		mat.texture_channels = rt_material_texture_channels(RT_TEXTURE_CHANNEL_GREEN, RT_TEXTURE_CHANNEL_BLUE, RT_TEXTURE_CHANNEL_RED);
+		set_texture(mat.roughness_texture, orm_idx, RT_TEXTURE_CHANNEL_GREEN);
+		set_texture(mat.metallic_texture, orm_idx, RT_TEXTURE_CHANNEL_BLUE);
+		if (ao_enabled) {
+			set_texture(mat.ao_texture, orm_idx, RT_TEXTURE_CHANNEL_RED);
+		}
 	} else {
 		const RTTextureChannel roughness_channel = RTTextureChannel(MIN(uint32_t(rt_state.roughness_texture_channel), uint32_t(RT_TEXTURE_CHANNEL_GRAYSCALE)));
-		mat.roughness_texture_idx = get_texture_idx("texture_roughness");
-		mat.metallic_texture_idx = get_texture_idx("texture_metallic");
-		mat.ao_texture_idx = ao_enabled ? get_texture_idx("texture_ambient_occlusion") : 0u;
-		mat.texture_channels = rt_material_texture_channels(roughness_channel, get_mask_channel("metallic_texture_channel"),
-				ao_enabled ? get_mask_channel("ao_texture_channel") : RT_TEXTURE_CHANNEL_RED);
+		set_texture(mat.roughness_texture, get_texture_idx("texture_roughness"), roughness_channel);
+		set_texture(mat.metallic_texture, get_texture_idx("texture_metallic"), get_mask_channel("metallic_texture_channel"));
+		if (ao_enabled) {
+			set_texture(mat.ao_texture, get_texture_idx("texture_ambient_occlusion"), get_mask_channel("ao_texture_channel"));
+		}
 	}
 
 	// BaseMaterial3D keeps emission params populated with the feature disabled.
@@ -2478,7 +2495,7 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 	// Emission is a color texture - needs sRGB->linear conversion
 	RID emission_rd = emission_enabled ? get_material_texture("texture_emission", true) : RID();
 	if (emission_rd.is_valid()) {
-		mat.emission_texture_idx = bindless_block->add_texture(emission_rd);
+		mat.emission_texture.index = bindless_block->add_texture(emission_rd);
 		mat.flags |= RT_MAT_FLAG_HAS_EMISSION_TEX;
 		// Set sensible defaults for emission when texture is present
 		mat.emission_color[0] = 1.0f;
@@ -2607,12 +2624,12 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 			}
 
 			// If the shader declared hint_alpha, mirror that bindless index into
-			// mat.albedo_texture_idx so ray_query_alpha_test() can sample it cheaply.
+			// mat.albedo_texture so ray_query_alpha_test() can sample it cheaply.
 			if (cse->alpha_texture_buffer_offset != UINT32_MAX &&
 					cse->alpha_texture_buffer_offset + 4 <= cse->uniform_total_size) {
 				uint32_t alpha_idx = 0;
 				memcpy(&alpha_idx, ubo_data.ptr() + cse->alpha_texture_buffer_offset, 4);
-				mat.albedo_texture_idx = alpha_idx;
+				mat.albedo_texture.index = alpha_idx;
 			}
 
 			// Try the suballoc pool first. Common materials (UBO <= slot size)
@@ -2659,26 +2676,13 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 		}
 	}
 
-	Variant metallic_var = material_storage->material_get_param(p_material_rid, "metallic");
-	if (metallic_var.get_type() == Variant::FLOAT) {
-		mat.metallic = metallic_var;
-	}
-
-	Variant roughness_var = material_storage->material_get_param(p_material_rid, "roughness");
-	if (roughness_var.get_type() == Variant::FLOAT) {
-		mat.roughness = roughness_var;
-	}
-
-	Variant specular_var = material_storage->material_get_param(p_material_rid, "specular");
-	if (specular_var.get_type() == Variant::FLOAT) {
-		mat.specular = specular_var;
-	}
-
+	auto get_float = [&](const StringName &p_param, float p_default) -> float {
+		const Variant v = material_storage->material_get_param(p_material_rid, p_param);
+		return v.get_type() == Variant::FLOAT ? float(v) : p_default;
+	};
 	// ORMMaterial3D uses the texture values directly, without the scalar multipliers.
-	if (rt_state.orm) {
-		mat.roughness = 1.0f;
-		mat.metallic = 1.0f;
-	}
+	rt_material_set_surface_params(mat, rt_state.orm ? 1.0f : get_float("roughness", 1.0f),
+			rt_state.orm ? 1.0f : get_float("metallic", 0.0f), get_float("specular", 0.5f));
 
 	// Addressing stored in fp16 slots, packed once below.
 	float uv1_blend_sharpness = 1.0f;
@@ -2759,8 +2763,8 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 		if (dist_min_var.get_type() == Variant::FLOAT && dist_max_var.get_type() == Variant::FLOAT) {
 			// Dither modes are approximated as smooth alpha fade in RT.
 			mat.flags |= RT_MAT_FLAG_DISTANCE_FADE;
-			mat.distance_fade_min = dist_min_var;
-			mat.distance_fade_max = dist_max_var;
+			mat.distance_fade.min_distance = Math::make_half_float(float(dist_min_var));
+			mat.distance_fade.max_distance = Math::make_half_float(float(dist_max_var));
 		}
 	}
 
@@ -3438,6 +3442,7 @@ private:
 		bool transparent;
 		uint32_t layer_mask;
 		uint32_t instance_uniforms_ofs = 0xFFFFFFFFu;
+		float instance_alpha = 1.0f;
 		uint32_t material_flags = 0;
 		RenderingBillboard::Settings billboard;
 		RTMMSurfaceKey billboard_key;
@@ -3497,8 +3502,21 @@ private:
 	uint32_t rt_triangles_built = 0;
 	uint32_t rt_triangles_refit = 0;
 
-	static ShaderData::RTBlendClass _blend_class(const ShaderData *p_shader) {
+	// GeometryInstance3D.transparency times the visibility-parent fade, as raster applies it.
+	static float _instance_alpha(const Instance &p_inst) {
+		return p_inst.force_alpha * p_inst.parent_fade_alpha;
+	}
+	// Fully faded instances, which raster draws with 8-bit alpha 0.
+	static bool _fully_faded(const Instance &p_inst) {
+		return rt_instance_transparency(_instance_alpha(p_inst)) == 255u;
+	}
+	static ShaderData::RTBlendClass _shader_blend_class(const ShaderData *p_shader) {
 		return p_shader ? p_shader->rt_blend_class() : ShaderData::RT_BLEND_OPAQUE;
+	}
+	// Raster draws faded instances in the alpha pass, so their opaque materials blend as Mix.
+	static ShaderData::RTBlendClass _blend_class(const ShaderData *p_shader, float p_instance_alpha) {
+		const ShaderData::RTBlendClass blend_class = _shader_blend_class(p_shader);
+		return blend_class == ShaderData::RT_BLEND_OPAQUE && rt_instance_transparency(p_instance_alpha) != 0u ? ShaderData::RT_BLEND_MIX : blend_class;
 	}
 	// Previous-frame transform for motion vectors; a teleport has no motion.
 	static const Transform3D &_prev_transform(const Instance &p_inst) {
@@ -3527,7 +3545,7 @@ private:
 			RTSurfaceGroupKey &r_key, uint32_t &r_material_flags) const;
 	uint32_t _push_tlas_instance(const Transform3D &p_transform, RID p_blas, const RTSurfaceGroupKey &p_key, bool p_transparent, bool p_raster_mirror);
 	void _push_tlas_entry(const RT_GeometryData &p_geometry, const RTGeometrySources &p_sources, uint32_t p_facing_flags, const RTMaterialData *p_mat_data,
-			uint32_t p_material_flags, uint32_t p_layers, uint32_t p_uniforms_ofs, int32_t p_motion_index);
+			uint32_t p_material_flags, uint32_t p_layers, uint32_t p_uniforms_ofs, float p_instance_alpha, int32_t p_motion_index);
 	int32_t _push_motion_transform(const Transform3D &p_prev_transform);
 
 	DirtyMark _dirty_mark() const { return { dirty_blas_list.size(), dirty_blas_update_list.size() }; }
@@ -3562,7 +3580,7 @@ void RTTlasBuilder::gather_instances() {
 	const PagedArray<RenderGeometryInstance *> &instances = *render_data->rt_instances;
 	for (uint32_t i = 0; i < (uint32_t)instances.size(); i++) {
 		const Instance *inst = static_cast<const Instance *>(instances[i]);
-		if (!inst || !inst->data) {
+		if (!inst || !inst->data || _fully_faded(*inst)) {
 			continue;
 		}
 		const InstanceMasks masks = _instance_masks(*inst);
@@ -3735,7 +3753,7 @@ void RTTlasBuilder::_gather_mm_surfaces(const Instance &p_inst, const InstanceMa
 	// Particle surface indices restart for every draw pass mesh, so they are keyed by list position.
 	uint32_t surface_ordinal = 0;
 	for (const SurfaceCache *mm_surf = p_inst.surface_caches; mm_surf; mm_surf = mm_surf->next, surface_ordinal++) {
-		const ShaderData::RTBlendClass blend_class = _blend_class(mm_surf->shader);
+		const ShaderData::RTBlendClass blend_class = _blend_class(mm_surf->shader, _instance_alpha(p_inst));
 		const bool transparent = blend_class != ShaderData::RT_BLEND_OPAQUE;
 		const uint8_t tlas_mask = p_masks.for_surface(transparent);
 		if (tlas_mask == 0 || !mm_surf->rt_base_pass) {
@@ -3775,6 +3793,7 @@ void RTTlasBuilder::_gather_mm_surfaces(const Instance &p_inst, const InstanceMa
 		pending.transparent = transparent;
 		pending.layer_mask = p_inst.layer_mask;
 		pending.instance_uniforms_ofs = uint32_t(p_inst.shader_uniforms_offset);
+		pending.instance_alpha = _instance_alpha(p_inst);
 		// Captured positions already include the billboard.
 		if (!captured && mm_surf->shader && mm_surf->shader->billboard.is_camera_dependent()) {
 			pending.billboard = mm_surf->shader->billboard;
@@ -3823,7 +3842,7 @@ bool RTTlasBuilder::_collect_surface_records(const Instance &p_inst, const Insta
 		if (!surf->rt_base_pass) {
 			continue;
 		}
-		const ShaderData::RTBlendClass blend_class = _blend_class(surf->shader);
+		const ShaderData::RTBlendClass blend_class = _blend_class(surf->shader, _instance_alpha(p_inst));
 		const bool transparent = blend_class != ShaderData::RT_BLEND_OPAQUE;
 		const uint8_t tlas_mask = p_masks.for_surface(transparent);
 		if (tlas_mask == 0) {
@@ -3897,7 +3916,7 @@ void RTTlasBuilder::_add_surface_group(const Instance &p_inst, uint32_t p_leader
 		const uint32_t facing_flags = _push_tlas_instance(tlas_transform, group->blas, instance_key, records[p_leader].transparent, p_inst.mirror);
 		for (uint32_t m = 0; m < members.size(); m++) {
 			const RTSurfaceRecord &rec = records[members[m]];
-			_push_tlas_entry(group->geometries[m], group->sources[m], facing_flags, rec.mat_data, rec.material_flags, p_inst.layer_mask, uniforms_ofs, motion_index);
+			_push_tlas_entry(group->geometries[m], group->sources[m], facing_flags, rec.mat_data, rec.material_flags, p_inst.layer_mask, uniforms_ofs, _instance_alpha(p_inst), motion_index);
 		}
 	} else {
 		for (uint32_t s : members) {
@@ -3913,7 +3932,7 @@ void RTTlasBuilder::_add_surface_group(const Instance &p_inst, uint32_t p_leader
 				continue;
 			}
 			const uint32_t facing_flags = _push_tlas_instance(tlas_transform, surf_data->blas, rec.key, rec.transparent, p_inst.mirror);
-			_push_tlas_entry(surf_data->geometry, surf_data->sources, facing_flags, rec.mat_data, rec.material_flags, p_inst.layer_mask, uniforms_ofs, motion_index);
+			_push_tlas_entry(surf_data->geometry, surf_data->sources, facing_flags, rec.mat_data, rec.material_flags, p_inst.layer_mask, uniforms_ofs, _instance_alpha(p_inst), motion_index);
 		}
 	}
 
@@ -4021,7 +4040,7 @@ bool RTTlasBuilder::_add_merged_mm_surface(const PendingMMSurface &p_pending, co
 		sources.instance_data = p_instance_data.source;
 	}
 	const uint32_t facing_flags = _push_tlas_instance(p_pending.instance_transform, merged_sd.blas, p_pending.key, p_pending.transparent, p_pending.raster_mirror);
-	_push_tlas_entry(geom, sources, facing_flags, p_pending.mat_data, p_pending.material_flags, p_pending.layer_mask, p_pending.instance_uniforms_ofs,
+	_push_tlas_entry(geom, sources, facing_flags, p_pending.mat_data, p_pending.material_flags, p_pending.layer_mask, p_pending.instance_uniforms_ofs, p_pending.instance_alpha,
 			p_pending.transform_moved ? _push_motion_transform(p_pending.prev_instance_transform) : -1);
 	_record_stats(mark, 1, merged_sd.geometry.primitive_count, merged_sd.geometry.primitive_count);
 	return true;
@@ -4043,31 +4062,16 @@ void RTTlasBuilder::_add_expanded_mm_surface(const PendingMMSurface &p_pending, 
 
 	for (uint32_t mi = 0; mi < source.count; mi++) {
 		const float *d = mm_data + (source.current_offset + mi) * source.stride;
-		Transform3D mm_xform;
-		mm_xform.basis.rows[0][0] = d[0];
-		mm_xform.basis.rows[0][1] = d[1];
-		mm_xform.basis.rows[0][2] = d[2];
-		mm_xform.origin.x = d[3];
-		mm_xform.basis.rows[1][0] = d[4];
-		mm_xform.basis.rows[1][1] = d[5];
-		mm_xform.basis.rows[1][2] = d[6];
-		mm_xform.origin.y = d[7];
-		mm_xform.basis.rows[2][0] = d[8];
-		mm_xform.basis.rows[2][1] = d[9];
-		mm_xform.basis.rows[2][2] = d[10];
-		mm_xform.origin.z = d[11];
-
-		Transform3D world = p_pending.instance_transform * mm_xform;
-		Transform3D prev_world = p_pending.prev_instance_transform * mm_xform;
-		bool moved = p_pending.transform_moved;
+		const float *prev_d = mm_data + (source.prev_offset + mi) * source.stride;
+		Transform3D world = p_pending.instance_transform * _rt_mm_record_transform(d);
+		Transform3D prev_world = p_pending.prev_instance_transform * _rt_mm_record_transform(prev_d);
 		if (p_pending.bake.billboard_index != UINT32_MAX) {
 			const uint32_t custom_offset = state->merge_billboards[p_pending.bake.billboard_index].custom_offset;
-			const real_t rotation = custom_offset != UINT32_MAX ? d[custom_offset] : 0.0f;
-			world = RenderingBillboard::compute_world_transform(p_pending.billboard, world, billboard_camera, rotation);
-			prev_world = RenderingBillboard::compute_world_transform(p_pending.billboard, prev_world, prev_billboard_camera, rotation);
-			moved = prev_world != world;
+			const bool has_rotation = custom_offset != UINT32_MAX;
+			world = RenderingBillboard::compute_world_transform(p_pending.billboard, world, billboard_camera, has_rotation ? d[custom_offset] : 0.0f);
+			prev_world = RenderingBillboard::compute_world_transform(p_pending.billboard, prev_world, prev_billboard_camera, has_rotation ? prev_d[custom_offset] : 0.0f);
 		}
-		const int32_t motion_index = moved ? _push_motion_transform(prev_world) : -1;
+		const int32_t motion_index = prev_world != world ? _push_motion_transform(prev_world) : -1;
 
 		RT_GeometryData geom = surf_data->geometry;
 		RTGeometrySources sources = surf_data->sources;
@@ -4077,7 +4081,7 @@ void RTTlasBuilder::_add_expanded_mm_surface(const PendingMMSurface &p_pending, 
 			sources.instance_data = p_instance_data.source;
 		}
 		const uint32_t facing_flags = _push_tlas_instance(world, surf_data->blas, p_pending.key, p_pending.transparent, p_pending.raster_mirror);
-		_push_tlas_entry(geom, sources, facing_flags, p_pending.mat_data, p_pending.material_flags, p_pending.layer_mask, p_pending.instance_uniforms_ofs, motion_index);
+		_push_tlas_entry(geom, sources, facing_flags, p_pending.mat_data, p_pending.material_flags, p_pending.layer_mask, p_pending.instance_uniforms_ofs, p_pending.instance_alpha, motion_index);
 	}
 
 	if (collect_render_info) {
@@ -4103,6 +4107,9 @@ void RTTlasBuilder::_fill_surface_key(const ShaderData *p_shader, const RTMateri
 	if (alpha_scissor) {
 		r_material_flags |= RT_MAT_FLAG_ALPHA_SCISSOR;
 	}
+	if (p_blend_class != ShaderData::RT_BLEND_OPAQUE && _shader_blend_class(p_shader) == ShaderData::RT_BLEND_OPAQUE) {
+		r_material_flags |= RT_MAT_FLAG_INSTANCE_FADE;
+	}
 }
 
 // Custom index is the first per-geometry entry; push the instance before its entries.
@@ -4123,7 +4130,7 @@ uint32_t RTTlasBuilder::_push_tlas_instance(const Transform3D &p_transform, RID 
 }
 
 void RTTlasBuilder::_push_tlas_entry(const RT_GeometryData &p_geometry, const RTGeometrySources &p_sources, uint32_t p_facing_flags, const RTMaterialData *p_mat_data,
-		uint32_t p_material_flags, uint32_t p_layers, uint32_t p_uniforms_ofs, int32_t p_motion_index) {
+		uint32_t p_material_flags, uint32_t p_layers, uint32_t p_uniforms_ofs, float p_instance_alpha, int32_t p_motion_index) {
 	RT_VALIDATE(rt.geometry_sources.push_back(p_sources));
 	RT_VALIDATE(rt.material_sources.push_back(rt._rtv_material_source(p_mat_data)));
 	rt.geometry_data.push_back(p_geometry);
@@ -4132,7 +4139,9 @@ void RTTlasBuilder::_push_tlas_entry(const RT_GeometryData &p_geometry, const RT
 	geometry.layers = p_layers;
 	geometry.instance_uniforms_ofs = p_uniforms_ofs;
 	rt.material_data.push_back(p_mat_data->data);
-	rt.material_data[rt.material_data.size() - 1].flags |= p_material_flags;
+	RT_MaterialData &material = rt.material_data[rt.material_data.size() - 1];
+	material.flags |= p_material_flags;
+	material.albedo_texture.instance_transparency = rt_instance_transparency(p_instance_alpha);
 	rt.motion_indices.push_back(p_motion_index);
 }
 
@@ -4767,6 +4776,8 @@ RID RenderRaytracing::update_uniform_set(RTViewportState *p_state, const RenderD
 		// [0] = VIS_MODE, [1] = SAMPLE_COUNT, [2] = MAX_BOUNCES,
 		// [3] = DLSS_RR_ENABLED, [14] = LIGHT_COUNT, [15] = FRAME_INDEX
 		rt_ubo.params[SceneShaderRaytracing::RT_PARAM_MAX_TRANSPARENCY_LAYERS] = (float)GLOBAL_GET_CACHED(int, "rendering/pathtracing/max_transparency_layers");
+		rt_ubo.params[SceneShaderRaytracing::RT_PARAM_MAX_TRANSPARENCY_LAYERS_REFLECTION] = (float)GLOBAL_GET_CACHED(int, "rendering/pathtracing/max_transparency_layers_reflection");
+		rt_ubo.params[SceneShaderRaytracing::RT_PARAM_MAX_TRANSPARENCY_LAYERS_INDIRECT] = (float)GLOBAL_GET_CACHED(int, "rendering/pathtracing/max_transparency_layers_indirect");
 		rt_ubo.params[SceneShaderRaytracing::RT_PARAM_TRANSPARENCY_MAX_BOUNCE] = (float)GLOBAL_GET_CACHED(int, "rendering/pathtracing/transparency_max_bounce");
 		rt_ubo.params[SceneShaderRaytracing::RT_PARAM_TRANSPARENT_COUNT] = (float)p_state->transparent_instance_count;
 		rt_ubo.params[SceneShaderRaytracing::RT_PARAM_TRANSPARENCY_INDIRECT_RANGE] = (float)GLOBAL_GET_CACHED(double, "rendering/pathtracing/transparency_indirect_range");

@@ -42,8 +42,9 @@ vec4 sample_bindless_texture_point(uint tex_idx, vec2 uv) {
 	return texture(sampler2D(bindless_textures[nonuniformEXT(tex_idx)], SAMPLER_NEAREST_REPEAT), uv);
 }
 
-/// Sample with the appropriate filter based on material flags.
-vec4 sample_material_texture(uint tex_idx, vec2 uv, uint mat_flags) {
+/// Sample a MaterialData *_texture with the appropriate filter based on material flags.
+vec4 sample_material_texture(uint p_texture, vec2 uv, uint mat_flags) {
+	uint tex_idx = rt_texture_index(p_texture);
 	if ((mat_flags & RT_MAT_FLAG_POINT_FILTER) != 0u) {
 		return sample_bindless_texture_point(tex_idx, uv);
 	}
@@ -190,33 +191,34 @@ void material_uv_triplanar_tangents(MaterialUV muv, out vec3 tangent, out vec3 b
 // ROUGHNESS / METALLIC / AO
 // ============================================================================
 
-/// dot(texel, mask) with BaseMaterial3D's texture channel masks.
-float material_texture_channel(vec4 p_texel, uint p_channels, uint p_shift) {
-	uint channel = (p_channels >> p_shift) & RT_TEXTURE_CHANNEL_MASK;
+/// dot(texel, mask) with the BaseMaterial3D texture channel mask of p_texture.
+float material_texture_channel(vec4 p_texel, uint p_texture) {
+	uint channel = rt_texture_channel(p_texture);
 	return channel == RT_TEXTURE_CHANNEL_GRAYSCALE ? dot(p_texel.rgb, vec3(0.333333)) : p_texel[channel];
 }
 
 /// ROUGHNESS and METALLIC (x, y) of BaseMaterial3D from already sampled textures.
 vec2 material_roughness_metallic_from_texels(MaterialData mat, vec4 p_roughness_tex, vec4 p_metallic_tex) {
+	vec3 params = rt_material_surface_params(mat);
 	return clamp(vec2(
-						 material_texture_channel(p_roughness_tex, mat.texture_channels, RT_TEXTURE_CHANNEL_ROUGHNESS_SHIFT) * mat.roughness,
-						 material_texture_channel(p_metallic_tex, mat.texture_channels, RT_TEXTURE_CHANNEL_METALLIC_SHIFT) * mat.metallic),
+						 material_texture_channel(p_roughness_tex, mat.roughness_texture) * params.x,
+						 material_texture_channel(p_metallic_tex, mat.metallic_texture) * params.y),
 			0.0, 1.0);
 }
 
 /// ROUGHNESS and METALLIC (x, y) of BaseMaterial3D. ORM materials share one texture fetch.
 vec2 material_roughness_metallic(MaterialData mat, MaterialUV muv) {
-	vec4 roughness_tex = material_uv_sample(mat.roughness_texture_idx, muv, mat.flags);
-	vec4 metallic_tex = mat.metallic_texture_idx == mat.roughness_texture_idx
+	vec4 roughness_tex = material_uv_sample(mat.roughness_texture, muv, mat.flags);
+	vec4 metallic_tex = rt_texture_index(mat.metallic_texture) == rt_texture_index(mat.roughness_texture)
 			? roughness_tex
-			: material_uv_sample(mat.metallic_texture_idx, muv, mat.flags);
+			: material_uv_sample(mat.metallic_texture, muv, mat.flags);
 	return material_roughness_metallic_from_texels(mat, roughness_tex, metallic_tex);
 }
 
 /// AO of BaseMaterial3D (1.0 when disabled). UV1 only: AO on UV2 is not mirrored, and the
 /// path tracer only shows AO in debug views since it traces occlusion itself.
 float material_ao(MaterialData mat, MaterialUV muv) {
-	return material_texture_channel(material_uv_sample(mat.ao_texture_idx, muv, mat.flags), mat.texture_channels, RT_TEXTURE_CHANNEL_AO_SHIFT);
+	return material_texture_channel(material_uv_sample(mat.ao_texture, muv, mat.flags), mat.ao_texture);
 }
 
 // ============================================================================
@@ -233,7 +235,7 @@ vec3 material_emission(MaterialData mat, MaterialUV uv1, vec2 mesh_uv2, vec3 wor
 		if ((mat.flags & RT_MAT_FLAG_EMISSION_UV2) != 0u) {
 			muv = material_uv_channel_from_world(material_uv2_channel(mat), mesh_uv2, world_pos, world_normal);
 		}
-		emission_tex = material_uv_sample(mat.emission_texture_idx, muv, mat.flags).rgb;
+		emission_tex = material_uv_sample(mat.emission_texture, muv, mat.flags).rgb;
 	}
 	vec3 emission = (mat.flags & RT_MAT_FLAG_EMISSION_ADD) != 0u
 			? mat.emission_color + emission_tex
