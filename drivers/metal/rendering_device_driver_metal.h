@@ -117,12 +117,11 @@ public:
 	struct BufferInfo {
 		id<MTLBuffer> metal_buffer;
 
-		_FORCE_INLINE_ bool is_dynamic() const { return _frame_idx != UINT32_MAX; }
+		_FORCE_INLINE_ bool is_dynamic() const { return _is_dynamic; }
 
 	protected:
-		// If dynamic buffer, then its range is [0; RenderingDeviceDriverMetal::frame_count)
-		// else it's UINT32_MAX.
-		uint32_t _frame_idx = UINT32_MAX;
+		// True if the buffer was created with BUFFER_USAGE_DYNAMIC_PERSISTENT_BIT (i.e. it is a MetalBufferDynamicInfo).
+		bool _is_dynamic = false;
 	};
 
 	virtual BufferID buffer_create(uint64_t p_size, BitField<BufferUsageBits> p_usage, MemoryAllocationType p_allocation_type) override final;
@@ -514,6 +513,8 @@ public:
 struct API_AVAILABLE(macos(11.0), ios(14.0), tvos(14.0)) MetalBufferDynamicInfo : public RenderingDeviceDriverMetal::BufferInfo {
 	uint32_t frame_idx = 0;
 	uint64_t size_bytes; // Contains the real buffer size / frame_count.
+
+	MetalBufferDynamicInfo() { _is_dynamic = true; }
 #ifdef DEBUG_ENABLED
 	// For tracking that a persistent buffer isn't mapped twice in the same frame.
 	uint32_t last_frame_mapped = UINT32_MAX;
