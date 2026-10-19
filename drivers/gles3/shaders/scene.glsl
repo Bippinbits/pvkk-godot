@@ -2551,7 +2551,7 @@ void main() {
 	fog.xy = unpackHalf2x16(fog_rg);
 	fog.zw = unpackHalf2x16(fog_ba);
 
-	frag_color.rgb = mix(frag_color, mix(frag_color.rgb, fog.rgb, fog.a), global_fog_influence);
+	frag_color.rgb = mix(frag_color.rgb, mix(frag_color.rgb, fog.rgb, fog.a), global_fog_influence);
 #endif // !FOG_DISABLED
 
 	// Tonemap before writing as we are writing to an sRGB framebuffer

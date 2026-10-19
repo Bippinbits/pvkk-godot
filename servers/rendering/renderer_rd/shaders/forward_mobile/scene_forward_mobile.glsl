@@ -2258,7 +2258,7 @@ void main() {
 
 #ifndef FOG_DISABLED
 	diffuse_buffer.rgb = mix(diffuse_buffer.rgb, vec3(fog.rgb), fog.a * global_fog_influence);
-	specular_buffer.rgb = mix(specular_buffer.rgb, vec3(0.0), fog.a);
+	specular_buffer.rgb = mix(specular_buffer.rgb, vec3(0.0), fog.a * global_fog_influence);
 #endif // !FOG_DISABLED
 
 #else //MODE_MULTIPLE_RENDER_TARGETS

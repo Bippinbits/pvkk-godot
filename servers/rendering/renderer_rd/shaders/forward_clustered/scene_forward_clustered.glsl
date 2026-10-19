@@ -2982,7 +2982,7 @@ void fragment_shader(in SceneData scene_data) {
 
 #ifndef FOG_DISABLED
 	diffuse_buffer.rgb = mix(diffuse_buffer.rgb, diffuse_buffer.rgb * fog.a + fog.rgb, global_fog_influence);
-	specular_buffer.rgb = specular_buffer.rgb * fog.a;
+	specular_buffer.rgb = mix(specular_buffer.rgb, specular_buffer.rgb * fog.a, global_fog_influence);
 #endif //!FOG_DISABLED
 
 #else //MODE_SEPARATE_SPECULAR
