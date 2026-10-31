@@ -175,6 +175,31 @@ TEST_CASE("[RenderRaytracing] Material bitfields fill from the low bit, as the G
 	CHECK(as_uint(d.uv2_scale_xy) == 0xABCD1234u);
 }
 
+TEST_CASE("[RenderRaytracing] Light bitfields fill from the low bit, as lights_get() unpacks them") {
+	RT_LightData d = {};
+	d.masks.cull_mask = 0xFFFFF;
+	d.masks.type = RT_LIGHT_TYPE_SPOT;
+	d.masks.shadow_ray_mask = 0xA5;
+	CHECK(as_uint(d.masks) == (0xFFFFFu | (uint32_t(RT_LIGHT_TYPE_SPOT) << 20) | (0xA5u << 24)));
+
+	d.projector_texture.index = BindlessBlock::MAX_BINDLESS_TEXTURES - 1;
+	CHECK(as_uint(d.projector_texture) == BindlessBlock::MAX_BINDLESS_TEXTURES - 1);
+
+	d.emission_rg.r = 0x1234;
+	d.emission_rg.g = 0xABCD;
+	CHECK(as_uint(d.emission_rg) == 0xABCD1234u);
+}
+
+TEST_CASE("[RenderRaytracing] Light fp16 saturates instead of overflowing, snorm16 matches unpackSnorm2x16()") {
+	CHECK(Math::half_to_float(rt_half(1.0e6f)) == 65504.0f);
+	CHECK(Math::half_to_float(rt_half(-1.0e6f)) == -65504.0f);
+	CHECK(Math::half_to_float(rt_half(0.5f)) == 0.5f);
+	CHECK(rt_snorm16(1.0f) == 0x7FFFu);
+	CHECK(rt_snorm16(-1.0f) == 0x8001u);
+	CHECK(rt_snorm16(2.0f) == 0x7FFFu);
+	CHECK(rt_snorm16(0.0f) == 0u);
+}
+
 TEST_CASE("[RenderRaytracing] Instance transparency is zero when opaque and saturates outside [0, 1]") {
 	CHECK(rt_instance_transparency(1.0f) == 0u);
 	CHECK(rt_instance_transparency(0.0f) == 255u);

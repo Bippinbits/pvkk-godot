@@ -206,11 +206,11 @@ void write_primary_hit_velocity(vec3 hit_pos) {
 // ============================================================================
 
 vec3 fog_get_directional_color(uint index) {
-	return rt_lights[index].emission;
+	return lights_get(index).emission;
 }
 
 vec3 fog_get_directional_direction(uint index) {
-	vec3 world_dir = -normalize(rt_lights[index].position);
+	vec3 world_dir = -normalize(rt_light_buffer[index].position);
 	mat3 view_rot = transpose(mat3(
 			scene_data_block.data.view_matrix[0].xyz,
 			scene_data_block.data.view_matrix[1].xyz,
@@ -338,7 +338,7 @@ vec3 debug_directional_shadow_blocker(vec3 p_geometry_normal, uint p_receiver_sh
 	uint light_count = uint(get_rt_param(RT_PARAM_LIGHT_COUNT));
 	int sun = -1;
 	for (uint i = 0u; i < light_count; i++) {
-		if (rt_lights[i].type == RT_LIGHT_TYPE_DIRECTIONAL) {
+		if (lights_get_type(i) == RT_LIGHT_TYPE_DIRECTIONAL) {
 			sun = int(i);
 			break;
 		}
@@ -346,7 +346,7 @@ vec3 debug_directional_shadow_blocker(vec3 p_geometry_normal, uint p_receiver_sh
 	if (sun < 0) {
 		return vec3(1.0, 0.0, 1.0);
 	}
-	vec3 to_sun = -normalize(rt_lights[sun].position);
+	vec3 to_sun = -normalize(rt_light_buffer[sun].position);
 	if (dot(p_geometry_normal, to_sun) <= 0.0) {
 		return vec3(0.1);
 	}

@@ -287,24 +287,66 @@ enum RTLightType : uint32_t {
 	RT_LIGHT_TYPE_SPOT = 3,
 };
 
-// Must match GLSL RTLightData (std430, 80 bytes).
+// Bindless index meaning "no projector" (the default white texture, matches GLSL RT_LIGHT_NO_PROJECTOR).
+static constexpr uint32_t RT_LIGHT_NO_PROJECTOR = 0u;
+
+// Must match GLSL RTLightPacked (std430, 64 bytes), unpacked by lights_get() in raytracing_lights_inc.glsl.
+// Bitfields fill from the low bit (checked in test_render_raytracing.h). Positional-only fields stay zero for directional lights.
 struct alignas(16) RT_LightData {
-	float position[3]; // World position (omni/spot) or direction (directional, normalized).
-	uint32_t type;
-	float emission[3];
-	float radius;
-	float attenuation;
-	float inv_max_range; // 1.0/range, or -1.0 for infinite.
-	float max_range_squared; // range*range, or 0.0 for infinite.
-	float specular_amount;
-	float indirect_energy;
-	float inv_spot_attenuation;
-	float cos_spot_angle;
-	uint32_t light_masks; // Bits 0-19: light_cull_mask (lighting test). Bits 24-31: TLAS mask for shadow rays.
-	float spot_direction[3];
-	float shadow_opacity; // 0 skips the shadow ray; otherwise blends traced transmittance towards 1.
+	float position[3]; // World position (omni/spot) or normalized direction (directional).
+	float range; // Omni/spot range, 0 for infinite.
+	struct { // fp16 HDR emission (color * energy).
+		uint32_t r : 16;
+		uint32_t g : 16;
+	} emission_rg;
+	struct { // fp16.
+		uint32_t b : 16;
+		uint32_t radius : 16; // Size (omni/spot) or angular radius in radians (directional).
+	} emission_b_radius;
+	struct { // fp16 multipliers.
+		uint32_t specular : 16;
+		uint32_t indirect : 16;
+	} energy;
+	struct {
+		uint32_t cull_mask : 20; // light_cull_mask, tested against instance layers.
+		uint32_t type : 2; // RTLightType.
+		uint32_t unused : 2;
+		uint32_t shadow_ray_mask : 8; // TLAS mask for shadow rays.
+	} masks;
+	struct { // fp16.
+		uint32_t attenuation : 16; // Distance attenuation exponent (omni/spot).
+		uint32_t shadow_opacity : 16; // 0 skips the shadow ray; otherwise blends traced transmittance towards 1.
+	} attenuation_shadow;
+	struct { // fp16, spot only.
+		uint32_t one_minus_cos : 16; // 1 - cos(spot angle), precise for narrow cones.
+		uint32_t inv_attenuation : 16; // 1 / spot attenuation.
+	} spot;
+	// snorm16 rotation quaternion (omni/spot): the spot cone points along local -Z, and it orients the projector.
+	struct {
+		uint32_t x : 16;
+		uint32_t y : 16;
+	} orientation_xy;
+	struct {
+		uint32_t z : 16;
+		uint32_t w : 16;
+	} orientation_zw;
+	struct {
+		uint32_t index : RT_MaterialData::TEXTURE_INDEX_BITS; // Bindless sRGB projector (omni/spot), RT_LIGHT_NO_PROJECTOR when unset.
+		uint32_t unused : 8;
+	} projector_texture;
+	uint32_t reserved[3]; // Free for future fields, keeps the 64-byte stride.
 };
-static_assert(sizeof(RT_LightData) == 80, "RT_LightData must be 80 bytes for std430");
+static_assert(sizeof(RT_LightData) == 64, "RT_LightData must be 64 bytes for std430, with every bitfield struct in one uint");
+
+// fp16 as GLSL unpackHalf2x16() reads it, clamped to the finite range so bright lights don't become inf.
+inline uint16_t rt_half(float p_value) {
+	return Math::make_half_float(CLAMP(p_value, -65504.0f, 65504.0f));
+}
+
+// snorm16 as GLSL unpackSnorm2x16() reads it.
+inline uint16_t rt_snorm16(float p_value) {
+	return uint16_t(int16_t(Math::round(CLAMP(p_value, -1.0f, 1.0f) * 32767.0f)));
+}
 
 enum {
 	RT_LIGHTS_MAX = 64,
@@ -1106,6 +1148,8 @@ class RenderRaytracing {
 	uint64_t not_ready_frame = UINT64_MAX;
 	BitField<RSE::RenderingNotReadyReason> frame_not_ready_reasons;
 	void _flag_not_ready(RSE::RenderingNotReadyReason p_reason);
+	// Registers the light's projector texture as bindless; RT_LIGHT_NO_PROJECTOR when it has none.
+	uint32_t _light_projector_texture(RID p_light);
 
 	// Camera-independent merged particle surfaces, keyed by (particles, 0, surface ordinal).
 	// Particles RIDs come from another allocator than MultiMesh ones, so they can't share mm_handles.

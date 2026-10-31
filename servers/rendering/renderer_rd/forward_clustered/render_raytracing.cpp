@@ -4472,6 +4472,24 @@ uint32_t RenderRaytracing::gather_lights(const RenderDataRD *p_render_data, cons
 		}
 		return e;
 	};
+	// Fields shared by every light type; p_energy includes any distance fade.
+	auto store_common = [&](RT_LightData &r_ld, RID p_base, RTLightType p_type, const Vector3 &p_position, float p_energy, float p_radius, float p_specular, float p_attenuation, float p_shadow_opacity) {
+		r_ld.position[0] = p_position.x;
+		r_ld.position[1] = p_position.y;
+		r_ld.position[2] = p_position.z;
+		const Color emission = ls->light_get_color(p_base).srgb_to_linear() * p_energy;
+		r_ld.emission_rg.r = rt_half(emission.r);
+		r_ld.emission_rg.g = rt_half(emission.g);
+		r_ld.emission_b_radius.b = rt_half(emission.b);
+		r_ld.emission_b_radius.radius = rt_half(p_radius);
+		r_ld.energy.specular = rt_half(p_specular);
+		r_ld.energy.indirect = rt_half(ls->light_get_param(p_base, RSE::LIGHT_PARAM_INDIRECT_ENERGY));
+		r_ld.masks.cull_mask = ls->light_get_cull_mask(p_base);
+		r_ld.masks.type = p_type;
+		r_ld.masks.shadow_ray_mask = p_state ? p_state->shadow_groups.ray_mask_for_caster_mask(ls->light_get_shadow_caster_mask(p_base)) : uint32_t(RT_SHADOW_GROUPS_MASK);
+		r_ld.attenuation_shadow.attenuation = rt_half(p_attenuation);
+		r_ld.attenuation_shadow.shadow_opacity = rt_half(p_shadow_opacity);
+	};
 
 	// Scoring helper: approximate power/solid-angle contribution.
 	struct LightScore {
@@ -4532,32 +4550,12 @@ uint32_t RenderRaytracing::gather_lights(const RenderDataRD *p_render_data, cons
 		if (rt_light_count >= p_max_lights) {
 			break;
 		}
-		RT_LightData &ld = r_light_data[rt_light_count];
-		Transform3D xform = ls->light_instance_get_base_transform(light_instance);
-		Vector3 dir = -xform.basis.get_column(2).normalized();
-		ld.position[0] = dir.x;
-		ld.position[1] = dir.y;
-		ld.position[2] = dir.z;
-		ld.type = RT_LIGHT_TYPE_DIRECTIONAL;
-		ld.light_masks = (ls->light_get_cull_mask(base) & 0xFFFFFu) |
-				((p_state ? p_state->shadow_groups.ray_mask_for_caster_mask(ls->light_get_shadow_caster_mask(base)) : 0xFCu) << 24u);
-		Color linear_col = ls->light_get_color(base).srgb_to_linear();
-		float energy = compute_light_energy(base, RSE::LIGHT_DIRECTIONAL);
-		ld.emission[0] = linear_col.r * energy;
-		ld.emission[1] = linear_col.g * energy;
-		ld.emission[2] = linear_col.b * energy;
-		ld.radius = Math::deg_to_rad(ls->light_get_param(base, RSE::LIGHT_PARAM_SIZE) * 0.5f); // Half-angle in radians.
-		ld.attenuation = 0.0f; // No distance attenuation.
-		ld.inv_max_range = -1.0f; // Infinite range.
-		ld.max_range_squared = 0.0f;
-		ld.specular_amount = ls->light_get_param(base, RSE::LIGHT_PARAM_SPECULAR);
-		ld.indirect_energy = ls->light_get_param(base, RSE::LIGHT_PARAM_INDIRECT_ENERGY);
-		ld.inv_spot_attenuation = 0.0f;
-		ld.cos_spot_angle = 0.0f;
-		ld.spot_direction[0] = 0.0f;
-		ld.spot_direction[1] = 0.0f;
-		ld.spot_direction[2] = 0.0f;
-		ld.shadow_opacity = ls->light_get_path_traced_shadow_opacity(base, 0.0f);
+		const Transform3D xform = ls->light_instance_get_base_transform(light_instance);
+		store_common(r_light_data[rt_light_count], base, RT_LIGHT_TYPE_DIRECTIONAL, -xform.basis.get_column(2).normalized(),
+				compute_light_energy(base, RSE::LIGHT_DIRECTIONAL),
+				Math::deg_to_rad(ls->light_get_param(base, RSE::LIGHT_PARAM_SIZE) * 0.5f), // Half-angle in radians.
+				ls->light_get_param(base, RSE::LIGHT_PARAM_SPECULAR), 0.0f,
+				ls->light_get_path_traced_shadow_opacity(base, 0.0f));
 		rt_light_count++;
 	}
 
@@ -4584,52 +4582,41 @@ uint32_t RenderRaytracing::gather_lights(const RenderDataRD *p_render_data, cons
 		RSE::LightType type = ls->light_get_type(base);
 
 		RT_LightData &ld = r_light_data[rt_light_count];
-		Transform3D xform = ls->light_instance_get_base_transform(light_instance);
-		ld.position[0] = xform.origin.x;
-		ld.position[1] = xform.origin.y;
-		ld.position[2] = xform.origin.z;
-		ld.type = (type == RSE::LIGHT_SPOT) ? RT_LIGHT_TYPE_SPOT : RT_LIGHT_TYPE_OMNI;
-		ld.light_masks = (ls->light_get_cull_mask(base) & 0xFFFFFu) |
-				((p_state ? p_state->shadow_groups.ray_mask_for_caster_mask(ls->light_get_shadow_caster_mask(base)) : 0xFCu) << 24u);
+		const Transform3D xform = ls->light_instance_get_base_transform(light_instance);
+		store_common(ld, base, type == RSE::LIGHT_SPOT ? RT_LIGHT_TYPE_SPOT : RT_LIGHT_TYPE_OMNI, xform.origin,
+				compute_light_energy(base, type) * positional_lights[i].distance_fade,
+				ls->light_get_param(base, RSE::LIGHT_PARAM_SIZE),
+				ls->light_get_param(base, RSE::LIGHT_PARAM_SPECULAR) * 2.0f, // Matches rasterizer convention (light_storage.cpp), normalizes 0.5 default to 1.0.
+				ls->light_get_param(base, RSE::LIGHT_PARAM_ATTENUATION),
+				ls->light_get_path_traced_shadow_opacity(base, positional_lights[i].camera_distance));
+		ld.range = MAX(ls->light_get_param(base, RSE::LIGHT_PARAM_RANGE), 0.0f);
 
-		Color linear_col = ls->light_get_color(base).srgb_to_linear();
-		float energy = compute_light_energy(base, type) * positional_lights[i].distance_fade;
-		ld.shadow_opacity = ls->light_get_path_traced_shadow_opacity(base, positional_lights[i].camera_distance);
-		ld.emission[0] = linear_col.r * energy;
-		ld.emission[1] = linear_col.g * energy;
-		ld.emission[2] = linear_col.b * energy;
-		ld.radius = ls->light_get_param(base, RSE::LIGHT_PARAM_SIZE);
-		ld.attenuation = ls->light_get_param(base, RSE::LIGHT_PARAM_ATTENUATION);
-		float range = ls->light_get_param(base, RSE::LIGHT_PARAM_RANGE);
-		if (range > 0.0f) {
-			ld.inv_max_range = 1.0f / range;
-			ld.max_range_squared = range * range;
-		} else {
-			ld.inv_max_range = -1.0f;
-			ld.max_range_squared = 0.0f;
-		}
-		ld.specular_amount = ls->light_get_param(base, RSE::LIGHT_PARAM_SPECULAR) * 2.0f; // Matches rasterizer convention (light_storage.cpp), normalizes 0.5 default to 1.0.
-		ld.indirect_energy = ls->light_get_param(base, RSE::LIGHT_PARAM_INDIRECT_ENERGY);
-
+		const Quaternion rotation = xform.basis.get_rotation_quaternion();
+		ld.orientation_xy.x = rt_snorm16(rotation.x);
+		ld.orientation_xy.y = rt_snorm16(rotation.y);
+		ld.orientation_zw.z = rt_snorm16(rotation.z);
+		ld.orientation_zw.w = rt_snorm16(rotation.w);
 		if (type == RSE::LIGHT_SPOT) {
-			ld.inv_spot_attenuation = 1.0f / MAX(0.001f, ls->light_get_param(base, RSE::LIGHT_PARAM_SPOT_ATTENUATION));
-			float spot_angle_deg = ls->light_get_param(base, RSE::LIGHT_PARAM_SPOT_ANGLE);
-			ld.cos_spot_angle = Math::cos(Math::deg_to_rad(spot_angle_deg));
-			Vector3 spot_dir = -xform.basis.get_column(2).normalized();
-			ld.spot_direction[0] = spot_dir.x;
-			ld.spot_direction[1] = spot_dir.y;
-			ld.spot_direction[2] = spot_dir.z;
-		} else {
-			ld.inv_spot_attenuation = 0.0f;
-			ld.cos_spot_angle = 0.0f;
-			ld.spot_direction[0] = 0.0f;
-			ld.spot_direction[1] = 0.0f;
-			ld.spot_direction[2] = 0.0f;
+			// 2 sin^2(a/2) keeps 1 - cos(a) precise for narrow cones.
+			const float half_angle = Math::deg_to_rad(ls->light_get_param(base, RSE::LIGHT_PARAM_SPOT_ANGLE)) * 0.5f;
+			ld.spot.one_minus_cos = rt_half(2.0f * Math::sin(half_angle) * Math::sin(half_angle));
+			ld.spot.inv_attenuation = rt_half(1.0f / MAX(0.001f, ls->light_get_param(base, RSE::LIGHT_PARAM_SPOT_ATTENUATION)));
 		}
+		ld.projector_texture.index = _light_projector_texture(base);
 		rt_light_count++;
 	}
 
 	return rt_light_count;
+}
+
+uint32_t RenderRaytracing::_light_projector_texture(RID p_light) {
+	const RID projector = RendererRD::LightStorage::get_singleton()->light_get_projector(p_light);
+	if (projector.is_null() || !bindless_block || !bindless_block->is_initialized()) {
+		return RT_LIGHT_NO_PROJECTOR;
+	}
+	// sRGB view, as the rasterizer samples projectors from decal_atlas_srgb.
+	const RID rd_texture = RendererRD::TextureStorage::get_singleton()->texture_get_rd_texture(projector, true);
+	return rd_texture.is_valid() ? bindless_block->add_texture(rd_texture) : RT_LIGHT_NO_PROJECTOR;
 }
 
 // ---------------------------------------------------------------------------
@@ -5016,6 +5003,15 @@ RID RenderRaytracing::update_uniform_set(RTViewportState *p_state, const RenderD
 		u.binding = 39;
 		u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
 		u.append_id(owner->dfg_lut.texture);
+		uniforms.push_back(u);
+	}
+
+	// Binding 40: light projector sampler. Projector textures are bindless (set 1), not the decal atlas.
+	{
+		RD::Uniform u;
+		u.binding = 40;
+		u.uniform_type = RD::UNIFORM_TYPE_SAMPLER;
+		u.append_id(owner->light_projectors_get_sampler(RendererRD::MaterialStorage::get_singleton()->samplers_rd_get_default()));
 		uniforms.push_back(u);
 	}
 
