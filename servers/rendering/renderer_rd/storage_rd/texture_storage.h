@@ -96,34 +96,34 @@ public:
 
 	typedef void (*InvalidationCallback)(bool p_deleted, void *p_userdata);
 
-	/// Visibility and ordering data of one drawable decal instance.
+	// Visibility and ordering data of one drawable decal instance.
 	struct DecalSortInfo {
-		RID instance; ///< Decal instance.
-		Vector3 position; ///< World-space center.
-		float radius = 0.0; ///< Bounding sphere radius.
-		float distance = 0.0; ///< Distance from the camera to the center.
-		float sort_key = 0.0; ///< Blend order key; lower is drawn on top.
-		float fade = 1.0; ///< Distance fade multiplier in (0, 1].
-		uint64_t version = 0; ///< Changes whenever decal_instance_get_world_info() would return different data.
+		RID instance; // Decal instance.
+		Vector3 position; // World-space center.
+		float radius = 0.0; // Bounding sphere radius.
+		float distance = 0.0; // Distance from the camera to the center.
+		float sort_key = 0.0; // Blend order key; lower is drawn on top.
+		float fade = 1.0; // Distance fade multiplier in (0, 1].
+		uint64_t version = 0; // Changes whenever decal_instance_get_world_info() would return different data.
 
 		bool operator<(const DecalSortInfo &p_other) const { return sort_key < p_other.sort_key; }
 	};
 
-	/// Camera independent, world-space parameters of a decal instance, for renderers that do not use
-	/// the clustered decal buffer or atlas (e.g. path tracing). Distance fade is not applied.
+	// Camera independent, world-space parameters of a decal instance, for renderers that do not use
+	// the clustered decal buffer or atlas (e.g. path tracing). Distance fade is not applied.
 	struct DecalWorldInfo {
-		Transform3D box_transform; ///< Unit box (x/z in [0, 1], y in [-1, 1]) to world.
-		Transform3D world_to_box; ///< Inverse of box_transform.
-		Basis normal_basis; ///< Orthonormalized decal basis, maps decal-space normals to world.
-		Vector3 normal; ///< Projection direction (decal +Y) in world space, normalized.
-		Color modulate; ///< Linear.
-		float emission_energy = 1.0; ///< Emission multiplier.
-		float albedo_mix = 1.0; ///< Albedo blend amount.
-		float upper_fade = 0.3; ///< Fade exponent above the decal plane.
-		float lower_fade = 0.3; ///< Fade exponent below the decal plane.
-		float normal_fade = 0.0; ///< Surface angle fade threshold, 0 disables.
-		uint32_t cull_mask = 0; ///< Layers the decal projects onto.
-		RID textures[RS::DECAL_TEXTURE_MAX]; ///< Source textures, null when unset.
+		Transform3D box_transform; // Unit box (x/z in [0, 1], y in [-1, 1]) to world.
+		Transform3D world_to_box; // Inverse of box_transform.
+		Basis normal_basis; // Orthonormalized decal basis, maps decal-space normals to world.
+		Vector3 normal; // Projection direction (decal +Y) in world space, normalized.
+		Color modulate; // Linear.
+		float emission_energy = 1.0; // Emission multiplier.
+		float albedo_mix = 1.0; // Albedo blend amount.
+		float upper_fade = 0.3; // Fade exponent above the decal plane.
+		float lower_fade = 0.3; // Fade exponent below the decal plane.
+		float normal_fade = 0.0; // Surface angle fade threshold, 0 disables.
+		uint32_t cull_mask = 0; // Layers the decal projects onto.
+		RID textures[RS::DECAL_TEXTURE_MAX]; // Source textures, null when unset.
 	};
 
 private:
@@ -769,11 +769,11 @@ public:
 	RID get_decal_buffer() { return decal_buffer; }
 	void update_decal_buffer(const PagedArray<RID> &p_decals, const Transform3D &p_camera_xform);
 
-	/// Fills r_info for a decal instance seen from p_camera_pos. Returns false when the decal draws nothing
-	/// (no albedo or emission texture, or fully distance-faded).
+	// Fills r_info for a decal instance seen from p_camera_pos. Returns false when the decal draws nothing
+	// (no albedo or emission texture, or fully distance-faded).
 	bool decal_instance_get_sort_info(RID p_decal_instance, const Vector3 &p_camera_pos, DecalSortInfo &r_info) const;
-	/// Fills r_info with the world-space parameters of a decal instance. Returns false for an invalid instance.
-	/// Not cheap (matrix inverse, color conversion); cache the result against DecalSortInfo::version.
+	// Fills r_info with the world-space parameters of a decal instance. Returns false for an invalid instance.
+	// Not cheap (matrix inverse, color conversion); cache the result against DecalSortInfo::version.
 	bool decal_instance_get_world_info(RID p_decal_instance, DecalWorldInfo &r_info) const;
 
 	/* RENDER TARGET API */

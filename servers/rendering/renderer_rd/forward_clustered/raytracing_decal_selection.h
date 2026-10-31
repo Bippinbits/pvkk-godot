@@ -57,9 +57,9 @@ inline float decal_score(float p_solid_angle, float p_fade, float p_forward_dept
 }
 
 struct DecalCandidate {
-	uint32_t source = 0; ///< Caller index of the decal.
-	float score = 0.0f; ///< Priority; higher survives the budget.
-	float sort_key = 0.0f; ///< Blend order; lower is drawn on top.
+	uint32_t source = 0; // Caller index of the decal.
+	float score = 0.0f; // Priority; higher survives the budget.
+	float sort_key = 0.0f; // Blend order; lower is drawn on top.
 };
 
 struct DecalByScore {

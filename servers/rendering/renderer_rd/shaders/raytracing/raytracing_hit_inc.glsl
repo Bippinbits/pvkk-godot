@@ -52,7 +52,7 @@ struct TBNResult {
 // TRIANGLE INDEX FETCHING
 // ============================================================================
 
-/// Core implementation taking an explicit primitive ID (works in any shader stage).
+// Core implementation taking an explicit primitive ID (works in any shader stage).
 void get_triangle_indices_ex(in GeometryData geom, uint primitive_id, out uint i0, out uint i1, out uint i2) {
 	if (geom.index_format == 2u) {
 		i0 = primitive_id * 3u;
@@ -84,7 +84,7 @@ void get_triangle_indices_ex(in GeometryData geom, uint primitive_id, out uint i
 }
 
 #if defined(RT_STAGE_CLOSEST_HIT) || defined(RT_STAGE_ANY_HIT) || defined(RT_STAGE_INTERSECTION)
-/// Convenience wrapper using gl_PrimitiveID (hit shaders only).
+// Convenience wrapper using gl_PrimitiveID (hit shaders only).
 void get_triangle_indices(in GeometryData geom, out uint i0, out uint i1, out uint i2) {
 	get_triangle_indices_ex(geom, gl_PrimitiveID, i0, i1, i2);
 }
@@ -94,13 +94,13 @@ void get_triangle_indices(in GeometryData geom, out uint i0, out uint i1, out ui
 // FACING
 // ============================================================================
 #if defined(RT_STAGE_CLOSEST_HIT) || defined(RT_STAGE_ANY_HIT)
-/// Raster FRONT_FACING of a triangle hit: the winding of the triangle vertex() output, as seen from the ray origin.
+// Raster FRONT_FACING of a triangle hit: the winding of the triangle vertex() output, as seen from the ray origin.
 bool rt_triangle_front_facing(in GeometryData geom) {
 	return (gl_HitKindEXT == gl_HitKindFrontFacingTriangleEXT) != ((geom.flags & FLAG_FACING_INVERTED) != 0u);
 }
 #endif
 
-/// The shading normal p_normal, flipped on back faces of materials raster flips it for (DO_SIDE_CHECK).
+// The shading normal p_normal, flipped on back faces of materials raster flips it for (DO_SIDE_CHECK).
 vec3 rt_side_checked_normal(in GeometryData geom, vec3 p_normal, bool p_front_facing) {
 	return (!p_front_facing && (geom.flags & FLAG_SIDE_CHECK) != 0u) ? -p_normal : p_normal;
 }

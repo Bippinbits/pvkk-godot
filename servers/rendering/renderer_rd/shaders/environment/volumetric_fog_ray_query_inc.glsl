@@ -6,6 +6,7 @@
 #extension GL_EXT_nonuniform_qualifier : require
 
 #include "../raytracing/raytracing_inc.glsl"
+
 #include "../raytracing/raytracing_hit_inc.glsl"
 
 layout(set = 1, binding = 0) uniform accelerationStructureEXT tlas;

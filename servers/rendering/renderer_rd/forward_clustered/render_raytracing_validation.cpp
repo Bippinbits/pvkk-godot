@@ -93,8 +93,7 @@ void RTValidation::check_view(const RTValidationView &p_view, LocalVector<String
 			return;
 		}
 		if (range->buffer != p_source) {
-			r_issues.push_back(where + vformat(" points into buffer (RID %d), but was taken from buffer (RID %d): that buffer was freed and its memory reused.",
-											   (int64_t)range->buffer.get_id(), (int64_t)p_source.get_id()));
+			r_issues.push_back(where + vformat(" points into buffer (RID %d), but was taken from buffer (RID %d): that buffer was freed and its memory reused.", (int64_t)range->buffer.get_id(), (int64_t)p_source.get_id()));
 			return;
 		}
 		const uint64_t end = p_address - range->address + MAX(p_extent, (uint64_t)1);

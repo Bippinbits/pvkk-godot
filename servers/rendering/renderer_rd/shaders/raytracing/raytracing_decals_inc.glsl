@@ -57,7 +57,7 @@ layout(set = 0, binding = 37, std430) readonly buffer RTDecalBuffer {
 
 layout(set = 0, binding = 38) uniform sampler rt_decal_sampler;
 
-/// Top-most decals covering a point, in ascending index order (index 0 is drawn on top).
+// Top-most decals covering a point, in ascending index order (index 0 is drawn on top).
 struct RTDecalStack {
 	uint index[RT_DECAL_MAX_OVERLAP];
 	float fade[RT_DECAL_MAX_OVERLAP];
@@ -69,12 +69,12 @@ vec3 rt_decal_uv_local(uint p_decal, vec3 p_pos) {
 	return vec4(p_pos, 1.0) * rt_decals[p_decal].world_to_box;
 }
 
-/// Mip 0 sample of a decal texture at uv_local.xz. Callers check for RT_DECAL_NO_TEXTURE.
+// Mip 0 sample of a decal texture at uv_local.xz. Callers check for RT_DECAL_NO_TEXTURE.
 vec4 rt_decal_sample(uint p_texture, vec2 p_uv) {
 	return textureLod(sampler2D(bindless_textures[nonuniformEXT(p_texture)], rt_decal_sampler), p_uv, 0.0);
 }
 
-/// Opacity of a decal at a point, or a negative value when the point is outside its box or masked out.
+// Opacity of a decal at a point, or a negative value when the point is outside its box or masked out.
 float rt_decal_coverage(uint p_decal, vec3 p_pos, vec3 p_geometry_normal, uint p_layers) {
 	if ((rt_decals[p_decal].mask & p_layers) == 0u) {
 		return -1.0;
@@ -90,7 +90,7 @@ float rt_decal_coverage(uint p_decal, vec3 p_pos, vec3 p_geometry_normal, uint p
 	return fade;
 }
 
-/// Keeps the RT_DECAL_MAX_OVERLAP lowest indices, sorted ascending.
+// Keeps the RT_DECAL_MAX_OVERLAP lowest indices, sorted ascending.
 void rt_decal_stack_insert(inout RTDecalStack r_stack, uint p_decal, float p_fade) {
 	const uint last = uint(RT_DECAL_MAX_OVERLAP - 1);
 	r_stack.total++;
@@ -191,8 +191,8 @@ void rt_decal_debug_overlap(uint p_total) {
 }
 #endif
 
-/// Projects the decals covering the hit onto r_m, bottom to top.
-/// Returns true when the Decal Overlap debug view consumed the hit (payload already written).
+// Projects the decals covering the hit onto r_m, bottom to top.
+// Returns true when the Decal Overlap debug view consumed the hit (payload already written).
 bool rt_decals_process(HitData p_h, inout MaterialResult r_m) {
 #ifdef RT_DEBUG_ENABLED
 	if (int(get_rt_param(RT_PARAM_VIS_MODE)) == RT_VIS_DECAL_OVERLAP) {

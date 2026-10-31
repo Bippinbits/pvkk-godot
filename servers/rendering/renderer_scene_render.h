@@ -313,11 +313,11 @@ public:
 		uint32_t positional_light_count;
 	};
 
-	/// Instances culled against the ray tracing volume, which extends beyond the camera frustum.
+	// Instances culled against the ray tracing volume, which extends beyond the camera frustum.
 	struct RTCullData {
-		const PagedArray<RenderGeometryInstance *> *instances = nullptr; ///< Geometry for the TLAS.
-		const PagedArray<RID> *lights = nullptr; ///< Light instances.
-		const PagedArray<RID> *decals = nullptr; ///< Decal instances.
+		const PagedArray<RenderGeometryInstance *> *instances = nullptr; // Geometry for the TLAS.
+		const PagedArray<RID> *lights = nullptr; // Light instances.
+		const PagedArray<RID> *decals = nullptr; // Decal instances.
 	};
 
 	struct CameraData {

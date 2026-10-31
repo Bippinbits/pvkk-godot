@@ -34,8 +34,8 @@
 #include "servers/rendering/renderer_rd/environment/sky.h"
 #include "servers/rendering/renderer_rd/forward_clustered/raytracing_decal_selection.h"
 #include "servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.h"
-#include "servers/rendering/renderer_rd/framebuffer_cache_rd.h"
 #include "servers/rendering/renderer_rd/forward_clustered/scene_shader_raytracing.h"
+#include "servers/rendering/renderer_rd/framebuffer_cache_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/decal_math.h"
 #include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
@@ -3402,12 +3402,12 @@ public:
 	void gather_instances();
 	/// Adds the surfaces collected by gather_instances, merged into one BLAS per surface where the merge bake can.
 	void add_multimesh_surfaces();
-	/// Adds this view's counters to its render info and flags surfaces still waiting to be traced.
+	// Adds this view's counters to its render info and flags surfaces still waiting to be traced.
 	void finish();
 
-	/// BLASes this view queued for a build.
+	// BLASes this view queued for a build.
 	LocalVector<RID> dirty_blas_list;
-	/// BLASes this view queued for a refit.
+	// BLASes this view queued for a refit.
 	LocalVector<RID> dirty_blas_update_list;
 
 private:

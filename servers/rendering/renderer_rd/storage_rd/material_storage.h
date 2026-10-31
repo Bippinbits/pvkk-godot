@@ -79,7 +79,7 @@ public:
 		virtual bool is_parameter_texture(const StringName &p_param) const;
 
 		virtual void set_code(const String &p_Code) = 0;
-		/// Returns whether RT must evaluate this shader outside the fixed HG0 path.
+		// Returns whether RT must evaluate this shader outside the fixed HG0 path.
 		virtual bool requires_custom_rt_hit_group() const { return false; }
 		// Optional follow-up to `set_code` carrying the RT-preprocessed source.
 		// Default no-op; RT-aware subclasses override to extract RT-side
@@ -268,7 +268,7 @@ private:
 		RID next_pass;
 		SelfList<Material> update_element;
 
-		uint16_t rt_invalidation_counter = 0; ///< Bump on param changes for RT cache invalidation.
+		uint16_t rt_invalidation_counter = 0; // Bump on param changes for RT cache invalidation.
 
 		Dependency dependency;
 
@@ -424,9 +424,9 @@ public:
 	virtual void global_shader_parameters_instance_update(RID p_instance, int p_index, const Variant &p_value, int p_flags_count = 0) override;
 
 	RID global_shader_uniforms_get_storage_buffer() const;
-	/// Returns the override (or value) RID for a global texture parameter, or RID() if not found.
+	// Returns the override (or value) RID for a global texture parameter, or RID() if not found.
 	RID global_shader_uniform_get_texture(const StringName &p_name) const;
-	/// Returns the buffer index for a scalar/vector global shader parameter, or -1 if not found.
+	// Returns the buffer index for a scalar/vector global shader parameter, or -1 if not found.
 	int32_t global_shader_uniform_get_buffer_index(const StringName &p_name) const;
 
 	/* SHADER API */
@@ -520,7 +520,7 @@ public:
 		return Span<const float>(&global_shader_uniforms.buffer_values->x, global_shader_uniforms.buffer_size * 4);
 	}
 
-	/// CPU copy of one scalar/vector global shader parameter, four floats per element; empty if not found or a texture.
+	// CPU copy of one scalar/vector global shader parameter, four floats per element; empty if not found or a texture.
 	_FORCE_INLINE_ Span<const float> global_shader_uniform_get_values(const StringName &p_name) const {
 		const GlobalShaderUniforms::Variable *variable = global_shader_uniforms.variables.getptr(p_name);
 		if (!variable || variable->buffer_index < 0) {
@@ -534,7 +534,7 @@ public:
 		return material && material->shader && material->shader->builtin_standard_3d;
 	}
 
-	/// Returns whether the material needs its generated shader evaluated outside HG0.
+	// Returns whether the material needs its generated shader evaluated outside HG0.
 	_FORCE_INLINE_ bool material_requires_custom_rt_hit_group(RID p_material) const {
 		Material *material = material_owner.get_or_null(p_material);
 		return material && material->shader && material->shader->data &&

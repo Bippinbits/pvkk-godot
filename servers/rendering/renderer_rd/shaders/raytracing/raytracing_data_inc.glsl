@@ -141,23 +141,23 @@ struct MaterialData {
 	uint pad;
 };
 
-/// Bindless index of a MaterialData *_texture.
+// Bindless index of a MaterialData *_texture.
 uint rt_texture_index(uint p_texture) {
 	return p_texture & RT_TEXTURE_INDEX_MASK;
 }
 
-/// RT_TEXTURE_CHANNEL_* of a MaterialData roughness, metallic or AO texture.
+// RT_TEXTURE_CHANNEL_* of a MaterialData roughness, metallic or AO texture.
 uint rt_texture_channel(uint p_texture) {
 	return p_texture >> RT_TEXTURE_INDEX_BITS;
 }
 
-/// GeometryInstance3D transparency and visibility-parent fade of the TLAS entry, scaling surface alpha.
+// GeometryInstance3D transparency and visibility-parent fade of the TLAS entry, scaling surface alpha.
 float rt_instance_alpha(MaterialData p_mat) {
 	return 1.0 - float(p_mat.albedo_texture >> RT_TEXTURE_INDEX_BITS) / 255.0;
 }
 
-/// Coverage of material alpha p_alpha on the TLAS entry. Opaque materials traced as transparent only for the
-/// instance fade (RT_MAT_FLAG_INSTANCE_FADE) ignore material alpha like raster, except for their alpha scissor.
+// Coverage of material alpha p_alpha on the TLAS entry. Opaque materials traced as transparent only for the
+// instance fade (RT_MAT_FLAG_INSTANCE_FADE) ignore material alpha like raster, except for their alpha scissor.
 float rt_entry_alpha(MaterialData p_mat, float p_alpha, float p_scissor_threshold) {
 	if ((p_mat.flags & RT_MAT_FLAG_INSTANCE_FADE) != 0u) {
 		p_alpha = (p_mat.flags & RT_MAT_FLAG_ALPHA_SCISSOR) != 0u && p_alpha < p_scissor_threshold ? 0.0 : 1.0;
@@ -165,7 +165,7 @@ float rt_entry_alpha(MaterialData p_mat, float p_alpha, float p_scissor_threshol
 	return p_alpha * rt_instance_alpha(p_mat);
 }
 
-/// BaseMaterial3D roughness, metallic, specular (x, y, z).
+// BaseMaterial3D roughness, metallic, specular (x, y, z).
 vec3 rt_material_surface_params(MaterialData p_mat) {
 	return unpackUnorm4x8(p_mat.surface_params).xyz;
 }

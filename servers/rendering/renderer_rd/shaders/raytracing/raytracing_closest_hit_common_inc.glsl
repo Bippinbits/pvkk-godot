@@ -25,8 +25,8 @@ struct HitData {
 	uint geometry_idx;
 };
 
-/// Fetch vertex attributes and transform to world space.
-/// Requires hitAttributeEXT HitAttribs and GeometryBuffer/MaterialBuffer bindings.
+// Fetch vertex attributes and transform to world space.
+// Requires hitAttributeEXT HitAttribs and GeometryBuffer/MaterialBuffer bindings.
 HitData compute_hit_data() {
 	HitData h;
 	h.geometry_idx = RT_HIT_GEOMETRY_IDX;
@@ -86,7 +86,7 @@ HitData compute_hit_data() {
 // HELPERS
 // ============================================================================
 
-/// Apply tangent-space normal map to geometry normal.
+// Apply tangent-space normal map to geometry normal.
 vec3 apply_normal_map(HitData h, vec3 tangent_space_normal, float normal_map_depth) {
 	vec3 mapped = h.tangent * tangent_space_normal.x + h.bitangent * tangent_space_normal.y + h.geometry_normal * tangent_space_normal.z;
 	return normalize(mix(h.geometry_normal, mapped, normal_map_depth));
@@ -107,8 +107,8 @@ void rt_store_ndc_depth(vec3 hit_pos) {
 	imageStore(rt_depth_image, ivec2(gl_LaunchIDEXT.xy), vec4(ndc_depth));
 }
 
-/// Write NDC depth for primary ray hits (bounce 0, sample 0 only).
-/// Peel rays defer to the dominant-layer logic in shade_and_bounce.
+// Write NDC depth for primary ray hits (bounce 0, sample 0 only).
+// Peel rays defer to the dominant-layer logic in shade_and_bounce.
 void write_primary_hit_depth(vec3 hit_pos) {
 	if (get_total_bounces(payload.packed_bounces_flags) == 0u && is_sample_zero(payload.packed_bounces_flags) &&
 			(payload.packed_bounces_flags & PEEL_RAY_FLAG) == 0u) {
@@ -121,7 +121,7 @@ void write_primary_hit_depth(vec3 hit_pos) {
 // ============================================================================
 
 #ifdef ENABLE_INTERSECTION_SHADERS
-/// Decode the FP16-compressed PREV_POSITION delta from HitAttribs.
+// Decode the FP16-compressed PREV_POSITION delta from HitAttribs.
 vec3 decode_prev_pos_delta() {
 	uint dx_low = (hit_attribs.packed_normal >> 24u) & 0xFFu;
 	uint dx_high = (hit_attribs.packed_tangent >> 24u) & 0xFFu;
@@ -131,7 +131,7 @@ vec3 decode_prev_pos_delta() {
 }
 #endif
 
-/// Reconstruct previous-frame mat4 from a compact motion transform entry.
+// Reconstruct previous-frame mat4 from a compact motion transform entry.
 mat4 decode_prev_object_to_world(int motion_idx) {
 	InstanceMotionData m = motion_transforms[motion_idx];
 	return transpose(mat4(
@@ -141,7 +141,7 @@ mat4 decode_prev_object_to_world(int motion_idx) {
 			vec4(0.0, 0.0, 0.0, 1.0)));
 }
 
-/// Uses unjittered VP matrices matching the raster motion_vectors_store convention.
+// Uses unjittered VP matrices matching the raster motion_vectors_store convention.
 void rt_store_velocity(vec3 hit_pos) {
 	uint geom_idx = RT_HIT_GEOMETRY_IDX;
 	int mi = motion_indices[geom_idx];
@@ -191,8 +191,8 @@ void rt_store_velocity(vec3 hit_pos) {
 	imageStore(rt_velocity_image, ivec2(gl_LaunchIDEXT.xy), vec4(prev_uv - curr_uv, 0.0, 0.0));
 }
 
-/// Write motion vectors for primary ray hits (bounce 0, sample 0 only).
-/// Peel rays defer to the dominant-layer logic in shade_and_bounce.
+// Write motion vectors for primary ray hits (bounce 0, sample 0 only).
+// Peel rays defer to the dominant-layer logic in shade_and_bounce.
 void write_primary_hit_velocity(vec3 hit_pos) {
 	if (get_total_bounces(payload.packed_bounces_flags) != 0u || !is_sample_zero(payload.packed_bounces_flags) ||
 			(payload.packed_bounces_flags & PEEL_RAY_FLAG) != 0u) {
@@ -233,8 +233,8 @@ vec3 fog_sample_radiance(vec3 vertex, float mip_level) {
 #include "../fog_inc.glsl"
 #include "raytracing_volumetric_fog_inc.glsl"
 
-/// Analytic and, on camera segments, froxel fog at a hit, as premultiplied
-/// inscatter and transmittance.
+// Analytic and, on camera segments, froxel fog at a hit, as premultiplied
+// inscatter and transmittance.
 vec4 rt_fog_at(vec3 world_pos, vec3 view_vertex, bool camera_segment) {
 	bool use_fog = (RT_FLAGS & RT_FLAG_FOG_ENABLED) != 0u;
 	vec4 fog = vec4(0.0, 0.0, 0.0, 1.0);
@@ -257,8 +257,8 @@ vec3 rt_world_to_view(vec3 p_world) {
 	return (view_mat * vec4(p_world, 1.0)).xyz;
 }
 
-/// Apply environment fog for the ray segment that was just traversed.
-/// Attenuates throughput and adds in-scattered fog color.
+// Apply environment fog for the ray segment that was just traversed.
+// Attenuates throughput and adds in-scattered fog color.
 void apply_segment_fog(float segment_dist, uint mat_flags, bool camera_segment, inout vec3 radiance, inout vec3 throughput) {
 	if ((mat_flags & RT_MAT_FLAG_FOG_DISABLED) != 0u) {
 		return;
@@ -277,8 +277,8 @@ void apply_segment_fog(float segment_dist, uint mat_flags, bool camera_segment, 
 // BRDF MATERIAL SETUP
 // ============================================================================
 
-/// BRDF inputs for a surface. 'p_mat_flags' supplies the Godot light model and
-/// 'p_NdotV' the rasterizer's DFG energy compensation.
+// BRDF inputs for a surface. 'p_mat_flags' supplies the Godot light model and
+// 'p_NdotV' the rasterizer's DFG energy compensation.
 MaterialProperties material_properties(vec3 p_albedo, float p_metallic, float p_roughness, float p_specular,
 		vec3 p_backlight, uint p_mat_flags, float p_NdotV) {
 	MaterialProperties material;
@@ -419,7 +419,7 @@ void debug_dynamic_geometry_peel(inout PathState r_ps, vec3 p_color, float p_alp
 	path_pack(payload, r_ps);
 }
 
-/// Debug inputs of a closest hit. p_tangent_space_normal is the unpacked normal map sample.
+// Debug inputs of a closest hit. p_tangent_space_normal is the unpacked normal map sample.
 MaterialDebugInputs debug_material_inputs(HitData p_h, MaterialResult p_m, vec3 p_tangent_space_normal, vec3 p_tangent, vec3 p_bitangent, vec2 p_uv, float p_ao) {
 	MaterialDebugInputs inputs;
 	inputs.geometry_normal = p_h.geometry_normal;
@@ -568,9 +568,9 @@ bool surface_is_unshaded(uint geometry_idx) {
 #endif
 }
 
-/// Ambient and reflection lighting for max_bounces == 0, which never traces the
-/// sky. Mirrors the rasterizer (scene_forward_clustered.glsl): ambient source,
-/// sky contribution, reflection source, specular occlusion and DFG weighting.
+// Ambient and reflection lighting for max_bounces == 0, which never traces the
+// sky. Mirrors the rasterizer (scene_forward_clustered.glsl): ambient source,
+// sky contribution, reflection source, specular occlusion and DFG weighting.
 vec3 ambient_approx(vec3 N, vec3 V, MaterialResult m, MaterialProperties material) {
 	uint flags = scene_data_block.data.flags;
 	vec4 ambient_color_energy = scene_data_block.data.ambient_light_color_energy;
@@ -687,8 +687,8 @@ bool sample_surface_continuation(HitData h, MaterialResult m, vec3 N, vec3 V, in
 }
 
 #ifdef DLSS_RR_ENABLED
-/// Distance to the mirror-reflection hit for the specular hit-distance guide, -1.0 for
-/// rough surfaces and misses. Deterministic: RR guides must never carry sampling noise.
+// Distance to the mirror-reflection hit for the specular hit-distance guide, -1.0 for
+// rough surfaces and misses. Deterministic: RR guides must never carry sampling noise.
 float dlss_rr_specular_hit_distance(vec3 p_hit_pos, vec3 N, vec3 V, float p_roughness, uint p_mask) {
 	if (p_roughness >= MAX_DENOISER_SPECULAR_HIT_THRESHOLD) {
 		return -1.0;
@@ -711,10 +711,10 @@ float dlss_rr_specular_hit_distance(vec3 p_hit_pos, vec3 N, vec3 V, float p_roug
 			: -1.0;
 }
 
-/// Composites a peel layer's RR guides over the ones stored for this pixel. p_cover is
-/// how much of what is behind the layer it hides. A premultiplied layer adds its albedos
-/// unscaled and takes over normal, roughness and hit distance by its share of the
-/// specular albedo, so its guides stay continuous at any alpha.
+// Composites a peel layer's RR guides over the ones stored for this pixel. p_cover is
+// how much of what is behind the layer it hides. A premultiplied layer adds its albedos
+// unscaled and takes over normal, roughness and hit distance by its share of the
+// specular albedo, so its guides stay continuous at any alpha.
 void dlss_rr_composite_peel_guides(HitData h, MaterialResult m, vec3 N, vec3 V, float NdotV, float p_cover, bool p_premultiplied) {
 	ivec2 pixel = ivec2(gl_LaunchIDEXT.xy);
 	float source_weight = p_premultiplied ? 1.0 : p_cover;
@@ -724,8 +724,7 @@ void dlss_rr_composite_peel_guides(HitData h, MaterialResult m, vec3 N, vec3 V, 
 			DLSSRR_computeDiffuseAlbedo(m.albedo, m.metalness) * source_weight;
 	imageStore(dlss_rr_diffuse_albedo, pixel, vec4(DLSSRR_encodeDiffuseAlbedo(diffuse), 1.0));
 
-	vec3 layer_specular = source_weight * DLSSRR_computeSpecularAlbedo(
-			m.albedo, m.metalness, material_specular_to_f0(m.specular), m.roughness, NdotV);
+	vec3 layer_specular = source_weight * DLSSRR_computeSpecularAlbedo(m.albedo, m.metalness, material_specular_to_f0(m.specular), m.roughness, NdotV);
 	vec3 specular = imageLoad(dlss_rr_specular_albedo, pixel).rgb * behind + layer_specular;
 	imageStore(dlss_rr_specular_albedo, pixel, vec4(clamp(specular, vec3(0.04), vec3(1.0)), 1.0));
 
@@ -744,8 +743,8 @@ void dlss_rr_composite_peel_guides(HitData h, MaterialResult m, vec3 N, vec3 V, 
 }
 #endif // DLSS_RR_ENABLED
 
-/// Production shading: emissive + NEE direct lighting + BRDF importance sampling + next bounce.
-/// Also handles DLSS-RR G-buffer output on primary ray.
+// Production shading: emissive + NEE direct lighting + BRDF importance sampling + next bounce.
+// Also handles DLSS-RR G-buffer output on primary ray.
 void shade_and_bounce(HitData h, MaterialResult m) {
 	// Any-hit already rejected alpha-scissored texels.
 	m.alpha = rt_entry_alpha(materials[h.geometry_idx], m.alpha, 0.0);
@@ -840,8 +839,7 @@ void shade_and_bounce(HitData h, MaterialResult m) {
 	apply_segment_fog(gl_HitTEXT, materials[h.geometry_idx].flags, total_bounces == 0u, ps.radiance, ps.throughput);
 
 	path_pack(payload, ps);
-	ps.radiance += ps.throughput * shade_local_surface(
-			h, m, N, V, diffuse_bounces > 0u, ps.rng_state);
+	ps.radiance += ps.throughput * shade_local_surface(h, m, N, V, diffuse_bounces > 0u, ps.rng_state);
 
 	// =================================================================
 	// DLSS Ray Reconstruction output (primary ray, sample 0 only)

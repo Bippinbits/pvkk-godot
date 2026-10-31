@@ -34,10 +34,10 @@
 
 #include <cstring>
 
-/// BaseMaterial3D state the path tracer's fixed-function hit group needs but can't read from the
-/// generated shader code (triplanar mapping, fades, emission, ORM packing). BaseMaterial3D packs it
-/// into the single material parameter PARAM_NAME; materials without it are not BaseMaterial3D.
-/// The packed value only lives at runtime, so the layout may change freely.
+// BaseMaterial3D state the path tracer's fixed-function hit group needs but can't read from the
+// generated shader code (triplanar mapping, fades, emission, ORM packing). BaseMaterial3D packs it
+// into the single material parameter PARAM_NAME; materials without it are not BaseMaterial3D.
+// The packed value only lives at runtime, so the layout may change freely.
 struct RTBaseMaterialState {
 	static constexpr const char *PARAM_NAME = "rt_base_material_state";
 
@@ -45,25 +45,25 @@ struct RTBaseMaterialState {
 	uint32_t uv1_world_triplanar : 1;
 	uint32_t uv2_triplanar : 1;
 	uint32_t uv2_world_triplanar : 1;
-	/// The vertex stage applies uv2_scale/uv2_offset to UV2 (detail on UV2 without UV2 triplanar).
+	// The vertex stage applies uv2_scale/uv2_offset to UV2 (detail on UV2 without UV2 triplanar).
 	uint32_t uv2_vertex_transform : 1;
 	uint32_t proximity_fade : 1;
-	/// BaseMaterial3D::DistanceFadeMode.
+	// BaseMaterial3D::DistanceFadeMode.
 	uint32_t distance_fade_mode : 2;
-	/// FEATURE_EMISSION. The emission parameters stay set while it is off.
+	// FEATURE_EMISSION. The emission parameters stay set while it is off.
 	uint32_t emission : 1;
 	uint32_t emission_add : 1;
 	uint32_t emission_on_uv2 : 1;
 	uint32_t orm : 1;
-	/// FEATURE_AMBIENT_OCCLUSION.
+	// FEATURE_AMBIENT_OCCLUSION.
 	uint32_t ambient_occlusion : 1;
-	/// BaseMaterial3D::TextureChannel of the roughness texture.
+	// BaseMaterial3D::TextureChannel of the roughness texture.
 	uint32_t roughness_texture_channel : 3;
 	uint32_t unused : 16;
 
 	RTBaseMaterialState() { std::memset(this, 0, sizeof(*this)); }
 
-	/// Value stored in the material parameter; fits a non-negative int.
+	// Value stored in the material parameter; fits a non-negative int.
 	int64_t encode() const {
 		uint32_t packed;
 		std::memcpy(&packed, this, sizeof(packed));

@@ -166,10 +166,10 @@ float lights_get_specular_multiplier(float specular_amount, float roughness) {
 // Shadow Ray (traceRayEXT pipeline)
 // ============================================================================
 
-/// Returns colored light transmittance.
-/// Uses SkipClosestHitShader so only any_hit (alpha test) and miss are invoked.
-/// TerminateOnFirstHit exits on the first opaque or stochastic alpha blocker.
-/// p_shadow_mask is the light's 8-bit shadow-caster group mask.
+// Returns colored light transmittance.
+// Uses SkipClosestHitShader so only any_hit (alpha test) and miss are invoked.
+// TerminateOnFirstHit exits on the first opaque or stochastic alpha blocker.
+// p_shadow_mask is the light's 8-bit shadow-caster group mask.
 vec3 lights_trace_shadow_ray(vec3 origin, vec3 direction, float max_dist, uint p_shadow_mask, inout uint rng_state) {
 #ifdef USE_RAY_QUERY_SHADOWS
 	// Ray queries are faster but approximate custom or animated material outputs
@@ -198,8 +198,8 @@ vec3 lights_trace_shadow_ray(vec3 origin, vec3 direction, float max_dist, uint p
 	payload = saved_payload;
 	return hitObjectIsHitNV(hitObject) ? vec3(0.0) : shadow_ps.throughput;
 #else
-	/// The miss shader copies accumulated transmittance to radiance.
-	/// If an opaque hit occurs, miss is never called and radiance stays vec3(0.0).
+	// The miss shader copies accumulated transmittance to radiance.
+	// If an opaque hit occurs, miss is never called and radiance stays vec3(0.0).
 	// Save full payload, set up shadow ray, then restore after trace.
 	PathPayload saved_payload = payload;
 

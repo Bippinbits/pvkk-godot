@@ -35,7 +35,7 @@
 
 #define PRINT_PIPELINE_COMPILATION_KEYS 0
 
-/// Background pipeline compilations of every PipelineHashMapRD that haven't finished yet.
+// Background pipeline compilations of every PipelineHashMapRD that haven't finished yet.
 inline SafeNumeric<uint32_t> pipeline_hash_map_rd_compilations_in_flight;
 
 template <typename Key, typename CreationClass, typename CreationFunction>

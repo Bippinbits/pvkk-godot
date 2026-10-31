@@ -324,7 +324,7 @@ public:
 	_FORCE_INLINE_ RS::DecalFilter decals_get_filter() const {
 		return decals_filter;
 	}
-	/// Decal texture sampler for the current decal filter (repeat disabled).
+	// Decal texture sampler for the current decal filter (repeat disabled).
 	RID decals_get_sampler(const RendererRD::MaterialStorage::Samplers &p_samplers) const;
 
 	_FORCE_INLINE_ bool material_use_debanding_get() const {

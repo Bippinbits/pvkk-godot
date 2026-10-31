@@ -454,7 +454,7 @@ public:
 		MULTIMESH_INTERP_QUALITY_HIGH,
 	};
 
-    /* DEBUG API */
+	/* DEBUG API */
 
 	struct ResourceInfo {
 		String path;
@@ -1866,7 +1866,7 @@ public:
 		RENDERING_NOT_READY_RT_STALE_GEOMETRY = 1 << 3,
 	};
 
-	/// Why the last drawn frame may differ from a fully converged one; empty when output is final.
+	// Why the last drawn frame may differ from a fully converged one; empty when output is final.
 	virtual BitField<RenderingNotReadyReason> get_rendering_not_ready_reasons() = 0;
 
 	virtual String get_video_adapter_name() const = 0;

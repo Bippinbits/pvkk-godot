@@ -15,7 +15,7 @@ struct MaterialResult {
 	vec3 backlight; // Light "leaking through" thin/translucent surfaces (BACKLIGHT).
 };
 
-/// Sensible default for a mid-grey diffuse surface.
+// Sensible default for a mid-grey diffuse surface.
 MaterialResult default_material_result(vec3 geometry_normal) {
 	MaterialResult r;
 	r.albedo = vec3(0.8);
@@ -37,12 +37,12 @@ vec4 sample_bindless_texture(uint tex_idx, vec2 uv) {
 	return texture(sampler2D(bindless_textures[nonuniformEXT(tex_idx)], SAMPLER_LINEAR_WITH_MIPMAPS_REPEAT), uv);
 }
 
-/// Sample with point/nearest filtering (for pixel art textures).
+// Sample with point/nearest filtering (for pixel art textures).
 vec4 sample_bindless_texture_point(uint tex_idx, vec2 uv) {
 	return texture(sampler2D(bindless_textures[nonuniformEXT(tex_idx)], SAMPLER_NEAREST_REPEAT), uv);
 }
 
-/// Sample a MaterialData *_texture with the appropriate filter based on material flags.
+// Sample a MaterialData *_texture with the appropriate filter based on material flags.
 vec4 sample_material_texture(uint p_texture, vec2 uv, uint mat_flags) {
 	uint tex_idx = rt_texture_index(p_texture);
 	if ((mat_flags & RT_MAT_FLAG_POINT_FILTER) != 0u) {
@@ -55,9 +55,9 @@ vec4 sample_material_texture(uint p_texture, vec2 uv, uint mat_flags) {
 // UV ADDRESSING (plain UV1/UV2 or triplanar)
 // ============================================================================
 
-/// Resolved texture addressing for one hit. Mirrors the UV setup that
-/// BaseMaterial3D generates for the rasterizer, so both mapping modes can be
-/// sampled through a single entry point.
+// Resolved texture addressing for one hit. Mirrors the UV setup that
+// BaseMaterial3D generates for the rasterizer, so both mapping modes can be
+// sampled through a single entry point.
 struct MaterialUV {
 	vec2 uv; // Mesh UV with scale/offset applied (plain mapping).
 	vec3 triplanar_pos; // Scaled/offset position, object or world space.
@@ -67,7 +67,7 @@ struct MaterialUV {
 	bool object_space; // Triplanar mapping runs in model space, not world space.
 };
 
-/// Addressing parameters of one BaseMaterial3D UV channel.
+// Addressing parameters of one BaseMaterial3D UV channel.
 struct MaterialUVChannel {
 	vec3 scale;
 	vec3 offset;
@@ -97,9 +97,9 @@ MaterialUVChannel material_uv2_channel(MaterialData mat) {
 	return ch;
 }
 
-/// Build the addressing for a hit. `object_pos`/`object_normal` must be in
-/// decompressed model space (what the rasterizer sees as VERTEX/NORMAL);
-/// `world_pos`/`world_normal` are only used by world triplanar mode.
+// Build the addressing for a hit. `object_pos`/`object_normal` must be in
+// decompressed model space (what the rasterizer sees as VERTEX/NORMAL);
+// `world_pos`/`world_normal` are only used by world triplanar mode.
 MaterialUV material_uv_compute(MaterialUVChannel ch, vec2 mesh_uv,
 		vec3 object_pos, vec3 object_normal, vec3 world_pos, vec3 world_normal) {
 	MaterialUV muv;
@@ -123,8 +123,8 @@ MaterialUV material_uv_compute(MaterialUVChannel ch, vec2 mesh_uv,
 	return muv;
 }
 
-/// Ray-tracing stages only carry world-space hit data, so recover the model
-/// space that local triplanar mapping needs.
+// Ray-tracing stages only carry world-space hit data, so recover the model
+// space that local triplanar mapping needs.
 MaterialUV material_uv_channel_from_world(MaterialUVChannel ch, vec2 mesh_uv,
 		vec3 world_pos, vec3 world_normal) {
 	vec3 object_pos = vec3(0.0);
@@ -144,7 +144,7 @@ MaterialUV material_uv_from_world(MaterialData mat, GeometryData geom, vec2 mesh
 	return material_uv_channel_from_world(material_uv1_channel(mat), mesh_uv, world_pos, world_normal);
 }
 
-/// Sample a material texture through the resolved addressing.
+// Sample a material texture through the resolved addressing.
 vec4 material_uv_sample(uint tex_idx, MaterialUV muv, uint mat_flags) {
 	if (!muv.triplanar) {
 		return sample_material_texture(tex_idx, muv.uv, mat_flags);
@@ -158,9 +158,9 @@ vec4 material_uv_sample(uint tex_idx, MaterialUV muv, uint mat_flags) {
 	return samp;
 }
 
-/// World-space tangent frame implied by triplanar mapping. Normal maps on a
-/// triplanar material are authored against these axes rather than the mesh
-/// tangents, so they replace the fetched frame.
+// World-space tangent frame implied by triplanar mapping. Normal maps on a
+// triplanar material are authored against these axes rather than the mesh
+// tangents, so they replace the fetched frame.
 void material_uv_triplanar_tangents(MaterialUV muv, out vec3 tangent, out vec3 binormal) {
 	vec3 n = abs(muv.blend_normal);
 
@@ -191,13 +191,13 @@ void material_uv_triplanar_tangents(MaterialUV muv, out vec3 tangent, out vec3 b
 // ROUGHNESS / METALLIC / AO
 // ============================================================================
 
-/// dot(texel, mask) with the BaseMaterial3D texture channel mask of p_texture.
+// dot(texel, mask) with the BaseMaterial3D texture channel mask of p_texture.
 float material_texture_channel(vec4 p_texel, uint p_texture) {
 	uint channel = rt_texture_channel(p_texture);
 	return channel == RT_TEXTURE_CHANNEL_GRAYSCALE ? dot(p_texel.rgb, vec3(0.333333)) : p_texel[channel];
 }
 
-/// ROUGHNESS and METALLIC (x, y) of BaseMaterial3D from already sampled textures.
+// ROUGHNESS and METALLIC (x, y) of BaseMaterial3D from already sampled textures.
 vec2 material_roughness_metallic_from_texels(MaterialData mat, vec4 p_roughness_tex, vec4 p_metallic_tex) {
 	vec3 params = rt_material_surface_params(mat);
 	return clamp(vec2(
@@ -206,7 +206,7 @@ vec2 material_roughness_metallic_from_texels(MaterialData mat, vec4 p_roughness_
 			0.0, 1.0);
 }
 
-/// ROUGHNESS and METALLIC (x, y) of BaseMaterial3D. ORM materials share one texture fetch.
+// ROUGHNESS and METALLIC (x, y) of BaseMaterial3D. ORM materials share one texture fetch.
 vec2 material_roughness_metallic(MaterialData mat, MaterialUV muv) {
 	vec4 roughness_tex = material_uv_sample(mat.roughness_texture, muv, mat.flags);
 	vec4 metallic_tex = rt_texture_index(mat.metallic_texture) == rt_texture_index(mat.roughness_texture)
@@ -215,8 +215,8 @@ vec2 material_roughness_metallic(MaterialData mat, MaterialUV muv) {
 	return material_roughness_metallic_from_texels(mat, roughness_tex, metallic_tex);
 }
 
-/// AO of BaseMaterial3D (1.0 when disabled). UV1 only: AO on UV2 is not mirrored, and the
-/// path tracer only shows AO in debug views since it traces occlusion itself.
+// AO of BaseMaterial3D (1.0 when disabled). UV1 only: AO on UV2 is not mirrored, and the
+// path tracer only shows AO in debug views since it traces occlusion itself.
 float material_ao(MaterialData mat, MaterialUV muv) {
 	return material_texture_channel(material_uv_sample(mat.ao_texture, muv, mat.flags), mat.ao_texture);
 }
@@ -225,9 +225,9 @@ float material_ao(MaterialData mat, MaterialUV muv) {
 // EMISSION
 // ============================================================================
 
-/// Raw emission output of BaseMaterial3D for one hit (before exposure
-/// normalization). Mirrors the generated fragment code: the emission texture
-/// defaults to black, and the operator combines it with the emission color.
+// Raw emission output of BaseMaterial3D for one hit (before exposure
+// normalization). Mirrors the generated fragment code: the emission texture
+// defaults to black, and the operator combines it with the emission color.
 vec3 material_emission(MaterialData mat, MaterialUV uv1, vec2 mesh_uv2, vec3 world_pos, vec3 world_normal) {
 	vec3 emission_tex = vec3(0.0);
 	if ((mat.flags & RT_MAT_FLAG_HAS_EMISSION_TEX) != 0u) {

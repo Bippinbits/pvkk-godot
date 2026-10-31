@@ -46,7 +46,7 @@
 #define RT_VIS_TRANSPARENCY_LAYERS 23
 #define RT_VIS_DYNAMIC_GEOMETRY 29
 
-/// True when p_vis_mode traces transparency peels: normal shading, and the debug views that show transparent layers.
+// True when p_vis_mode traces transparency peels: normal shading, and the debug views that show transparent layers.
 bool rt_debug_keeps_transparency(int p_vis_mode) {
 	return p_vis_mode == 0 || p_vis_mode == RT_VIS_TRANSPARENCY_LAYERS || p_vis_mode == RT_VIS_DYNAMIC_GEOMETRY;
 }
@@ -77,7 +77,7 @@ const uint PEEL_FIRST_LAYER_FLAG = (1u << 29);
 const uint PEEL_HAS_CONTINUATION_FLAG = (1u << 30);
 const uint PEEL_DEPTH_BARRIER_HIT_FLAG = (1u << 31);
 
-/// Unpacked fp32 working copy of the payload.
+// Unpacked fp32 working copy of the payload.
 struct PathState {
 	vec3 radiance;
 	vec3 throughput;
@@ -211,28 +211,28 @@ const uint FLAG_SIDE_CHECK = 64u;
 // RANDOM NUMBER GENERATION - PCG (Permuted Congruential Generator)
 // ============================================================================
 
-/// PCG random number generator - improved XSH-RR variant with better avalanche
+// PCG random number generator - improved XSH-RR variant with better avalanche
 uint pcg_hash(uint seed) {
 	uint state = seed * 747796405u + 2891336453u;
 	uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
 	return (word >> 22u) ^ word;
 }
 
-/// Initialize RNG state with improved mixing to eliminate patterns
+// Initialize RNG state with improved mixing to eliminate patterns
 uint init_rng(uvec2 pixel, uint frame, uint sample_idx) {
 	// Use Wang hash for better mixing - eliminates linear patterns
 	uint seed = pixel.x + pixel.y * 65536u + frame * 1000000u + sample_idx * 100000000u;
 	return pcg_hash(seed);
 }
 
-/// Random float in [0, 1)
+// Random float in [0, 1)
 float rand(inout uint state) {
 	state = pcg_hash(state);
 	// Keep 24 bits, float(state) would round the top values up to exactly 1.0.
 	return float(state >> 8u) * (1.0 / 16777216.0);
 }
 
-/// Random vec2 in [0, 1)
+// Random vec2 in [0, 1)
 vec2 rand2(inout uint state) {
 	return vec2(rand(state), rand(state));
 }

@@ -230,7 +230,7 @@ void main() {
 				uint continuation_rng = ps.rng_state;
 
 				float T_total = 1.0;
-				uint layer_param = bounce == 0u ? RT_PARAM_MAX_TRANSPARENCY_LAYERS
+				uint layer_param = bounce == 0u			? RT_PARAM_MAX_TRANSPARENCY_LAYERS
 						: is_singular_path(flags_entry) ? RT_PARAM_MAX_TRANSPARENCY_LAYERS_REFLECTION
 														: RT_PARAM_MAX_TRANSPARENCY_LAYERS_INDIRECT;
 				uint layer_cap = min(uint(get_rt_param(layer_param)), 64u);
@@ -286,7 +286,8 @@ void main() {
 					if (bounce == 0u && composite_enabled &&
 							is_primary_miss(opaque_continuation.packed_bounces_flags)) {
 						vec3 composite_color = texelFetch(
-								sampler2D(prepass_color_texture, SAMPLER_NEAREST_CLAMP), ivec2(pixel), 0).rgb;
+								sampler2D(prepass_color_texture, SAMPLER_NEAREST_CLAMP), ivec2(pixel), 0)
+													   .rgb;
 						segment_radiance = throughput_entry * composite_color;
 					}
 					vec3 resolved_radiance = radiance_pre + segment_radiance * T_total + peel_sum;

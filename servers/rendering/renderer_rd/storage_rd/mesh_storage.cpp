@@ -34,7 +34,6 @@
 #include "servers/rendering/renderer_viewport.h"
 #include "servers/rendering/rendering_server.h"
 
-
 using namespace RendererRD;
 
 MeshStorage *MeshStorage::singleton = nullptr;

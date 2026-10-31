@@ -31,9 +31,9 @@
 #pragma once
 
 #include "../storage_rd/material_storage.h"
+#include "servers/rendering/renderer_rd/forward_clustered/render_raytracing_capture.h"
 #include "servers/rendering/renderer_rd/pipeline_hash_map_rd.h"
 #include "servers/rendering/renderer_rd/shaders/forward_clustered/scene_forward_clustered.glsl.gen.h"
-#include "servers/rendering/renderer_rd/forward_clustered/render_raytracing_capture.h"
 #include "servers/rendering/rendering_billboard.h"
 
 namespace RendererSceneRenderImplementation {
@@ -145,8 +145,8 @@ public:
 		uint32_t packed_2;
 	};
 
-	/// Raster material debug view for an Environment pathtracing debug mode: the mode itself when
-	/// it only shows material inputs (drawn by material_inputs_inc.glsl), otherwise 0.
+	// Raster material debug view for an Environment pathtracing debug mode: the mode itself when
+	// it only shows material inputs (drawn by material_inputs_inc.glsl), otherwise 0.
 	static uint32_t material_debug_mode_from_environment(int p_pathtracing_debug_mode);
 
 	struct UbershaderConstants {
