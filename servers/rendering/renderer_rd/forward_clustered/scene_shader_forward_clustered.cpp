@@ -71,6 +71,7 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	uses_bent_normal_map = false;
 	uses_msdf = false;
 	uses_vertex_color = false;
+	uses_instance_custom = false;
 	wireframe = false;
 
 	unshaded = false;
@@ -175,6 +176,7 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	actions.usage_flag_pointers["BENT_NORMAL_MAP"] = &uses_bent_normal_map;
 	actions.usage_flag_pointers["msdf_pixel_range"] = &uses_msdf;
 	actions.usage_flag_pointers["COLOR"] = &uses_vertex_color;
+	actions.usage_flag_pointers["INSTANCE_CUSTOM"] = &uses_instance_custom;
 
 	actions.usage_flag_pointers["POINT_SIZE"] = &uses_point_size;
 	actions.usage_flag_pointers["POINT_COORD"] = &uses_point_size;
@@ -416,7 +418,7 @@ void SceneShaderForwardClustered::ShaderData::set_code_rt(const String &p_code_r
 }
 
 bool SceneShaderForwardClustered::ShaderData::requires_custom_rt_hit_group() const {
-	return uses_msdf || uses_vertex_color;
+	return uses_msdf || uses_vertex_color || uses_instance_custom;
 }
 
 bool SceneShaderForwardClustered::ShaderData::is_animated() const {

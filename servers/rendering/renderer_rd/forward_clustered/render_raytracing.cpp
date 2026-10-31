@@ -5666,7 +5666,8 @@ RID RenderRaytracing::update_uniform_set(RTViewportState *p_state, const RenderD
 			rt_ubo.params[SceneShaderRaytracing::RT_PARAM_VIS_MODE] = (float)env_storage->environment_get_pathtracing_debug_mode(env);
 			rt_ubo.params[SceneShaderRaytracing::RT_PARAM_SAMPLE_COUNT] = (float)env_storage->environment_get_pathtracing_samples_per_pixel(env);
 			rt_ubo.params[SceneShaderRaytracing::RT_PARAM_MAX_BOUNCES] = (float)env_storage->environment_get_pathtracing_max_bounces(env);
-			rt_ubo.params[SceneShaderRaytracing::RT_PARAM_DENOISER] = (float)(int)env_storage->environment_get_pathtracing_denoiser(env);		}
+			rt_ubo.params[SceneShaderRaytracing::RT_PARAM_DENOISER] = (float)(int)SceneShaderRaytracing::get_effective_denoiser(env);
+		}
 
 		// rt_params layout (see RaytracingParamIndex enum):
 		// [0] = VIS_MODE, [1] = SAMPLE_COUNT, [2] = MAX_BOUNCES,

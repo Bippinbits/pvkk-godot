@@ -176,6 +176,11 @@ public:
 	// `p_environment` may be invalid (RT active with no pathtracing environment).
 	static uint32_t compute_rt_flags(RID p_environment, bool p_fog_enabled, bool p_volumetric_fog_enabled);
 
+	// True for debug modes that replace shading with a visualization (timing heatmap keeps normal shading).
+	static bool is_debug_vis_mode(int p_debug_mode) { return p_debug_mode != 0 && p_debug_mode != RT_DEBUG_TIMING_HEATMAP; }
+	// Environment denoiser, forced to none while a debug visualization is active.
+	static RSE::PathtracingDenoiser get_effective_denoiser(RID p_environment);
+
 	// Inputs read by vertex() of preprocessed spatial shader code, following user function calls. The mask is
 	// RTVertexCapture::DEP_ALL when the code doesn't parse.
 	static RTVertexCapture::VertexDependencies compute_vertex_capture_dependencies(const String &p_code);

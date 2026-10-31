@@ -283,6 +283,7 @@ public:
 		bool uses_bent_normal_map = false;
 		bool uses_msdf = false;
 		bool uses_vertex_color = false; // Reads COLOR; HG0 has no vertex color, so Label3D/Sprite3D modulate needs the custom hit group
+		bool uses_instance_custom = false; // Reads INSTANCE_CUSTOM; HG0 can't, so particle flipbooks need the custom hit group.
 		bool wireframe = false;
 
 		bool unshaded = false;

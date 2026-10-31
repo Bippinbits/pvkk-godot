@@ -697,6 +697,17 @@ bool SceneShaderRaytracing::is_compiling() {
 	return false;
 }
 
+RSE::PathtracingDenoiser SceneShaderRaytracing::get_effective_denoiser(RID p_environment) {
+	if (p_environment.is_null()) {
+		return RSE::PT_DENOISER_NONE;
+	}
+	const RendererEnvironmentStorage *env_storage = RendererEnvironmentStorage::get_singleton();
+	if (is_debug_vis_mode(env_storage->environment_get_pathtracing_debug_mode(p_environment))) {
+		return RSE::PT_DENOISER_NONE;
+	}
+	return env_storage->environment_get_pathtracing_denoiser(p_environment);
+}
+
 uint32_t SceneShaderRaytracing::compute_rt_flags(RID p_environment, bool p_fog_enabled, bool p_volumetric_fog_enabled) {
 	uint32_t flags = RT_FLAG_NONE;
 	uint32_t sample_count = 1;
@@ -712,7 +723,7 @@ uint32_t SceneShaderRaytracing::compute_rt_flags(RID p_environment, bool p_fog_e
 			} else {
 				WARN_PRINT_ONCE("PT Timing Heatmap requires VK_KHR_shader_clock with shaderDeviceClock support. Rendering normal path tracing.");
 			}
-		} else if (debug_mode != 0) {
+		} else if (is_debug_vis_mode(debug_mode)) {
 			flags |= RT_FLAG_DEBUG_VIS_ENABLED;
 		}
 
@@ -722,7 +733,7 @@ uint32_t SceneShaderRaytracing::compute_rt_flags(RID p_environment, bool p_fog_e
 
 		sample_count = MAX(1, env_storage->environment_get_pathtracing_samples_per_pixel(p_environment));
 		max_bounces = MAX(0, env_storage->environment_get_pathtracing_max_bounces(p_environment));
-		if (env_storage->environment_get_pathtracing_denoiser(p_environment) == RSE::PT_DENOISER_DLSS_RAY_RECONSTRUCTION) {
+		if (get_effective_denoiser(p_environment) == RSE::PT_DENOISER_DLSS_RAY_RECONSTRUCTION) {
 			flags |= RT_FLAG_DLSS_RR_ENABLED;
 		}
 	}
