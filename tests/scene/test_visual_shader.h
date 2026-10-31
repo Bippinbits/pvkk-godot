@@ -182,6 +182,24 @@ TEST_CASE("[SceneTree][VisualShader] RT Vertex render modes") {
 	}
 }
 
+TEST_CASE("[SceneTree][VisualShader] RT BLAS render modes") {
+	Ref<VisualShader> vs;
+	vs.instantiate();
+	const auto count_rt_blas_modes = [&]() {
+		const Vector<String> modes = get_render_modes(vs);
+		return int(modes.has("rt_blas_auto")) + int(modes.has("rt_blas_refit")) + int(modes.has("rt_blas_rebuild"));
+	};
+	CHECK_MESSAGE(count_rt_blas_modes() == 0, "Auto is implicit.");
+
+	vs->set("modes/rt_blas", 1);
+	CHECK(count_rt_blas_modes() == 1);
+	CHECK(get_render_modes(vs).has("rt_blas_refit"));
+
+	vs->set("modes/rt_blas", 2);
+	CHECK(count_rt_blas_modes() == 1);
+	CHECK(get_render_modes(vs).has("rt_blas_rebuild"));
+}
+
 TEST_CASE("[SceneTree][VisualShader] Object creation and parameter") {
 	Ref<VisualShader> vs = memnew(VisualShader);
 	CHECK(vs.is_valid());

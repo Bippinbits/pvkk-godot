@@ -738,6 +738,7 @@ void RendererSceneCull::instance_set_base(RID p_instance, RID p_base) {
 				geom->geometry_instance->set_use_lightmap(RID(), instance->lightmap_uv_scale, instance->lightmap_slice_index);
 				geom->geometry_instance->set_instance_shader_uniforms_offset(instance->instance_uniforms.location());
 				_geometry_instance_set_shadow_casting(geom->geometry_instance, instance);
+				geom->geometry_instance->set_rt_blas_update(instance->rt_blas_update);
 				if (instance->lightmap_sh.size() == 9) {
 					geom->geometry_instance->set_lightmap_capture(instance->lightmap_sh.ptr());
 				}
@@ -1381,6 +1382,17 @@ void RendererSceneCull::_instance_update_shadow_casting(Instance *p_instance) {
 	}
 
 	_instance_queue_update(p_instance, false, true);
+}
+
+void RendererSceneCull::instance_geometry_set_rt_blas_update(RID p_instance, RS::RTBlasUpdate p_update) {
+	Instance *instance = instance_owner.get_or_null(p_instance);
+	ERR_FAIL_NULL(instance);
+	ERR_FAIL_INDEX(p_update, RS::RT_BLAS_UPDATE_REBUILD + 1);
+
+	instance->rt_blas_update = p_update;
+	if ((1 << instance->base_type) & RS::INSTANCE_GEOMETRY_MASK && instance->base_data) {
+		static_cast<InstanceGeometryData *>(instance->base_data)->geometry_instance->set_rt_blas_update(p_update);
+	}
 }
 
 void RendererSceneCull::instance_geometry_set_material_override(RID p_instance, RID p_material) {

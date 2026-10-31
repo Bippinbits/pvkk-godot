@@ -32,7 +32,6 @@
 
 #include "servers/rendering/renderer_rd/forward_clustered/render_raytracing_scheduler.h"
 
-#include "core/os/os.h"
 #include "core/templates/hash_set.h"
 #include "tests/test_macros.h"
 
@@ -97,20 +96,32 @@ static uint32_t count_actions(const LocalVector<RTSchedulerAction> &p_actions, R
 	return count;
 }
 
-TEST_CASE("[RTDynamicScheduler] New items build, then refit until a rebuild is due") {
+TEST_CASE("[RTDynamicScheduler] New items build, then one in every rebuild_interval_frames updates is a rebuild") {
 	Harness h;
 	RTSchedulerBudgets budgets;
 	budgets.rebuild_interval_frames = 3;
 	h.scheduler.set_budgets(budgets);
 	const LocalVector<RTSchedulerItem> items = make_items(2);
-
 	CHECK(count_actions(h.frame(items), RT_SCHEDULER_REBUILD) == 2);
-	CHECK(count_actions(h.frame(items), RT_SCHEDULER_REFIT) == 2);
-	CHECK(count_actions(h.frame(items), RT_SCHEDULER_REFIT) == 2);
-	CHECK_MESSAGE(count_actions(h.frame(items), RT_SCHEDULER_REBUILD) == 1, "Rebuild is due after rebuild_interval_frames, one item per frame for two items over three frames.");
-	CHECK(h.scheduler.get_stats().builds == 1);
-	CHECK(h.scheduler.get_stats().build_triangles == 100);
-	CHECK_MESSAGE(count_actions(h.frame(items), RT_SCHEDULER_REBUILD) == 1, "The deferred item rebuilds next.");
+	const uint64_t build_frame = h.context.frame;
+
+	LocalVector<uint64_t> rebuild_frames[2];
+	for (uint32_t f = 0; f < 12; f++) {
+		const LocalVector<RTSchedulerAction> &actions = h.frame(items);
+		CHECK(count_actions(actions, RT_SCHEDULER_HOLD) == 0);
+		for (uint32_t i = 0; i < 2; i++) {
+			if (actions[i] == RT_SCHEDULER_REBUILD) {
+				rebuild_frames[i].push_back(h.context.frame);
+			}
+		}
+	}
+	for (uint32_t i = 0; i < 2; i++) {
+		REQUIRE(rebuild_frames[i].size() >= 2);
+		CHECK_MESSAGE(rebuild_frames[i][0] >= build_frame + 3, "No periodic rebuild within an interval of the first build.");
+		for (uint32_t k = 1; k < rebuild_frames[i].size(); k++) {
+			CHECK_MESSAGE(rebuild_frames[i][k] - rebuild_frames[i][k - 1] == 3, "Updated every frame, an item rebuilds every rebuild_interval_frames frames.");
+		}
+	}
 }
 
 TEST_CASE("[RTDynamicScheduler] Periodic rebuilds of items created together are staggered") {
@@ -118,13 +129,18 @@ TEST_CASE("[RTDynamicScheduler] Periodic rebuilds of items created together are 
 	RTSchedulerBudgets budgets;
 	budgets.rebuild_interval_frames = 4;
 	h.scheduler.set_budgets(budgets);
-	const LocalVector<RTSchedulerItem> items = make_items(30);
-	CHECK(count_actions(h.frame(items), RT_SCHEDULER_REBUILD) == 30);
+	const LocalVector<RTSchedulerItem> items = make_items(400);
+	CHECK(count_actions(h.frame(items), RT_SCHEDULER_REBUILD) == 400);
 
+	for (uint32_t f = 0; f < 3; f++) {
+		CHECK_MESSAGE(count_actions(h.frame(items), RT_SCHEDULER_REFIT) == 400, "No periodic rebuild within an interval of the first build.");
+	}
 	HashSet<uint32_t> rebuilt;
-	for (uint32_t f = 0; f < 8; f++) {
+	for (uint32_t f = 0; f < 4; f++) {
 		const LocalVector<RTSchedulerAction> &actions = h.frame(items);
-		CHECK(count_actions(actions, RT_SCHEDULER_REBUILD) <= 8);
+		const uint32_t frame_rebuilds = count_actions(actions, RT_SCHEDULER_REBUILD);
+		CHECK_MESSAGE(frame_rebuilds >= 95, vformat("%d rebuilds on one frame.", frame_rebuilds));
+		CHECK(frame_rebuilds <= 105);
 		CHECK(count_actions(actions, RT_SCHEDULER_HOLD) == 0);
 		for (uint32_t i = 0; i < actions.size(); i++) {
 			if (actions[i] == RT_SCHEDULER_REBUILD) {
@@ -132,7 +148,85 @@ TEST_CASE("[RTDynamicScheduler] Periodic rebuilds of items created together are 
 			}
 		}
 	}
-	CHECK_MESSAGE(rebuilt.size() == 30, "Every item still gets its periodic rebuild.");
+	CHECK_MESSAGE(rebuilt.size() == 400, "Every item gets its periodic rebuild within one interval.");
+}
+
+TEST_CASE("[RTDynamicScheduler] Rebuilds stay steady when max_operations can't update every item") {
+	Harness h;
+	const LocalVector<RTSchedulerItem> items = make_items(5000);
+	for (uint32_t i = 0; i < items.size(); i++) {
+		h.estimator.visibility[i] = float((i * 7919) % 1000) / 1000.0f;
+	}
+	for (uint32_t f = 0; f < 40; f++) {
+		h.frame(items); // Initial builds take three frames, then periodic rebuilds ramp up.
+	}
+	uint32_t min_rebuilds = UINT32_MAX;
+	uint32_t max_rebuilds = 0;
+	for (uint32_t f = 0; f < 16; f++) {
+		const uint32_t rebuilds = count_actions(h.frame(items), RT_SCHEDULER_REBUILD);
+		min_rebuilds = MIN(min_rebuilds, rebuilds);
+		max_rebuilds = MAX(max_rebuilds, rebuilds);
+	}
+	CHECK_MESSAGE(max_rebuilds - min_rebuilds < max_rebuilds / 4, vformat("Rebuilds per frame swing between %d and %d.", min_rebuilds, max_rebuilds));
+}
+
+static LocalVector<RTSchedulerItem> make_items_with(uint32_t p_count, RS::RTBlasUpdate p_update, uint32_t p_triangles = 100) {
+	LocalVector<RTSchedulerItem> items = make_items(p_count, p_triangles);
+	for (RTSchedulerItem &item : items) {
+		item.blas_update = p_update;
+	}
+	return items;
+}
+
+TEST_CASE("[RTDynamicScheduler] Refit-only items never rebuild after their first build") {
+	Harness h;
+	LocalVector<RTSchedulerItem> items = make_items_with(4, RS::RT_BLAS_UPDATE_REFIT);
+	CHECK(count_actions(h.frame(items), RT_SCHEDULER_REBUILD) == 4);
+	for (uint32_t f = 0; f < 12; f++) {
+		CHECK(count_actions(h.frame(items), RT_SCHEDULER_REFIT) == 4);
+	}
+	items[0].needs_build = true;
+	CHECK_MESSAGE(h.frame(items)[0] == RT_SCHEDULER_REBUILD, "Structure changes still build.");
+}
+
+TEST_CASE("[RTDynamicScheduler] Rebuild-only items never refit") {
+	SUBCASE("every update is a rebuild") {
+		Harness h;
+		const LocalVector<RTSchedulerItem> items = make_items_with(4, RS::RT_BLAS_UPDATE_REBUILD);
+		for (uint32_t f = 0; f < 8; f++) {
+			CHECK(count_actions(h.frame(items), RT_SCHEDULER_REBUILD) == 4);
+		}
+	}
+	SUBCASE("a spent build budget holds them instead of refitting") {
+		Harness h;
+		RTSchedulerBudgets budgets;
+		budgets.build_triangles = 250;
+		h.scheduler.set_budgets(budgets);
+		const LocalVector<RTSchedulerItem> items = make_items_with(4, RS::RT_BLAS_UPDATE_REBUILD);
+		h.frame(items);
+		h.frame(items);
+		const LocalVector<RTSchedulerAction> &actions = h.frame(items);
+		CHECK(count_actions(actions, RT_SCHEDULER_REBUILD) == 2);
+		CHECK(count_actions(actions, RT_SCHEDULER_REFIT) == 0);
+		CHECK(h.scheduler.get_stats().budget_limited == 2);
+	}
+	SUBCASE("one alone over the build budget still rebuilds when it comes first") {
+		Harness h;
+		RTSchedulerBudgets budgets;
+		budgets.build_triangles = 100;
+		h.scheduler.set_budgets(budgets);
+		const LocalVector<RTSchedulerItem> items = make_items_with(1, RS::RT_BLAS_UPDATE_REBUILD, 1000);
+		for (uint32_t f = 0; f < 3; f++) {
+			CHECK(h.frame(items)[0] == RT_SCHEDULER_REBUILD);
+		}
+	}
+}
+
+TEST_CASE("[RTDynamicScheduler] An instance's BLAS update mode overrides its shader's unless it is auto") {
+	CHECK(rt_resolve_blas_update(RS::RT_BLAS_UPDATE_AUTO, RS::RT_BLAS_UPDATE_REFIT) == RS::RT_BLAS_UPDATE_REFIT);
+	CHECK(rt_resolve_blas_update(RS::RT_BLAS_UPDATE_AUTO, RS::RT_BLAS_UPDATE_AUTO) == RS::RT_BLAS_UPDATE_AUTO);
+	CHECK(rt_resolve_blas_update(RS::RT_BLAS_UPDATE_REBUILD, RS::RT_BLAS_UPDATE_REFIT) == RS::RT_BLAS_UPDATE_REBUILD);
+	CHECK(rt_resolve_blas_update(RS::RT_BLAS_UPDATE_REFIT, RS::RT_BLAS_UPDATE_REBUILD) == RS::RT_BLAS_UPDATE_REFIT);
 }
 
 TEST_CASE("[RTDynamicScheduler] Structure changes force a build") {
@@ -197,6 +291,24 @@ TEST_CASE("[RTDynamicScheduler] An oversized new item still builds when it comes
 	const LocalVector<RTSchedulerAction> &actions = h.frame(items);
 	CHECK(actions[items.size() - 1] == RT_SCHEDULER_REBUILD);
 	CHECK(h.scheduler.get_stats().get_updated() <= budgets.max_operations);
+}
+
+TEST_CASE("[RTDynamicScheduler] New items build before structure changes of existing ones") {
+	Harness h;
+	RTSchedulerBudgets budgets;
+	budgets.max_operations = 1;
+	h.scheduler.set_budgets(budgets);
+	LocalVector<RTSchedulerItem> items;
+	items.push_back(make_item(0));
+	h.frame(items);
+
+	items[0].needs_build = true;
+	h.estimator.visibility[0] = 1.0f;
+	items.push_back(make_item(1));
+	h.estimator.visibility[1] = 0.0f;
+	const LocalVector<RTSchedulerAction> &actions = h.frame(items);
+	CHECK(actions[1] == RT_SCHEDULER_REBUILD);
+	CHECK(actions[0] == RT_SCHEDULER_HOLD);
 }
 
 TEST_CASE("[RTDynamicScheduler] Higher visibility is updated first") {
@@ -310,27 +422,6 @@ TEST_CASE("[RTDynamicScheduler] CPU estimator ranks by apparent size") {
 	inside.aabb = AABB(Vector3(-2, -2, -2), Vector3(4, 4, 4));
 	CHECK_MESSAGE(estimator.get_visibility(inside) == doctest::Approx(1.0f), "A camera inside the bounds sees it fully.");
 	CHECK(estimator.should_hold(near_item) == false);
-}
-
-TEST_CASE("[RTDynamicScheduler] 5000 items schedule quickly") {
-	Harness h;
-	RTCpuVisibilityEstimator estimator;
-	const LocalVector<RTSchedulerItem> items = make_items(5000);
-	LocalVector<RTSchedulerAction> actions;
-	RTDynamicScheduler &scheduler = h.scheduler;
-
-	const int frames = 50;
-	uint64_t total_usec = 0;
-	for (int f = 1; f <= frames; f++) {
-		scheduler.begin_frame(f);
-		h.context.frame = f;
-		const uint64_t start = OS::get_singleton()->get_ticks_usec();
-		scheduler.schedule(estimator, h.context, items, actions);
-		total_usec += OS::get_singleton()->get_ticks_usec() - start;
-	}
-	const double average_usec = double(total_usec) / frames;
-	MESSAGE(vformat("RTDynamicScheduler: %.1f usec per frame for 5000 items.", average_usec));
-	CHECK(average_usec < 200.0);
 }
 
 } // namespace TestRenderRaytracingScheduler

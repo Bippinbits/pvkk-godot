@@ -1546,10 +1546,18 @@ public:
 		VISIBILITY_RANGE_FADE_DEPENDENCIES,
 	};
 
+	// How the path tracer updates the BLAS of dynamic geometry after its first build.
+	enum RTBlasUpdate {
+		RT_BLAS_UPDATE_AUTO, // Instances: follow the shader. Shaders: refits with periodic rebuilds.
+		RT_BLAS_UPDATE_REFIT, // Refits only; for geometry swaying around a rest pose.
+		RT_BLAS_UPDATE_REBUILD, // Full rebuilds only; for geometry that spreads, like particles.
+	};
+
 	virtual void instance_geometry_set_flag(RID p_instance, InstanceFlags p_flags, bool p_enabled) = 0;
 	virtual void instance_geometry_set_cast_shadows_setting(RID p_instance, ShadowCastingSetting p_shadow_casting_setting) = 0;
 	// Renderers that draw this instance's shadow while its cast shadows setting is not off.
 	virtual void instance_geometry_set_shadow_renderers(RID p_instance, BitField<ShadowRenderer> p_renderers) = 0;
+	virtual void instance_geometry_set_rt_blas_update(RID p_instance, RTBlasUpdate p_update) = 0;
 	virtual void instance_geometry_set_material_override(RID p_instance, RID p_material) = 0;
 	virtual void instance_geometry_set_material_overlay(RID p_instance, RID p_material) = 0;
 	virtual void instance_geometry_set_visibility_range(RID p_instance, float p_min, float p_max, float p_min_margin, float p_max_margin, VisibilityRangeFadeMode p_fade_mode) = 0;
@@ -2066,6 +2074,7 @@ VARIANT_ENUM_CAST(RenderingServer::ShadowQuality);
 VARIANT_ENUM_CAST(RenderingServer::InstanceType);
 VARIANT_ENUM_CAST(RenderingServer::InstanceFlags);
 VARIANT_ENUM_CAST(RenderingServer::ShadowCastingSetting);
+VARIANT_ENUM_CAST(RenderingServer::RTBlasUpdate);
 VARIANT_ENUM_CAST(RenderingServer::VisibilityRangeFadeMode);
 VARIANT_ENUM_CAST(RenderingServer::NinePatchAxisMode);
 VARIANT_ENUM_CAST(RenderingServer::CanvasItemTextureFilter);

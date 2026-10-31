@@ -932,6 +932,7 @@ public:
 	FUNC3(instance_geometry_set_flag, RID, InstanceFlags, bool)
 	FUNC2(instance_geometry_set_cast_shadows_setting, RID, ShadowCastingSetting)
 	FUNC2(instance_geometry_set_shadow_renderers, RID, BitField<ShadowRenderer>)
+	FUNC2(instance_geometry_set_rt_blas_update, RID, RTBlasUpdate)
 	FUNC2(instance_geometry_set_material_override, RID, RID)
 	FUNC2(instance_geometry_set_material_overlay, RID, RID)
 

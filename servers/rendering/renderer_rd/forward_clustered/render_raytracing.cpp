@@ -3120,9 +3120,11 @@ bool RenderRaytracing::_build_merged_mm_blas(
 			as_geom.geometry.triangles.index_count = instance_count * index_count;
 		}
 
-		// Particle BLASes are rebuilt or refitted nearly every frame, so build speed wins over trace speed.
+		// Scheduled entries (particles, captures, camera-dependent billboards) are rebuilt or refitted nearly every frame,
+		// so build speed wins over trace speed. Only static MultiMeshes keep fast trace.
+		const bool transient = p_source.particles || p_inputs.captured || billboarded;
 		BitField<RD::AccelerationStructureFlagBits> as_flags =
-				(p_source.particles ? RD::ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT : RD::ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT) |
+				(transient ? RD::ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT : RD::ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT) |
 				RD::ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT;
 		entry.blas = rd->blas_create({ &as_geom, 1 }, as_flags);
 		ERR_FAIL_COND_V(!entry.blas.is_valid(), false);
@@ -3790,6 +3792,7 @@ void RTTlasBuilder::_gather_mm_surfaces(const Instance &p_inst, const InstanceMa
 		pending.transform_moved = transform_moved;
 		pending.raster_mirror = p_inst.mirror;
 		pending.aabb = p_inst.transformed_aabb;
+		pending.blas_update = rt_resolve_blas_update(p_inst.rt_blas_update, mm_surf->shader->rt_blas_update);
 		pending.mat_data = mat_data;
 		_fill_surface_key(mm_surf->shader, mat_data, blend_class, tlas_mask, pending.key, pending.material_flags);
 		pending.transparent = transparent;
@@ -3994,6 +3997,7 @@ void RTTlasBuilder::_resolve_merged_jobs(LocalVector<MergedJob> &r_jobs) {
 		item.needs_build = !job.entry->blas_built_once || job.entry->last_mm_count != pending.source.count || job.entry->last_surface_counter != pending.surface_counter;
 		item.aabb = pending.aabb;
 		item.in_frustum = frustum.intersects(item.aabb);
+		item.blas_update = pending.blas_update;
 		item.triangle_count = uint32_t(MIN(triangles, uint64_t(UINT32_MAX)));
 		rt.dynamic_items.push_back(item);
 		dynamic_job_indices.push_back(i);

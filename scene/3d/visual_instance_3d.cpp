@@ -382,6 +382,15 @@ BitField<RS::ShadowRenderer> GeometryInstance3D::get_shadow_renderers() const {
 	return shadow_renderers;
 }
 
+void GeometryInstance3D::set_rt_blas_update(RTBlasUpdate p_update) {
+	rt_blas_update = p_update;
+	RS::get_singleton()->instance_geometry_set_rt_blas_update(get_instance(), (RS::RTBlasUpdate)p_update);
+}
+
+GeometryInstance3D::RTBlasUpdate GeometryInstance3D::get_rt_blas_update() const {
+	return rt_blas_update;
+}
+
 void GeometryInstance3D::set_extra_cull_margin(float p_margin) {
 	ERR_FAIL_COND(p_margin < 0);
 	extra_cull_margin = p_margin;
@@ -560,6 +569,9 @@ void GeometryInstance3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_shadow_renderers", "renderers"), &GeometryInstance3D::set_shadow_renderers);
 	ClassDB::bind_method(D_METHOD("get_shadow_renderers"), &GeometryInstance3D::get_shadow_renderers);
 
+	ClassDB::bind_method(D_METHOD("set_rt_blas_update", "update"), &GeometryInstance3D::set_rt_blas_update);
+	ClassDB::bind_method(D_METHOD("get_rt_blas_update"), &GeometryInstance3D::get_rt_blas_update);
+
 	ClassDB::bind_method(D_METHOD("set_lod_bias", "bias"), &GeometryInstance3D::set_lod_bias);
 	ClassDB::bind_method(D_METHOD("get_lod_bias"), &GeometryInstance3D::get_lod_bias);
 
@@ -616,6 +628,7 @@ void GeometryInstance3D::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::AABB, "custom_aabb", PROPERTY_HINT_NONE, "suffix:m"), "set_custom_aabb", "get_custom_aabb");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "lod_bias", PROPERTY_HINT_RANGE, "0.001,128,0.001"), "set_lod_bias", "get_lod_bias");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "ignore_occlusion_culling"), "set_ignore_occlusion_culling", "is_ignoring_occlusion_culling");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "rt_blas_update", PROPERTY_HINT_ENUM, "Auto,Refit Only,Rebuild Only"), "set_rt_blas_update", "get_rt_blas_update");
 
 	ADD_GROUP("Global Illumination", "gi_");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "gi_mode", PROPERTY_HINT_ENUM, "Disabled,Static,Dynamic"), "set_gi_mode", "get_gi_mode");
@@ -637,6 +650,9 @@ void GeometryInstance3D::_bind_methods() {
 	BIND_ENUM_CONSTANT(SHADOW_CASTING_SETTING_SHADOWS_ONLY);
 	BIND_ENUM_CONSTANT(SHADOW_CASTING_SETTING_SELF_SHADOWING);
 
+	BIND_ENUM_CONSTANT(RT_BLAS_UPDATE_AUTO);
+	BIND_ENUM_CONSTANT(RT_BLAS_UPDATE_REFIT);
+	BIND_ENUM_CONSTANT(RT_BLAS_UPDATE_REBUILD);
 
 	BIND_ENUM_CONSTANT(GI_MODE_DISABLED);
 	BIND_ENUM_CONSTANT(GI_MODE_STATIC);

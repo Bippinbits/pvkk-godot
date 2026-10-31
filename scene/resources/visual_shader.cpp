@@ -2828,8 +2828,8 @@ void VisualShader::_update_shader() const {
 				continue;
 			}
 
-			// rt_vertex_auto is the engine default; left implicit so existing shaders keep their code.
-			if (temp == "rt_vertex" && !effective_modes.has(temp)) {
+			// rt_vertex_auto and rt_blas_auto are the engine defaults; left implicit so existing shaders keep their code.
+			if ((temp == "rt_vertex" || temp == "rt_blas") && !effective_modes.has(temp)) {
 				continue;
 			}
 

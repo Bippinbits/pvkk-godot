@@ -38,6 +38,9 @@ namespace {
 constexpr float VISIBILITY_FLOOR = 1e-4f;
 // Safety-net items rank above everything the estimator scores.
 constexpr float FORCED_SCORE_BONUS = 1e6f;
+// New items aren't traced at all until built, so their builds rank above rebuilds of existing ones.
+// Mandatory scores are visibility (0..1), so 1 suffices and keeps visibility ordering exact.
+constexpr float NEW_ITEM_SCORE_BONUS = 1.0f;
 
 struct CandidateSort {
 	template <typename T>
@@ -48,6 +51,36 @@ struct CandidateSort {
 		return p_a.order < p_b.order;
 	}
 };
+
+// Max-heap on CandidateSort: the top is the candidate CandidateSort orders first.
+struct CandidateHeapOrder {
+	template <typename T>
+	_FORCE_INLINE_ bool operator()(const T &p_a, const T &p_b) const {
+		return CandidateSort()(p_b, p_a);
+	}
+};
+
+// Visits r_candidates in CandidateSort order until p_visit returns false; returns how many were not visited.
+// Heap-ordered lazily, so stopping early skips ordering the rest.
+template <typename T, typename F>
+uint32_t visit_in_order(LocalVector<T> &r_candidates, const F &p_visit) {
+	SortArray<T, CandidateHeapOrder> heap;
+	heap.make_heap(0, r_candidates.size(), r_candidates.ptr());
+	for (uint32_t end = r_candidates.size(); end > 0; end--) {
+		heap.pop_heap(0, end, r_candidates.ptr());
+		if (!p_visit(r_candidates[end - 1])) {
+			return end;
+		}
+	}
+	return 0;
+}
+
+// Rebuild countdown of a slot built on p_frame: [interval, 2 * interval) updates. Items updated every frame then
+// rebuild on frames where (frame + phase) % interval == 0; Fibonacci hashing spreads dense slots over the phases.
+uint16_t initial_rebuild_countdown(uint32_t p_slot, uint64_t p_frame, uint32_t p_interval) {
+	const uint32_t phase = uint32_t((uint64_t(p_slot * 2654435769u) * p_interval) >> 32);
+	return uint16_t(p_interval + (p_interval - (p_frame + phase) % p_interval) % p_interval);
+}
 
 } // namespace
 
@@ -64,7 +97,7 @@ void RTDynamicScheduler::_ensure_slot(uint32_t p_slot) {
 	const uint32_t old_size = slot_gen.size();
 	slot_gen.resize(size);
 	slot_last_update.resize(size);
-	slot_last_rebuild.resize(size);
+	slot_rebuild_countdown.resize(size);
 	slot_last_center.resize(size);
 	for (uint32_t i = old_size; i < size; i++) {
 		slot_gen[i] = 0;
@@ -106,13 +139,28 @@ bool RTDynamicScheduler::_try_refit(const RTSchedulerItem &p_item) {
 	return true;
 }
 
-void RTDynamicScheduler::_record(const RTSchedulerItem &p_item, RTSchedulerAction p_action) {
+// Picks the update of an item with a BLAS under the budgets left; HOLD when they ran out.
+RTSchedulerAction RTDynamicScheduler::_try_update(const RTSchedulerItem &p_item, uint32_t p_interval) {
+	switch (p_item.blas_update) {
+		case RS::RT_BLAS_UPDATE_REBUILD:
+			// Like mandatory builds, an item alone over the build budget still builds when it comes first.
+			return _try_rebuild(p_item, stats.build_triangles == 0) ? RT_SCHEDULER_REBUILD : RT_SCHEDULER_HOLD;
+		case RS::RT_BLAS_UPDATE_REFIT:
+			return _try_refit(p_item) ? RT_SCHEDULER_REFIT : RT_SCHEDULER_HOLD;
+		default:
+			break;
+	}
+	if (slot_rebuild_countdown[p_item.slot] <= 1 && _try_rebuild(p_item, false)) {
+		return RT_SCHEDULER_REBUILD;
+	}
+	return _try_refit(p_item) ? RT_SCHEDULER_REFIT : RT_SCHEDULER_HOLD;
+}
+
+void RTDynamicScheduler::_record(const RTSchedulerItem &p_item, uint16_t p_rebuild_countdown) {
 	slot_gen[p_item.slot] = p_item.gen;
 	slot_last_update[p_item.slot] = frame;
 	slot_last_center[p_item.slot] = p_item.aabb.get_center();
-	if (p_action == RT_SCHEDULER_REBUILD) {
-		slot_last_rebuild[p_item.slot] = frame;
-	}
+	slot_rebuild_countdown[p_item.slot] = p_rebuild_countdown;
 }
 
 void RTDynamicScheduler::schedule(RTVisibilityEstimator &p_estimator, const RTSchedulerFrameContext &p_frame, const LocalVector<RTSchedulerItem> &p_items, LocalVector<RTSchedulerAction> &r_actions) {
@@ -134,7 +182,7 @@ void RTDynamicScheduler::schedule(RTVisibilityEstimator &p_estimator, const RTSc
 		const float visibility = MAX(p_estimator.get_visibility(item), VISIBILITY_FLOOR);
 
 		if (item.needs_build || !_has_history(item)) {
-			candidate.score = visibility;
+			candidate.score = visibility + (_has_history(item) ? 0.0f : NEW_ITEM_SCORE_BONUS);
 			mandatory.push_back(candidate);
 			continue;
 		}
@@ -157,50 +205,48 @@ void RTDynamicScheduler::schedule(RTVisibilityEstimator &p_estimator, const RTSc
 		optional.push_back(candidate);
 	}
 
-	SortArray<Candidate, CandidateSort> sorter;
-	if (mandatory.size() > 1) {
-		sorter.sort(mandatory.ptr(), mandatory.size());
-	}
-	if (optional.size() > 1) {
-		sorter.sort(optional.ptr(), optional.size());
-	}
-
 	const uint32_t updated_before = stats.get_updated();
+	// Once max_operations is reached every remaining candidate holds, so ordering stops there.
+	const auto budget_left = [this]() { return stats.get_updated() < budgets.max_operations; };
+	uint32_t limited = 0;
+	const uint32_t interval = MAX(budgets.rebuild_interval_frames, 1u);
 
 	// Items without a valid BLAS. One that alone exceeds the build budget still builds when
 	// it is the first build of the frame, so oversized systems are never starved.
-	for (const Candidate &candidate : mandatory) {
-		const RTSchedulerItem &item = p_items[candidate.index];
+	const uint32_t mandatory_unvisited = visit_in_order(mandatory, [&](const Candidate &p_candidate) {
+		if (!budget_left()) {
+			return false;
+		}
+		const RTSchedulerItem &item = p_items[p_candidate.index];
 		if (_try_rebuild(item, stats.build_triangles == 0)) {
-			r_actions[candidate.index] = RT_SCHEDULER_REBUILD;
-			_record(item, RT_SCHEDULER_REBUILD);
+			r_actions[p_candidate.index] = RT_SCHEDULER_REBUILD;
+			_record(item, initial_rebuild_countdown(item.slot, frame, interval));
 		} else {
-			stats.held++;
-			stats.budget_limited++;
+			limited++;
 		}
-	}
+		return true;
+	});
 
-	// Spreads periodic rebuilds over the interval, so items created together don't all rebuild on the same frame.
-	const uint32_t interval = MAX(budgets.rebuild_interval_frames, 1u);
-	uint32_t rebuild_quota = (optional.size() + interval - 1) / interval;
-	for (const Candidate &candidate : optional) {
-		const RTSchedulerItem &item = p_items[candidate.index];
-		const bool rebuild_due = frame - slot_last_rebuild[item.slot] >= interval;
-		RTSchedulerAction action = RT_SCHEDULER_HOLD;
-		if (rebuild_due && rebuild_quota > 0 && _try_rebuild(item, false)) {
-			action = RT_SCHEDULER_REBUILD;
-			rebuild_quota--;
-		} else if (_try_refit(item)) {
-			action = RT_SCHEDULER_REFIT;
+	// Rebuild cadence counts updates, not frames, so items starved by the budgets don't come due together.
+	const uint32_t optional_unvisited = visit_in_order(optional, [&](const Candidate &p_candidate) {
+		if (!budget_left()) {
+			return false;
 		}
-		r_actions[candidate.index] = action;
-		if (action == RT_SCHEDULER_HOLD) {
-			stats.held++;
-			stats.budget_limited++;
+		const RTSchedulerItem &item = p_items[p_candidate.index];
+		const RTSchedulerAction action = _try_update(item, interval);
+		if (action == RT_SCHEDULER_REBUILD) {
+			_record(item, uint16_t(interval));
+		} else if (action == RT_SCHEDULER_REFIT) {
+			_record(item, uint16_t(MAX(slot_rebuild_countdown[item.slot], uint16_t(2)) - 1));
 		} else {
-			_record(item, action);
+			limited++;
 		}
-	}
+		r_actions[p_candidate.index] = action;
+		return true;
+	});
+	limited += mandatory_unvisited + optional_unvisited;
+	stats.held += limited;
+	stats.budget_limited += limited;
 
 	cursor += stats.get_updated() - updated_before;
 }

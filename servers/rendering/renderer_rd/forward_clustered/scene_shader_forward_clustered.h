@@ -303,6 +303,7 @@ public:
 		bool uses_world_coordinates = false;
 		RenderingBillboard::Settings billboard; // From the billboard* and fixed_size render modes.
 		RTVertexCapture::ShaderTraits rt_capture; // From the rt_vertex_* render modes and user vertex() writes.
+		RS::RTBlasUpdate rt_blas_update = RS::RT_BLAS_UPDATE_AUTO; // From the rt_blas_* render modes.
 		bool uses_screen_texture_mipmaps = false;
 		bool uses_z_clip_scale = false;
 		RS::CullMode cull_mode = RS::CULL_MODE_DISABLED;

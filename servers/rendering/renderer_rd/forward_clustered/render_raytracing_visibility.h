@@ -32,6 +32,7 @@
 
 #include "core/math/aabb.h"
 #include "core/math/transform_3d.h"
+#include "servers/rendering/rendering_server.h"
 
 // Per-frame inputs shared by the scheduler and the visibility estimators.
 struct RTSchedulerFrameContext {
@@ -53,10 +54,17 @@ struct RTSchedulerItem {
 	bool needs_build = false;
 	// True when the cull found the item inside the camera frustum.
 	bool in_frustum = false;
+	// Instance override resolved against the shader's rt_blas render mode.
+	RS::RTBlasUpdate blas_update = RS::RT_BLAS_UPDATE_AUTO;
 	// World-space bounds from the cull.
 	AABB aabb;
 	uint32_t triangle_count = 0;
 };
+
+// BLAS update mode of an item: the instance's, unless AUTO lets the shader's rt_blas render mode decide.
+constexpr RS::RTBlasUpdate rt_resolve_blas_update(RS::RTBlasUpdate p_instance, RS::RTBlasUpdate p_shader) {
+	return p_instance != RS::RT_BLAS_UPDATE_AUTO ? p_instance : p_shader;
+}
 
 // Answers how much a dynamic item matters for the image right now.
 // Implementations hold no per-item registration: items are keyed by (slot, gen).

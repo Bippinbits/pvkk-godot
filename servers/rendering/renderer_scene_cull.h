@@ -428,6 +428,7 @@ public:
 
 		RS::ShadowCastingSetting cast_shadows;
 		BitField<RS::ShadowRenderer> shadow_renderers = RS::SHADOW_RENDERER_ALL;
+		RS::RTBlasUpdate rt_blas_update = RS::RT_BLAS_UPDATE_AUTO;
 
 		bool casts_shadow_in(RS::ShadowRenderer p_renderer) const { return is_shadow_cast_by(cast_shadows, shadow_renderers, p_renderer); }
 
@@ -1087,6 +1088,7 @@ public:
 	virtual void instance_geometry_set_cast_shadows_setting(RID p_instance, RS::ShadowCastingSetting p_shadow_casting_setting);
 	virtual void instance_geometry_set_shadow_renderers(RID p_instance, BitField<RS::ShadowRenderer> p_renderers);
 	void _instance_update_shadow_casting(Instance *p_instance);
+	virtual void instance_geometry_set_rt_blas_update(RID p_instance, RS::RTBlasUpdate p_update);
 	virtual void instance_geometry_set_material_override(RID p_instance, RID p_material);
 	virtual void instance_geometry_set_material_overlay(RID p_instance, RID p_material);
 

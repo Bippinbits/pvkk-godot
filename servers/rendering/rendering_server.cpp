@@ -3288,6 +3288,7 @@ void RenderingServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("instance_geometry_set_flag", "instance", "flag", "enabled"), &RenderingServer::instance_geometry_set_flag);
 	ClassDB::bind_method(D_METHOD("instance_geometry_set_cast_shadows_setting", "instance", "shadow_casting_setting"), &RenderingServer::instance_geometry_set_cast_shadows_setting);
 	ClassDB::bind_method(D_METHOD("instance_geometry_set_shadow_renderers", "instance", "renderers"), &RenderingServer::instance_geometry_set_shadow_renderers);
+	ClassDB::bind_method(D_METHOD("instance_geometry_set_rt_blas_update", "instance", "update"), &RenderingServer::instance_geometry_set_rt_blas_update);
 	ClassDB::bind_method(D_METHOD("instance_geometry_set_material_override", "instance", "material"), &RenderingServer::instance_geometry_set_material_override);
 	ClassDB::bind_method(D_METHOD("instance_geometry_set_material_overlay", "instance", "material"), &RenderingServer::instance_geometry_set_material_overlay);
 	ClassDB::bind_method(D_METHOD("instance_geometry_set_visibility_range", "instance", "min", "max", "min_margin", "max_margin", "fade_mode"), &RenderingServer::instance_geometry_set_visibility_range);
@@ -3332,6 +3333,9 @@ void RenderingServer::_bind_methods() {
 	BIND_ENUM_CONSTANT(SHADOW_CASTING_SETTING_SHADOWS_ONLY);
 	BIND_ENUM_CONSTANT(SHADOW_CASTING_SETTING_SELF_SHADOWING);
 
+	BIND_ENUM_CONSTANT(RT_BLAS_UPDATE_AUTO);
+	BIND_ENUM_CONSTANT(RT_BLAS_UPDATE_REFIT);
+	BIND_ENUM_CONSTANT(RT_BLAS_UPDATE_REBUILD);
 
 	BIND_ENUM_CONSTANT(VISIBILITY_RANGE_FADE_DISABLED);
 	BIND_ENUM_CONSTANT(VISIBILITY_RANGE_FADE_SELF);

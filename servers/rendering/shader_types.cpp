@@ -299,6 +299,7 @@ ShaderTypes::ShaderTypes() {
 		shader_modes[RS::SHADER_SPATIAL].modes.push_back({ PNAME("billboard_keep_scale") });
 		shader_modes[RS::SHADER_SPATIAL].modes.push_back({ PNAME("fixed_size") });
 		shader_modes[RS::SHADER_SPATIAL].modes.push_back({ PNAME("rt_vertex"), { "auto", "dynamic", "static", "frozen" } });
+		shader_modes[RS::SHADER_SPATIAL].modes.push_back({ PNAME("rt_blas"), { "auto", "refit", "rebuild" } });
 		shader_modes[RS::SHADER_SPATIAL].stencil_modes.push_back({ PNAME("read") });
 		shader_modes[RS::SHADER_SPATIAL].stencil_modes.push_back({ PNAME("write") });
 		shader_modes[RS::SHADER_SPATIAL].stencil_modes.push_back({ PNAME("write_depth_fail") });

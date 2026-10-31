@@ -79,6 +79,7 @@ public:
 	virtual void set_rt_shadow_caster(bool p_casts) {}
 	virtual void set_rt_shadows_only(bool p_shadows_only) {}
 	virtual void set_rt_self_shadowing(bool p_self_shadowing) {}
+	virtual void set_rt_blas_update(RS::RTBlasUpdate p_update) {}
 };
 
 // Base implementation of RenderGeometryInstance shared by internal renderers.
@@ -106,6 +107,7 @@ public:
 	bool rt_shadow_caster = true; // RendererSceneCull::is_shadow_cast_by(..., SHADOW_RENDERER_PATH_TRACER).
 	bool rt_shadows_only = false; // cast_shadows == SHADOW_CASTING_SETTING_SHADOWS_ONLY.
 	bool rt_self_shadowing = false; // cast_shadows == SHADOW_CASTING_SETTING_SELF_SHADOWING.
+	RS::RTBlasUpdate rt_blas_update = RS::RT_BLAS_UPDATE_AUTO; // AUTO follows the shader's rt_blas render mode.
 
 	bool fade_near = false;
 	float fade_near_begin = 0;
@@ -159,6 +161,7 @@ public:
 	virtual void set_rt_shadow_caster(bool p_casts) override;
 	virtual void set_rt_shadows_only(bool p_shadows_only) override;
 	virtual void set_rt_self_shadowing(bool p_self_shadowing) override;
+	virtual void set_rt_blas_update(RS::RTBlasUpdate p_update) override;
 
 	virtual void reset_motion_vectors() override;
 

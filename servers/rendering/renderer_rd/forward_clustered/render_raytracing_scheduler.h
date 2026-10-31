@@ -47,7 +47,7 @@ struct RTSchedulerBudgets {
 	uint32_t max_operations = 2000; // Builds plus refits.
 	uint64_t build_triangles = 500000;
 	uint64_t update_triangles = 1500000;
-	uint32_t rebuild_interval_frames = 4; // A refitted item becomes rebuild due after this many frames. At most ceil(items / interval) due rebuilds run per frame.
+	uint32_t rebuild_interval_frames = 4; // Every this many updates of an item, one is a rebuild. Each slot has its own phase, so rebuilds spread evenly over frames.
 	uint32_t max_stale_frames = 30; // Forces an update past this age, even when the estimator holds.
 };
 
@@ -77,7 +77,7 @@ class RTDynamicScheduler {
 	// Per-slot history (SoA). slot_gen 0 means no history.
 	LocalVector<uint8_t> slot_gen;
 	LocalVector<uint64_t> slot_last_update;
-	LocalVector<uint64_t> slot_last_rebuild;
+	LocalVector<uint16_t> slot_rebuild_countdown; // Updates until the periodic rebuild; 1 means the next one.
 	LocalVector<Vector3> slot_last_center;
 
 	// Round-robin tie-break offset per viewport.
@@ -92,12 +92,12 @@ class RTDynamicScheduler {
 	};
 	LocalVector<Candidate> mandatory;
 	LocalVector<Candidate> optional;
-
 	void _ensure_slot(uint32_t p_slot);
 	bool _has_history(const RTSchedulerItem &p_item) const;
 	bool _try_rebuild(const RTSchedulerItem &p_item, bool p_ignore_triangle_budget);
 	bool _try_refit(const RTSchedulerItem &p_item);
-	void _record(const RTSchedulerItem &p_item, RTSchedulerAction p_action);
+	RTSchedulerAction _try_update(const RTSchedulerItem &p_item, uint32_t p_interval);
+	void _record(const RTSchedulerItem &p_item, uint16_t p_rebuild_countdown);
 
 public:
 	void set_budgets(const RTSchedulerBudgets &p_budgets) { budgets = p_budgets; }

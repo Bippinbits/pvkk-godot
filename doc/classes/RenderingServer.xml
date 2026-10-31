@@ -1950,6 +1950,14 @@
 				Sets a material that will override the material for all surfaces on the mesh associated with this instance. Equivalent to [member GeometryInstance3D.material_override].
 			</description>
 		</method>
+		<method name="instance_geometry_set_rt_blas_update">
+			<return type="void" />
+			<param index="0" name="instance" type="RID" />
+			<param index="1" name="update" type="int" enum="RenderingServer.RTBlasUpdate" />
+			<description>
+				Sets how the path tracer updates the bottom-level acceleration structure of the instance's dynamic geometry. Equivalent to [member GeometryInstance3D.rt_blas_update].
+			</description>
+		</method>
 		<method name="instance_geometry_set_shader_parameter">
 			<return type="void" />
 			<param index="0" name="instance" type="RID" />
@@ -5910,6 +5918,15 @@
 		</constant>
 		<constant name="SHADOW_CASTING_SETTING_SELF_SHADOWING" value="4" enum="ShadowCastingSetting">
 			The path tracer casts the object's shadows only onto objects that also use [constant SHADOW_CASTING_SETTING_SELF_SHADOWING]. The object still receives shadows from everything, and still appears in reflections and indirect lighting. The rasterizer casts no shadows from it, like [constant SHADOW_CASTING_SETTING_OFF].
+		</constant>
+		<constant name="RT_BLAS_UPDATE_AUTO" value="0" enum="RTBlasUpdate">
+			For instances, follows the shader's [code]rt_blas[/code] render mode. For shaders, refits with a periodic rebuild.
+		</constant>
+		<constant name="RT_BLAS_UPDATE_REFIT" value="1" enum="RTBlasUpdate">
+			Only refits after the first build, never rebuilds periodically.
+		</constant>
+		<constant name="RT_BLAS_UPDATE_REBUILD" value="2" enum="RTBlasUpdate">
+			Only rebuilds, never refits.
 		</constant>
 		<constant name="VISIBILITY_RANGE_FADE_DISABLED" value="0" enum="VisibilityRangeFadeMode" keywords="LOD_FADE_DISABLED">
 			Disable visibility range fading for the given instance.

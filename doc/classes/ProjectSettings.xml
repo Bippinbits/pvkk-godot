@@ -3247,7 +3247,8 @@
 			Priority weight of dynamic geometry outside the camera frustum, which only reflections, refractions and shadows can see. Lower values update on-screen geometry first when budgets run out.
 		</member>
 		<member name="rendering/pathtracing/dynamic_rebuild_interval_frames" type="int" setter="" getter="" default="4">
-			Number of frames after which refitted dynamic geometry gets a full BLAS rebuild, restoring the BVH quality that refits slowly lose as particles spread.
+			One in this many BLAS updates of dynamic geometry is a full rebuild instead of a refit, restoring the BVH quality that refits slowly lose as particles spread. Geometry updated every frame rebuilds every this many frames; each item has its own phase, so rebuilds spread evenly over frames.
+			Per shader, [code]render_mode rt_blas_refit[/code] only refits (foliage swaying in the wind) and [code]rt_blas_rebuild[/code] only rebuilds (spreading particles); [member GeometryInstance3D.rt_blas_update] overrides it per instance.
 		</member>
 		<member name="rendering/pathtracing/max_decals" type="int" setter="" getter="" default="1024">
 			Maximum number of [Decal]s the path tracer considers per frame, from [code]0[/code] to [code]65536[/code]. Decals around the camera, including those behind it, are gathered and the ones covering the largest solid angle are kept, preferring decals in front of the camera. Up to 4 decals are blended at any point; past that the bottom-most are dropped. Set to [code]0[/code] to compile decals out of the path tracing pipeline entirely. Changing between [code]0[/code] and a non-zero value switches pipelines, which may compile shaders. Changes take effect immediately.

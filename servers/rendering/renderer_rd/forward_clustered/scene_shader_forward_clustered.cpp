@@ -92,6 +92,7 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	int specular_modei = SPECULAR_SCHLICK_GGX;
 	int billboard_modei = RenderingBillboard::MODE_DISABLED;
 	int rt_vertexi = RTVertexCapture::OVERRIDE_AUTO;
+	int rt_blasi = RS::RT_BLAS_UPDATE_AUTO;
 
 	int stencil_readi = 0;
 	int stencil_writei = 0;
@@ -151,6 +152,9 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	actions.render_mode_values["rt_vertex_dynamic"] = Pair<int *, int>(&rt_vertexi, RTVertexCapture::OVERRIDE_DYNAMIC);
 	actions.render_mode_values["rt_vertex_static"] = Pair<int *, int>(&rt_vertexi, RTVertexCapture::OVERRIDE_STATIC);
 	actions.render_mode_values["rt_vertex_frozen"] = Pair<int *, int>(&rt_vertexi, RTVertexCapture::OVERRIDE_FROZEN);
+	actions.render_mode_values["rt_blas_auto"] = Pair<int *, int>(&rt_blasi, RS::RT_BLAS_UPDATE_AUTO);
+	actions.render_mode_values["rt_blas_refit"] = Pair<int *, int>(&rt_blasi, RS::RT_BLAS_UPDATE_REFIT);
+	actions.render_mode_values["rt_blas_rebuild"] = Pair<int *, int>(&rt_blasi, RS::RT_BLAS_UPDATE_REBUILD);
 
 	actions.usage_flag_pointers["ALPHA"] = &uses_alpha;
 	actions.usage_flag_pointers["ALPHA_SCISSOR_THRESHOLD"] = &uses_alpha_clip;
@@ -230,6 +234,7 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	specular_mode = SpecularMode(specular_modei);
 	billboard.mode = RenderingBillboard::Mode(billboard_modei);
 	rt_capture.override_mode = RTVertexCapture::ShaderOverride(rt_vertexi);
+	rt_blas_update = RS::RTBlasUpdate(rt_blasi);
 	rt_capture.writes_vertex = uses_vertex;
 	writes_modelview_or_projection = writes_modelview || writes_projection;
 	rt_capture.writes_modelview = writes_modelview;
