@@ -36,6 +36,10 @@
 #include "renderer_scene_cull.h"
 #include "rendering_server_globals.h"
 
+#ifdef STREAMLINE_ENABLED
+#include "drivers/streamline/streamline_context.h"
+#endif
+
 // careful, these may run in different threads than the rendering server
 
 int RenderingServerDefault::changes = 0;
@@ -66,7 +70,11 @@ void RenderingServerDefault::request_frame_drawn_callback(const Callable &p_call
 	frame_drawn_callbacks.push_back(p_callable);
 }
 
-void RenderingServerDefault::_draw(bool p_swap_buffers, double frame_step) {
+void RenderingServerDefault::_draw(bool p_swap_buffers, double frame_step, void *p_frame_token) {
+#ifdef STREAMLINE_ENABLED
+	StreamlineContext::get().render_token = (sl::FrameToken *)p_frame_token;
+#endif
+
 	GodotProfileZoneGroupedFirst(_profile_zone, "rasterizer->begin_frame");
 	RSG::rasterizer->begin_frame(frame_step);
 
@@ -448,10 +456,15 @@ void RenderingServerDefault::draw(bool p_present, double frame_step) {
 	// Needs to be done before changes is reset to 0, to not force the editor to redraw.
 	RS::get_singleton()->emit_signal(SNAME("frame_pre_draw"));
 	changes = 0;
+	// Captured here: the main thread swaps the token before the render thread reaches this draw.
+	void *frame_token = nullptr;
+#ifdef STREAMLINE_ENABLED
+	frame_token = StreamlineContext::get().last_token;
+#endif
 	if (create_thread) {
-		command_queue.push(this, &RenderingServerDefault::_draw, p_present, frame_step);
+		command_queue.push(this, &RenderingServerDefault::_draw, p_present, frame_step, frame_token);
 	} else {
-		_draw(p_present, frame_step);
+		_draw(p_present, frame_step, frame_token);
 	}
 }
 

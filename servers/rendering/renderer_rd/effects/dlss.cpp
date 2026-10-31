@@ -220,9 +220,9 @@ void DLSSEffect::upscale(const DLSSContext::Parameters &p_params) {
 		return;
 	}
 
-	// Begin frame if needed.
-	if (StreamlineContext::get().last_token == nullptr) {
-		StreamlineContext::get().get_new_frame_token();
+	// No frame token yet (first draw before the main loop started).
+	if (StreamlineContext::get().render_token == nullptr) {
+		return;
 	}
 
 	context->last_parameters = p_params;
@@ -444,8 +444,11 @@ void DLSSEffect::_upscale_internal(RDD::CommandBufferID cmdid, const DLSSContext
 		context->constants.mvecScale = sl::float2(1.0f, 1.0f);
 		context->constants.orthographicProjection = sl::Boolean::eFalse;
 		context->constants.reset = p_params.reset_accumulation ? sl::Boolean::eTrue : sl::Boolean::eFalse;
-		sl::Result result = StreamlineContext::get().slSetConstants(context->constants, *StreamlineContext::get().last_token, context->viewport);
-		if (result != sl::Result::eOk) {
+		sl::Result result = StreamlineContext::get().slSetConstants(context->constants, *StreamlineContext::get().render_token, context->viewport);
+		if (result == sl::Result::eErrorDuplicatedConstants) {
+			// Viewport drawn twice in one frame (e.g. editor preview redraws); SL keeps the first constants.
+			WARN_PRINT_ONCE("DLSS viewport drawn more than once per frame token; reusing first constants.");
+		} else if (result != sl::Result::eOk) {
 			ERR_FAIL_MSG("Failed to call streamline slSetConstants. Result: " + String(StreamlineContext::result_to_string(result)));
 		}
 	}
@@ -537,13 +540,13 @@ void DLSSEffect::_upscale_internal(RDD::CommandBufferID cmdid, const DLSSContext
 
 		if (use_dlss_rr && StreamlineContext::get().streamline_capabilities.dlss_rr_available) {
 			// Use DLSS Ray Reconstruction
-			result = StreamlineContext::get().slEvaluateFeature(sl::kFeatureDLSS_RR, *StreamlineContext::get().last_token, inputs, 1, nativeCmdlist);
+			result = StreamlineContext::get().slEvaluateFeature(sl::kFeatureDLSS_RR, *StreamlineContext::get().render_token, inputs, 1, nativeCmdlist);
 			if (result != sl::Result::eOk) {
 				ERR_FAIL_MSG("Failed to call streamline slEvaluateFeature for DLSS Ray Reconstruction. Result: " + String(StreamlineContext::result_to_string(result)));
 			}
 		} else if (StreamlineContext::get().streamline_capabilities.dlss_available) {
 			// Use regular DLSS
-			result = StreamlineContext::get().slEvaluateFeature(sl::kFeatureDLSS, *StreamlineContext::get().last_token, inputs, 1, nativeCmdlist);
+			result = StreamlineContext::get().slEvaluateFeature(sl::kFeatureDLSS, *StreamlineContext::get().render_token, inputs, 1, nativeCmdlist);
 			if (result != sl::Result::eOk) {
 				ERR_FAIL_MSG("Failed to call streamline slEvaluateFeature for DLSS Super Resolution. Result: " + String(StreamlineContext::result_to_string(result)));
 			}
@@ -577,7 +580,7 @@ void DLSSEffect::_upscale_internal(RDD::CommandBufferID cmdid, const DLSSContext
 
 		{ // Evaluate NIS
 			const sl::BaseStructure *inputs[] = { &context->viewport };
-			sl::Result result = StreamlineContext::get().slEvaluateFeature(sl::kFeatureNIS, *StreamlineContext::get().last_token, inputs, 1, nativeCmdlist);
+			sl::Result result = StreamlineContext::get().slEvaluateFeature(sl::kFeatureNIS, *StreamlineContext::get().render_token, inputs, 1, nativeCmdlist);
 			if (result != sl::Result::eOk) {
 				ERR_FAIL_MSG("Failed to call streamline slEvaluateFeature for NIS. Result: " + String(StreamlineContext::result_to_string(result)));
 			}

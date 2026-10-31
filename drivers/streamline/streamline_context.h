@@ -127,7 +127,8 @@ public:
 
 	static StreamlineContext &get();
 
-	sl::FrameToken *last_token = nullptr;
+	sl::FrameToken *last_token = nullptr; // Main thread only.
+	sl::FrameToken *render_token = nullptr; // Token of the draw being rendered; render thread only.
 	bool is_game = false;
 
 	sl::ViewportHandle dlssg_viewport;
