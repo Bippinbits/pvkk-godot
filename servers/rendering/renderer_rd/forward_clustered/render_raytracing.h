@@ -523,18 +523,19 @@ struct RTTriangleFacing {
 	uint32_t geometry_flags = 0; // RT_GEOM_FLAG_FACING_INVERTED and RT_GEOM_FLAG_SIDE_CHECK.
 };
 
-/// Facing of triangles drawn with p_cull_mode, matching the rasterizer: it culls mirrored instances with the reversed
-/// cull mode, so culling follows the winding in mesh space, while FRONT_FACING follows the winding on screen.
-/// The ray tracer decides facing in BLAS space. p_raster_mirror is the mirror flag the rasterizer culls the instance
-/// with; p_tlas_mirror is true when the TLAS instance transform has a negative determinant.
-constexpr RTTriangleFacing rt_triangle_facing(RS::CullMode p_cull_mode, bool p_raster_mirror, bool p_tlas_mirror) {
+// Facing of triangles drawn with p_cull_mode, matching the rasterizer: culling follows the winding in mesh space, while
+// FRONT_FACING follows the winding on screen, or in mesh space when p_preserve_front_facing (preserve_front_facing_when_mirrored).
+// The ray tracer decides facing in BLAS space. p_raster_mirror is the mirror flag the rasterizer culls the instance
+// with; p_tlas_mirror is true when the TLAS instance transform has a negative determinant.
+constexpr RTTriangleFacing rt_triangle_facing(RS::CullMode p_cull_mode, bool p_raster_mirror, bool p_tlas_mirror, bool p_preserve_front_facing) {
 	// Without TRIANGLE_FLIP_FACING, the ray tracer's front face is the rasterizer's back face.
 	const bool cull_front = p_cull_mode == RS::CULL_MODE_FRONT;
 	const bool space_mirrored = p_raster_mirror != p_tlas_mirror;
+	const bool screen_mirrored = p_raster_mirror && !p_preserve_front_facing;
 	RTTriangleFacing facing;
 	facing.instance_flags = (cull_front == space_mirrored ? uint32_t(RD::ACCELERATION_STRUCTURE_INSTANCE_TRIANGLE_FLIP_FACING_BIT) : 0u) |
 			(p_cull_mode == RS::CULL_MODE_DISABLED ? uint32_t(RD::ACCELERATION_STRUCTURE_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT) : 0u);
-	facing.geometry_flags = (cull_front != p_raster_mirror ? uint32_t(RT_GEOM_FLAG_FACING_INVERTED) : 0u) |
+	facing.geometry_flags = (cull_front != screen_mirrored ? uint32_t(RT_GEOM_FLAG_FACING_INVERTED) : 0u) |
 			(p_cull_mode != RS::CULL_MODE_BACK ? uint32_t(RT_GEOM_FLAG_SIDE_CHECK) : 0u);
 	return facing;
 }

@@ -450,7 +450,11 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 			should_request_redraw = true;
 		}
 
-		// Determine the cull variant.
+		// Mirroring flips the screen winding: either reverse the cull mode or the front face, see preserve_front_facing_when_mirrored.
+		const bool mirror = surf->owner->mirror != p_params->reverse_cull;
+		const bool flip_front_face = mirror && preserve_front_facing_when_mirrored;
+		pipeline_key.front_face = flip_front_face ? RD::POLYGON_FRONT_FACE_COUNTER_CLOCKWISE : RD::POLYGON_FRONT_FACE_CLOCKWISE;
+
 		SceneShaderForwardClustered::ShaderData::CullVariant cull_variant = SceneShaderForwardClustered::ShaderData::CULL_VARIANT_MAX;
 		if constexpr (p_pass_mode == PASS_MODE_DEPTH_MATERIAL || p_pass_mode == PASS_MODE_SDF) {
 			cull_variant = SceneShaderForwardClustered::ShaderData::CULL_VARIANT_DOUBLE_SIDED;
@@ -462,12 +466,7 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 			}
 
 			if (cull_variant == SceneShaderForwardClustered::ShaderData::CULL_VARIANT_MAX) {
-				bool mirror = surf->owner->mirror;
-				if (p_params->reverse_cull) {
-					mirror = !mirror;
-				}
-
-				cull_variant = mirror ? SceneShaderForwardClustered::ShaderData::CULL_VARIANT_REVERSED : SceneShaderForwardClustered::ShaderData::CULL_VARIANT_NORMAL;
+				cull_variant = (mirror && !flip_front_face) ? SceneShaderForwardClustered::ShaderData::CULL_VARIANT_REVERSED : SceneShaderForwardClustered::ShaderData::CULL_VARIANT_NORMAL;
 			}
 		}
 
@@ -5240,6 +5239,7 @@ void RenderForwardClustered::_update_shader_quality_settings() {
 
 RenderForwardClustered::RenderForwardClustered() {
 	singleton = this;
+	preserve_front_facing_when_mirrored = GLOBAL_GET("rendering/shading/overrides/preserve_front_facing_when_mirrored");
 
 	/* SCENE SHADER */
 

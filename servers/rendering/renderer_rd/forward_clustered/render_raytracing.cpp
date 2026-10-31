@@ -4184,6 +4184,7 @@ private:
 	uint32_t pending_surface_count = 0; // Surfaces left out until their hit group or capture is ready.
 
 	const bool collect_render_info = false;
+	const bool preserve_front_facing = false; // Matches the rasterizer, see rt_triangle_facing().
 	uint32_t tlas_instance_count = 0;
 	uint32_t tlas_primitive_count = 0;
 	uint32_t rt_blas_builds = 0;
@@ -5028,7 +5029,7 @@ void RTTlasBuilder::_fill_surface_key(const ShaderData *p_shader, const RTMateri
 // Custom index is the first per-geometry entry; push the instance before its entries.
 // Returns the per-instance geometry flags of its entries; p_raster_mirror is the mirror flag the rasterizer culls the instance with.
 uint32_t RTTlasBuilder::_push_tlas_instance(const Transform3D &p_transform, RID p_blas, const RTSurfaceGroupKey &p_key, bool p_transparent, bool p_raster_mirror) {
-	const RTTriangleFacing facing = rt_triangle_facing(p_key.cull_mode, p_raster_mirror, p_transform.basis.determinant() < 0);
+	const RTTriangleFacing facing = rt_triangle_facing(p_key.cull_mode, p_raster_mirror, p_transform.basis.determinant() < 0, preserve_front_facing);
 	RenderRaytracing::RTInstanceArrays &instances = rt.tlas_instances;
 	instances.transforms.push_back(p_transform);
 	instances.blass.push_back(p_blas);

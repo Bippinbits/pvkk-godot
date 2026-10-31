@@ -513,13 +513,14 @@ struct FacingResult {
 	}
 };
 
-// The rasterizer: culls by the screen winding, reversed for mirrored instances; FRONT_FACING is the screen winding.
-static FacingResult raster_facing(RS::CullMode p_cull_mode, bool p_raster_mirror, bool p_world_front) {
-	const bool culled_front = p_world_front != p_raster_mirror;
+// The rasterizer: culls by the mesh winding (screen winding, reversed for mirrored instances); FRONT_FACING is the
+// screen winding, or the mesh winding when p_preserve_front_facing.
+static FacingResult raster_facing(RS::CullMode p_cull_mode, bool p_raster_mirror, bool p_world_front, bool p_preserve_front_facing) {
+	const bool mesh_front = p_world_front != p_raster_mirror;
 	FacingResult result;
-	result.visible = p_cull_mode == RS::CULL_MODE_DISABLED || culled_front == (p_cull_mode == RS::CULL_MODE_BACK);
-	result.front_facing = p_world_front;
-	result.normal_flipped = p_cull_mode != RS::CULL_MODE_BACK && !p_world_front;
+	result.visible = p_cull_mode == RS::CULL_MODE_DISABLED || mesh_front == (p_cull_mode == RS::CULL_MODE_BACK);
+	result.front_facing = p_preserve_front_facing ? mesh_front : p_world_front;
+	result.normal_flipped = p_cull_mode != RS::CULL_MODE_BACK && !result.front_facing;
 	return result;
 }
 
@@ -538,21 +539,32 @@ static FacingResult traced_facing(const RTTriangleFacing &p_facing, bool p_blas_
 TEST_CASE("[RenderRaytracing] Path traced triangle facing matches raster for every cull mode and mirroring") {
 	const RS::CullMode cull_modes[] = { RS::CULL_MODE_BACK, RS::CULL_MODE_FRONT, RS::CULL_MODE_DISABLED };
 	for (RS::CullMode cull_mode : cull_modes) {
-		for (int bits = 0; bits < 8; bits++) {
+		for (int bits = 0; bits < 16; bits++) {
 			const bool raster_mirror = bits & 1;
 			// Billboards, captures and merged instances can have a TLAS transform mirrored unlike the node.
 			const bool tlas_mirror = bits & 2;
 			const bool blas_front = bits & 4;
+			const bool preserve = bits & 8;
 			const bool world_front = blas_front != tlas_mirror;
-			const FacingResult traced = traced_facing(rt_triangle_facing(cull_mode, raster_mirror, tlas_mirror), blas_front);
-			CHECK_MESSAGE(traced == raster_facing(cull_mode, raster_mirror, world_front),
-					vformat("cull mode %d, raster mirror %d, TLAS mirror %d, BLAS front %d", int(cull_mode), int(raster_mirror), int(tlas_mirror), int(blas_front)));
+			const FacingResult traced = traced_facing(rt_triangle_facing(cull_mode, raster_mirror, tlas_mirror, preserve), blas_front);
+			CHECK_MESSAGE(traced == raster_facing(cull_mode, raster_mirror, world_front, preserve),
+					vformat("cull mode %d, raster mirror %d, TLAS mirror %d, BLAS front %d, preserve %d", int(cull_mode), int(raster_mirror), int(tlas_mirror), int(blas_front), int(preserve)));
 		}
 	}
 }
 
+TEST_CASE("[RenderRaytracing] Preserved front facing keeps double-sided normals of mirrored instances unflipped") {
+	// A mesh front face of a mirrored node (BLAS front, TLAS mirrored).
+	const FacingResult legacy = traced_facing(rt_triangle_facing(RS::CULL_MODE_DISABLED, true, true, false), true);
+	const FacingResult preserved = traced_facing(rt_triangle_facing(RS::CULL_MODE_DISABLED, true, true, true), true);
+	CHECK_FALSE(legacy.front_facing);
+	CHECK(legacy.normal_flipped);
+	CHECK(preserved.front_facing);
+	CHECK_FALSE(preserved.normal_flipped);
+}
+
 TEST_CASE("[RenderRaytracing] Unmirrored back face culling keeps the TLAS facing bits of a plain mesh") {
-	const RTTriangleFacing facing = rt_triangle_facing(RS::CULL_MODE_BACK, false, false);
+	const RTTriangleFacing facing = rt_triangle_facing(RS::CULL_MODE_BACK, false, false, false);
 	CHECK(facing.instance_flags == uint32_t(RD::ACCELERATION_STRUCTURE_INSTANCE_TRIANGLE_FLIP_FACING_BIT));
 	CHECK(facing.geometry_flags == 0);
 }

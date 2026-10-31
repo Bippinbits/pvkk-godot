@@ -222,6 +222,7 @@ public:
 			RD::VertexFormatID vertex_format_id;
 			RD::FramebufferFormatID framebuffer_format_id;
 			RD::PolygonCullMode cull_mode = RD::POLYGON_CULL_MAX;
+			RD::PolygonFrontFace front_face = RD::POLYGON_FRONT_FACE_CLOCKWISE;
 			RS::PrimitiveType primitive_type = RS::PRIMITIVE_MAX;
 			PipelineVersion version = PipelineVersion::PIPELINE_VERSION_MAX;
 			uint32_t color_pass_flags = 0;
@@ -233,6 +234,7 @@ public:
 				uint32_t h = hash_murmur3_one_64(vertex_format_id);
 				h = hash_murmur3_one_32(framebuffer_format_id, h);
 				h = hash_murmur3_one_32(cull_mode, h);
+				h = hash_murmur3_one_32(front_face, h);
 				h = hash_murmur3_one_32(primitive_type, h);
 				h = hash_murmur3_one_32(version, h);
 				h = hash_murmur3_one_32(color_pass_flags, h);

@@ -478,6 +478,8 @@ protected:
 
 	static RenderForwardClustered *singleton;
 
+	bool preserve_front_facing_when_mirrored = false; // rendering/shading/overrides/preserve_front_facing_when_mirrored, read on startup.
+
 	uint32_t _setup_environment(const RenderDataRD *p_render_data, bool p_no_fog, const Size2i &p_screen_size, const Size2 &p_viewport_size, const Color &p_default_bg_color, bool p_opaque_render_buffers = false, bool p_apply_alpha_multiplier = false, bool p_pancake_shadows = false);
 	void _setup_voxelgis(const PagedArray<RID> &p_voxelgis);
 	void _setup_lightmaps(const RenderDataRD *p_render_data, const PagedArray<RID> &p_lightmaps, const Transform3D &p_cam_transform);
@@ -905,6 +907,9 @@ protected:
 
 public:
 	static RenderForwardClustered *get_singleton() { return singleton; }
+
+	// True when FRONT_FACING follows the mesh winding on mirrored instances instead of the screen winding.
+	bool is_front_facing_preserved_when_mirrored() const { return preserve_front_facing_when_mirrored; }
 
 	ClusterBuilderSharedDataRD *get_cluster_builder_shared() { return &cluster_builder_shared; }
 	RendererRD::SSEffects *get_ss_effects() { return ss_effects; }

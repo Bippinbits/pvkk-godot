@@ -607,6 +607,7 @@ void SceneShaderForwardClustered::ShaderData::_create_pipeline(PipelineKey p_pip
 
 	RD::PipelineRasterizationState raster_state;
 	raster_state.cull_mode = p_pipeline_key.cull_mode;
+	raster_state.front_face = p_pipeline_key.front_face;
 	raster_state.wireframe = wireframe || p_pipeline_key.wireframe;
 
 	if (p_pipeline_key.version == PIPELINE_VERSION_RT_CAPTURE) {

@@ -3515,6 +3515,10 @@
 		<member name="rendering/shading/overrides/force_vertex_shading" type="bool" setter="" getter="" default="false">
 			If [code]true[/code], forces vertex shading for all rendering. This can increase performance a lot, but also reduces quality immensely. Can be used to optimize performance on low-end mobile devices.
 		</member>
+		<member name="rendering/shading/overrides/preserve_front_facing_when_mirrored" type="bool" setter="" getter="" default="false">
+			If [code]true[/code], [code]FRONT_FACING[/code] follows the mesh winding on instances with a negative scale (or seen through a mirrored camera), in both the rasterizer and the path tracer. If [code]false[/code], it follows the on-screen winding, which flips the normals of double-sided and front-culled materials on mirrored instances.
+			[b]Note:[/b] This setting is only read on startup. Only supported by the Forward+ renderer.
+		</member>
 		<member name="rendering/streamline/dlss_preset" type="String" setter="" getter="" default="&quot;?&quot;">
 			The default NVIDIA DLSS Super Resolution preset to use.
 		</member>
