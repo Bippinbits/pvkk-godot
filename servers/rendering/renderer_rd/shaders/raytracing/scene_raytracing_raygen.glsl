@@ -199,7 +199,7 @@ void main() {
 			if (transparency_enabled) {
 				// SCENE_DEPTH for peel hits: NDC depth of this segment's opaque
 				// hit on the primary segment, far (0.0) on bounces.
-				payload.scene_depth = 0.0;
+				float scene_depth = 0.0;
 				if (bounce == 0u) {
 					if (!is_primary_miss(ps.packed_bounces_flags) && ps.hit_t > 0.0) {
 						mat4 view_mat = transpose(mat4(scene_data_block.data.view_matrix[0],
@@ -208,9 +208,9 @@ void main() {
 								vec4(0.0, 0.0, 0.0, 1.0)));
 						vec3 opaque_hit_pos = ray_origin + ray_dir * ps.hit_t;
 						vec4 clip_pos = scene_data_block.data.projection_matrix * vec4((view_mat * vec4(opaque_hit_pos, 1.0)).xyz, 1.0);
-						payload.scene_depth = clip_pos.z / clip_pos.w;
+						scene_depth = clip_pos.z / clip_pos.w;
 					} else if (composite_prepass_depth > 0.0) {
-						payload.scene_depth = composite_prepass_depth;
+						scene_depth = composite_prepass_depth;
 					}
 				}
 				// Termination only means there is no next bounce. Unshaded surfaces
@@ -244,7 +244,7 @@ void main() {
 					ps.rng_state = continuation_rng;
 					ps.throughput = throughput_entry * T_total;
 					vec3 radiance_before_layer = ps.radiance;
-					path_pack(payload, ps);
+					path_pack_peel(payload, ps, scene_depth);
 					traceRayEXT(tlas_transparent, RT_RAY_FLAGS, RT_TMASK_TRANSPARENT,
 							0, 0, 0, ray_origin, peel_tmin, ray_dir, seg_end, 0);
 					ps = path_unpack(payload);
@@ -769,8 +769,9 @@ void main() {
 		if ((mat.flags & RT_MAT_FLAG_PROXIMITY_FADE) != 0u && (payload.packed_bounces_flags & PEEL_RAY_FLAG) != 0u) {
 			// Peel rays carry the segment's opaque NDC depth; 0.0 = far (no fade).
 			float fade_scene_z = -1e19;
-			if (payload.scene_depth > 0.0) {
-				vec4 fade_scene_pos = scene_data_block.data.inv_projection_matrix * vec4(0.0, 0.0, payload.scene_depth, 1.0);
+			float scene_depth = payload_peel_scene_depth(payload);
+			if (scene_depth > 0.0) {
+				vec4 fade_scene_pos = scene_data_block.data.inv_projection_matrix * vec4(0.0, 0.0, scene_depth, 1.0);
 				fade_scene_z = fade_scene_pos.z / fade_scene_pos.w;
 			}
 			m.alpha *= clamp(1.0 - smoothstep(fade_scene_z + mat.proximity_fade_distance, fade_scene_z, fade_view_pos.z), 0.0, 1.0);

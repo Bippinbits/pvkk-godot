@@ -87,9 +87,7 @@ tangent = normalize(rt_modelview_normal_matrix * tangent);
 binormal = normalize(rt_modelview_normal_matrix * binormal);
 
 #ifdef RT_USES_SCENE_DEPTH
-if ((payload.packed_bounces_flags & PEEL_RAY_FLAG) != 0u) {
-	rt_scene_depth = payload.scene_depth;
-}
+rt_scene_depth = payload_peel_scene_depth(payload);
 #endif
 
 // Fragment outputs are declared globally (see raytracing_custom_globals_inc.glsl)

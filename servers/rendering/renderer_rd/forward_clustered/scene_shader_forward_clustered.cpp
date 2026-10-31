@@ -34,6 +34,7 @@
 #include "render_forward_clustered.h"
 #include "servers/rendering/renderer_rd/renderer_compositor_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
+#include "servers/rendering/shader_types.h"
 
 using namespace RendererSceneRenderImplementation;
 
@@ -983,6 +984,7 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 
 		actions.renames["FRAGCOORD"] = "gl_FragCoord";
 		actions.renames["FRONT_FACING"] = "gl_FrontFacing";
+		ShaderTypes::add_raster_ray_renames(actions.renames);
 		actions.renames["NORMAL_MAP"] = "normal_map";
 		actions.renames["NORMAL_MAP_DEPTH"] = "normal_map_depth";
 		actions.renames["BENT_NORMAL_MAP"] = "bent_normal_map";

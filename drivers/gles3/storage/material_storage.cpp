@@ -39,6 +39,7 @@
 
 #include "drivers/gles3/rasterizer_canvas_gles3.h"
 #include "drivers/gles3/rasterizer_gles3.h"
+#include "servers/rendering/shader_types.h"
 #include "servers/rendering/storage/variant_converters.h"
 
 using namespace GLES3;
@@ -1284,6 +1285,7 @@ MaterialStorage::MaterialStorage() {
 
 		actions.renames["FRAGCOORD"] = "gl_FragCoord";
 		actions.renames["FRONT_FACING"] = "gl_FrontFacing";
+		ShaderTypes::add_raster_ray_renames(actions.renames);
 		actions.renames["NORMAL_MAP"] = "normal_map";
 		actions.renames["NORMAL_MAP_DEPTH"] = "normal_map_depth";
 		actions.renames["BENT_NORMAL_MAP"] = "bent_normal_map";

@@ -52,6 +52,16 @@ const List<String> &ShaderTypes::get_types_list() const {
 	return shader_types_list;
 }
 
+void ShaderTypes::add_raster_ray_renames(HashMap<StringName, String> &r_renames) {
+	r_renames["RAY_IS_PRIMARY"] = "true";
+	r_renames["RAY_IS_SHADOW"] = "false";
+	r_renames["RAY_IS_DIFFUSE"] = "false";
+	r_renames["RAY_IS_SPECULAR"] = "false";
+	r_renames["RAY_IS_SINGULAR"] = "true";
+	r_renames["RAY_BOUNCES"] = "0";
+	r_renames["RAY_DIFFUSE_BOUNCES"] = "0";
+}
+
 ShaderTypes *ShaderTypes::singleton = nullptr;
 
 static ShaderLanguage::BuiltInInfo constt(ShaderLanguage::DataType p_type) {
@@ -202,6 +212,15 @@ ShaderTypes::ShaderTypes() {
 	shader_modes[RS::SHADER_SPATIAL].functions["fragment"].built_ins["ALPHA_HASH_SCALE"] = ShaderLanguage::TYPE_FLOAT;
 	shader_modes[RS::SHADER_SPATIAL].functions["fragment"].built_ins["ALPHA_ANTIALIASING_EDGE"] = ShaderLanguage::TYPE_FLOAT;
 	shader_modes[RS::SHADER_SPATIAL].functions["fragment"].built_ins["ALPHA_TEXTURE_COORDINATE"] = ShaderLanguage::TYPE_VEC2;
+
+	// Path tracer ray that reached this surface. Raster always shades a primary camera ray.
+	shader_modes[RS::SHADER_SPATIAL].functions["fragment"].built_ins["RAY_IS_PRIMARY"] = constt(ShaderLanguage::TYPE_BOOL);
+	shader_modes[RS::SHADER_SPATIAL].functions["fragment"].built_ins["RAY_IS_SHADOW"] = constt(ShaderLanguage::TYPE_BOOL);
+	shader_modes[RS::SHADER_SPATIAL].functions["fragment"].built_ins["RAY_IS_DIFFUSE"] = constt(ShaderLanguage::TYPE_BOOL);
+	shader_modes[RS::SHADER_SPATIAL].functions["fragment"].built_ins["RAY_IS_SPECULAR"] = constt(ShaderLanguage::TYPE_BOOL);
+	shader_modes[RS::SHADER_SPATIAL].functions["fragment"].built_ins["RAY_IS_SINGULAR"] = constt(ShaderLanguage::TYPE_BOOL);
+	shader_modes[RS::SHADER_SPATIAL].functions["fragment"].built_ins["RAY_BOUNCES"] = constt(ShaderLanguage::TYPE_INT);
+	shader_modes[RS::SHADER_SPATIAL].functions["fragment"].built_ins["RAY_DIFFUSE_BOUNCES"] = constt(ShaderLanguage::TYPE_INT);
 
 	shader_modes[RS::SHADER_SPATIAL].functions["light"].built_ins["MODEL_MATRIX"] = constt(ShaderLanguage::TYPE_MAT4);
 	shader_modes[RS::SHADER_SPATIAL].functions["light"].built_ins["VIEW_MATRIX"] = constt(ShaderLanguage::TYPE_MAT4);

@@ -1800,6 +1800,13 @@ void SceneShaderRaytracing::init(const String p_defines) {
 
 		actions.renames["FRAGCOORD"] = "rt_frag_coord";
 		actions.renames["FRONT_FACING"] = "rt_front_facing";
+		actions.renames["RAY_IS_PRIMARY"] = "rt_ray_is_primary(payload.packed_bounces_flags)";
+		actions.renames["RAY_IS_SHADOW"] = "is_shadow_ray(payload.packed_bounces_flags)";
+		actions.renames["RAY_IS_DIFFUSE"] = "rt_ray_is_diffuse(payload.packed_bounces_flags)";
+		actions.renames["RAY_IS_SPECULAR"] = "rt_ray_is_specular(payload.packed_bounces_flags)";
+		actions.renames["RAY_IS_SINGULAR"] = "rt_ray_is_singular(payload.packed_bounces_flags)";
+		actions.renames["RAY_BOUNCES"] = "int(get_total_bounces(payload.packed_bounces_flags))";
+		actions.renames["RAY_DIFFUSE_BOUNCES"] = "int(get_diffuse_bounces(payload.packed_bounces_flags))";
 		actions.renames["NORMAL_MAP"] = "normal_map";
 		actions.renames["NORMAL_MAP_DEPTH"] = "normal_map_depth";
 		actions.renames["ALBEDO"] = "albedo";

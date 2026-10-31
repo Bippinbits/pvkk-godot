@@ -35,6 +35,8 @@
 #include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
 #include "servers/rendering/renderer_scene_cull.h"
 #include "servers/rendering/rendering_rt_material_state.h"
+#include "servers/rendering/shader_language.h"
+#include "servers/rendering/shader_types.h"
 
 #include "tests/test_macros.h"
 
@@ -553,6 +555,44 @@ TEST_CASE("[RenderRaytracing] Unmirrored back face culling keeps the TLAS facing
 	const RTTriangleFacing facing = rt_triangle_facing(RS::CULL_MODE_BACK, false, false);
 	CHECK(facing.instance_flags == uint32_t(RD::ACCELERATION_STRUCTURE_INSTANCE_TRIANGLE_FLIP_FACING_BIT));
 	CHECK(facing.geometry_flags == 0);
+}
+
+// ShaderLanguage reads RSG::utilities, which only a live RenderingServer keeps valid.
+TEST_CASE("[SceneTree][RenderRaytracing] RAY_* built-ins are read-only fragment inputs with a raster value each") {
+	const ShaderTypes *types = ShaderTypes::get_singleton();
+	REQUIRE(types != nullptr);
+	const ShaderLanguage::FunctionInfo &fragment = types->get_functions(RS::SHADER_SPATIAL).get("fragment");
+	HashMap<StringName, String> raster_renames;
+	ShaderTypes::add_raster_ray_renames(raster_renames);
+
+	int ray_built_ins = 0;
+	for (const KeyValue<StringName, ShaderLanguage::BuiltInInfo> &built_in : fragment.built_ins) {
+		const String name = built_in.key;
+		if (!name.begins_with("RAY_")) {
+			continue;
+		}
+		ray_built_ins++;
+		CHECK_MESSAGE(built_in.value.constant, name);
+		CHECK_MESSAGE(raster_renames.has(built_in.key), name);
+	}
+	CHECK(ray_built_ins == raster_renames.size());
+
+	ShaderLanguage::ShaderCompileInfo info;
+	info.functions = types->get_functions(RS::SHADER_SPATIAL);
+	info.render_modes = types->get_modes(RS::SHADER_SPATIAL);
+	info.stencil_modes = types->get_stencil_modes(RS::SHADER_SPATIAL);
+	info.shader_types = types->get_types();
+	const String read = "shader_type spatial;\nvoid fragment() {\n"
+						"	if (!RAY_IS_PRIMARY && !RAY_IS_SHADOW && (RAY_IS_DIFFUSE || RAY_IS_SPECULAR) && !RAY_IS_SINGULAR) {\n"
+						"		ALBEDO *= float(RAY_BOUNCES + RAY_DIFFUSE_BOUNCES);\n"
+						"	}\n}\n";
+	ShaderLanguage language;
+	CHECK(language.compile(read, info) == OK);
+
+	ERR_PRINT_OFF;
+	CHECK(language.compile("shader_type spatial;\nvoid fragment() { RAY_IS_PRIMARY = false; }\n", info) != OK);
+	CHECK(language.compile("shader_type spatial;\nvoid vertex() { bool p = RAY_IS_PRIMARY; }\n", info) != OK);
+	ERR_PRINT_ON;
 }
 
 using DynamicDebug = RTDynamicGeometryDebug;

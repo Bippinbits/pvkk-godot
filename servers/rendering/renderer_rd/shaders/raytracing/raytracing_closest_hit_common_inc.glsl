@@ -687,8 +687,8 @@ bool sample_surface_continuation(HitData h, MaterialResult m, vec3 N, vec3 V, in
 
 	ps.throughput *= brdf_weight;
 	ps.packed_bounces_flags = (brdf_type == DIFFUSE_TYPE)
-			? inc_diffuse_bounce(ps.packed_bounces_flags)
-			: inc_total_bounce(ps.packed_bounces_flags);
+			? inc_diffuse_bounce(ps.packed_bounces_flags) | LAST_BOUNCE_DIFFUSE_FLAG
+			: inc_total_bounce(ps.packed_bounces_flags) & ~LAST_BOUNCE_DIFFUSE_FLAG;
 	if (brdf_type == DIFFUSE_TYPE || material.roughness > SINGULAR_ROUGHNESS_MAX) {
 		ps.packed_bounces_flags |= NON_SINGULAR_PATH_FLAG;
 	}
@@ -759,6 +759,13 @@ void dlss_rr_composite_peel_guides(HitData h, MaterialResult m, vec3 N, vec3 V, 
 void shade_and_bounce(HitData h, MaterialResult m) {
 	// Any-hit already rejected alpha-scissored texels.
 	m.alpha = rt_entry_alpha(rt_entry_material(h.geometry_idx), m.alpha, 0.0);
+#ifdef RT_DEBUG_ENABLED
+	if (rt_peel_scene_depth_lost) {
+		m.albedo = vec3(0.0);
+		m.emissive = vec3(50.0, 0.0, 25.0); // Hot pink, bright enough to survive exposure and tonemapping.
+		m.alpha = 1.0;
+	}
+#endif
 	PathState ps = path_unpack(payload);
 	// Every surface bounds this ray segment, even if it cannot continue the path.
 	ps.hit_t = gl_HitTEXT;

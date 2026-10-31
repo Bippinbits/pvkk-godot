@@ -52,7 +52,7 @@ bool rt_debug_keeps_transparency(int p_vis_mode) {
 	return p_vis_mode == 0 || p_vis_mode == RT_VIS_TRANSPARENCY_LAYERS || p_vis_mode == RT_VIS_DYNAMIC_GEOMETRY;
 }
 // ============================================================================
-// PATHTRACING PAYLOAD (36 bytes, fp16/unorm-packed)
+// PATHTRACING PAYLOAD (32 bytes, fp16/unorm-packed)
 // ============================================================================
 // Radiance (r) and throughput (T) interleaved as fp16 into 3 uints:
 //   [0]=rg, [1]=bR, [2]=GB  (packHalf2x16 pairs).
@@ -65,14 +65,15 @@ bool rt_debug_keeps_transparency(int p_vis_mode) {
 
 struct PathPayload {
 	uint packed_rt[3]; // 12 bytes - radiance+throughput interleaved as fp16
-	uint packed_bounces_flags; //  4 bytes - [flags:8][peel_alpha:8][non_singular:1][diffuse:7][total:8]
+	uint packed_bounces_flags; //  4 bytes - [flags:8][peel_alpha:8][non_singular:1][reserved:7][peel_scene_depth:1][diffuse:3][total:4]
 	uint rng_state; //  4 bytes - RNG state for PCG
 	float hit_t; //  4 bytes - surface distance, even on termination; -1 on a scene miss
 	uint oct_offset_nrm; //  4 bytes - packUnorm2x16(vec3_to_oct(offset normal))
-	uint oct_next_dir; //  4 bytes - packUnorm2x16(vec3_to_oct(next direction))
-	float scene_depth; //  4 bytes - peel-ray input: NDC depth of the segment's opaque hit; 0.0 = far.
+	uint oct_next_dir; //  4 bytes - packUnorm2x16(vec3_to_oct(next direction)); peel-ray input: SCENE_DEPTH, see path_pack_peel()
 };
 
+// Set by path_pack_peel(), cleared by path_pack(): oct_next_dir holds the peel ray's SCENE_DEPTH, not a direction.
+const uint PEEL_SCENE_DEPTH_FLAG = (1u << 7);
 const uint PEEL_RAY_FLAG = (1u << 28);
 const uint PEEL_FIRST_LAYER_FLAG = (1u << 29);
 const uint PEEL_HAS_CONTINUATION_FLAG = (1u << 30);
@@ -111,19 +112,42 @@ void path_pack(inout PathPayload p, PathState s) {
 	p.packed_rt[0] = packHalf2x16(vec2(r.r, r.g));
 	p.packed_rt[1] = packHalf2x16(vec2(r.b, t.r));
 	p.packed_rt[2] = packHalf2x16(vec2(t.g, t.b));
-	p.packed_bounces_flags = s.packed_bounces_flags;
+	p.packed_bounces_flags = s.packed_bounces_flags & ~PEEL_SCENE_DEPTH_FLAG;
 	p.rng_state = s.rng_state;
 	p.hit_t = s.hit_t;
 	p.oct_offset_nrm = packUnorm2x16(vec3_to_oct(s.offset_normal));
 	p.oct_next_dir = packUnorm2x16(vec3_to_oct(s.next_ray_dir));
 }
 
-// Bounce count helpers (bits 0-7: total, bits 8-15: diffuse)
+// Peel ray setup. p_scene_depth: NDC depth of the segment's opaque hit, 0.0 = far.
+void path_pack_peel(inout PathPayload p, PathState s, float p_scene_depth) {
+	path_pack(p, s);
+	p.packed_bounces_flags |= PEEL_SCENE_DEPTH_FLAG;
+	p.oct_next_dir = floatBitsToUint(p_scene_depth);
+}
+
+#ifdef RT_DEBUG_ENABLED
+bool rt_peel_scene_depth_lost = false; // A peel hit read SCENE_DEPTH after its payload was repacked.
+#endif
+
+// SCENE_DEPTH of a peel ray, 0.0 (far, no proximity fade) otherwise. Hits must read it before their first path_pack().
+float payload_peel_scene_depth(PathPayload p) {
+	if ((p.packed_bounces_flags & PEEL_SCENE_DEPTH_FLAG) != 0u) {
+		return uintBitsToFloat(p.oct_next_dir);
+	}
+#ifdef RT_DEBUG_ENABLED
+	rt_peel_scene_depth_lost = rt_peel_scene_depth_lost || (p.packed_bounces_flags & PEEL_RAY_FLAG) != 0u;
+#endif
+	return 0.0;
+}
+
+// Bounce count helpers. Bits 0-3: total, must hold RT_MAX_BOUNCES_LIMIT; bits 4-6: diffuse, must hold MAX_DIFFUSE_BOUNCES.
+// Bit 7: PEEL_SCENE_DEPTH_FLAG. Bit 8: LAST_BOUNCE_DIFFUSE_FLAG. Bits 9-14 are reserved.
 uint get_total_bounces(uint packed) {
-	return packed & 0xFFu;
+	return packed & 0xFu;
 }
 uint get_diffuse_bounces(uint packed) {
-	return (packed >> 8u) & 0x7Fu;
+	return (packed >> 4u) & 0x7u;
 }
 
 // Set once the path has scattered through anything but a (near-)singular lobe.
@@ -133,14 +157,17 @@ bool is_singular_path(uint packed) {
 	return (packed & NON_SINGULAR_PATH_FLAG) == 0u;
 }
 uint pack_bounces(uint total, uint diffuse) {
-	return total | (diffuse << 8u);
+	return total | (diffuse << 4u);
 }
 uint inc_total_bounce(uint packed) {
 	return packed + 1u;
 }
 uint inc_diffuse_bounce(uint packed) {
-	return packed + 0x101u;
+	return packed + 0x11u;
 } // +1 to both total and diffuse
+
+// Set when the most recent scatter sampled the diffuse lobe, cleared when it sampled a specular one.
+const uint LAST_BOUNCE_DIFFUSE_FLAG = (1u << 8);
 
 // Sample 0 flag (bit 24) - only write DLSS RR outputs on first sample
 const uint SAMPLE_ZERO_FLAG = (1u << 24);
@@ -185,6 +212,21 @@ uint clear_path_terminated(uint packed) {
 }
 bool is_path_terminated(uint packed) {
 	return (packed & PATH_TERMINATED_FLAG) != 0u;
+}
+
+// RAY_* shader built-ins. Shadow rays start from zeroed bounce state, so every query but RAY_IS_SHADOW excludes them.
+// Peel rays report the segment they peel: transparent layers seen by the camera are primary.
+bool rt_ray_is_primary(uint packed) {
+	return !is_shadow_ray(packed) && get_total_bounces(packed) == 0u;
+}
+bool rt_ray_is_diffuse(uint packed) {
+	return (packed & LAST_BOUNCE_DIFFUSE_FLAG) != 0u;
+}
+bool rt_ray_is_specular(uint packed) {
+	return get_total_bounces(packed) > 0u && !rt_ray_is_diffuse(packed);
+}
+bool rt_ray_is_singular(uint packed) {
+	return !is_shadow_ray(packed) && is_singular_path(packed);
 }
 
 // Bounce limits
