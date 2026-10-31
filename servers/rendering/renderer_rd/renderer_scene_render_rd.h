@@ -326,6 +326,8 @@ public:
 	}
 	// Decal texture sampler for the current decal filter (repeat disabled).
 	RID decals_get_sampler(const RendererRD::MaterialStorage::Samplers &p_samplers) const;
+	// Light projector texture sampler for the current projector filter (repeat disabled).
+	RID light_projectors_get_sampler(const RendererRD::MaterialStorage::Samplers &p_samplers) const;
 
 	_FORCE_INLINE_ bool material_use_debanding_get() const {
 		return material_use_debanding;

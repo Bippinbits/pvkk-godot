@@ -1305,6 +1305,32 @@ RID RendererSceneRenderRD::decals_get_sampler(const RendererRD::MaterialStorage:
 	}
 	return p_samplers.get_sampler(filter, RS::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
 }
+
+RID RendererSceneRenderRD::light_projectors_get_sampler(const RendererRD::MaterialStorage::Samplers &p_samplers) const {
+	RS::CanvasItemTextureFilter filter = RS::CANVAS_ITEM_TEXTURE_FILTER_LINEAR_WITH_MIPMAPS;
+	switch (light_projectors_filter) {
+		case RS::LIGHT_PROJECTOR_FILTER_NEAREST:
+			filter = RS::CANVAS_ITEM_TEXTURE_FILTER_NEAREST;
+			break;
+		case RS::LIGHT_PROJECTOR_FILTER_LINEAR:
+			filter = RS::CANVAS_ITEM_TEXTURE_FILTER_LINEAR;
+			break;
+		case RS::LIGHT_PROJECTOR_FILTER_NEAREST_MIPMAPS:
+			filter = RS::CANVAS_ITEM_TEXTURE_FILTER_NEAREST_WITH_MIPMAPS;
+			break;
+		case RS::LIGHT_PROJECTOR_FILTER_LINEAR_MIPMAPS:
+			filter = RS::CANVAS_ITEM_TEXTURE_FILTER_LINEAR_WITH_MIPMAPS;
+			break;
+		case RS::LIGHT_PROJECTOR_FILTER_NEAREST_MIPMAPS_ANISOTROPIC:
+			filter = RS::CANVAS_ITEM_TEXTURE_FILTER_NEAREST_WITH_MIPMAPS_ANISOTROPIC;
+			break;
+		case RS::LIGHT_PROJECTOR_FILTER_LINEAR_MIPMAPS_ANISOTROPIC:
+			filter = RS::CANVAS_ITEM_TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC;
+			break;
+	}
+	return p_samplers.get_sampler(filter, RS::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+}
+
 void RendererSceneRenderRD::light_projectors_set_filter(RenderingServer::LightProjectorFilter p_filter) {
 	if (light_projectors_filter == p_filter) {
 		return;
