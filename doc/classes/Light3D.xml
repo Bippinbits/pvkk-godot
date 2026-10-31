@@ -128,7 +128,7 @@
 		<member name="shadow_opacity" type="float" setter="set_param" getter="get_param" default="1.0">
 			The opacity to use when rendering the light's shadow map. Values lower than [code]1.0[/code] make the light appear through shadows. This can be used to fake global illumination at a low performance cost. At [code]0.0[/code], the shadow is skipped entirely, as if [member shadow_enabled] was [code]false[/code].
 		</member>
-		<member name="shadow_renderers" type="int" setter="set_shadow_renderers" getter="get_shadow_renderers" enum="RenderingServer.LightShadowRenderer" is_bitfield="true" default="3">
+		<member name="shadow_renderers" type="int" setter="set_shadow_renderers" getter="get_shadow_renderers" enum="RenderingServer.ShadowRenderer" is_bitfield="true" default="3">
 			The renderers that draw this light's shadow while [member shadow_enabled] is [code]true[/code]. Unticking [b]Rasterizer[/b] skips shadow maps, ray query shadows and GI shadows entirely. Unticking [b]Path Tracer[/b] skips the path tracer's shadow rays. [member shadow_opacity] and [member distance_fade_shadow] apply to both renderers.
 		</member>
 		<member name="shadow_reverse_cull_face" type="bool" setter="set_shadow_reverse_cull_face" getter="get_shadow_reverse_cull_face" default="false">

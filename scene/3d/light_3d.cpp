@@ -154,12 +154,12 @@ uint32_t Light3D::get_shadow_caster_mask() const {
 	return shadow_caster_mask;
 }
 
-void Light3D::set_shadow_renderers(BitField<RS::LightShadowRenderer> p_renderers) {
+void Light3D::set_shadow_renderers(BitField<RS::ShadowRenderer> p_renderers) {
 	shadow_renderers = p_renderers;
 	RS::get_singleton()->light_set_shadow_renderers(light, shadow_renderers);
 }
 
-BitField<RS::LightShadowRenderer> Light3D::get_shadow_renderers() const {
+BitField<RS::ShadowRenderer> Light3D::get_shadow_renderers() const {
 	return shadow_renderers;
 }
 

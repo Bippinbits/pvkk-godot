@@ -2277,7 +2277,7 @@
 		<method name="light_set_shadow_renderers">
 			<return type="void" />
 			<param index="0" name="light" type="RID" />
-			<param index="1" name="renderers" type="int" enum="RenderingServer.LightShadowRenderer" is_bitfield="true" />
+			<param index="1" name="renderers" type="int" enum="RenderingServer.ShadowRenderer" is_bitfield="true" />
 			<description>
 				Sets the renderers that draw this light's shadow while [method light_set_shadow] is enabled. Equivalent to [member Light3D.shadow_renderers].
 			</description>
@@ -4982,14 +4982,14 @@
 		<constant name="LIGHT_PARAM_MAX" value="21" enum="LightParam">
 			Represents the size of the [enum LightParam] enum.
 		</constant>
-		<constant name="LIGHT_SHADOW_RENDERER_RASTERIZER" value="1" enum="LightShadowRenderer" is_bitfield="true">
-			The rasterizer draws the light's shadow (shadow maps or ray query shadows).
+		<constant name="SHADOW_RENDERER_RASTERIZER" value="1" enum="ShadowRenderer" is_bitfield="true">
+			The rasterizer draws the shadow (shadow maps or ray query shadows).
 		</constant>
-		<constant name="LIGHT_SHADOW_RENDERER_PATH_TRACER" value="2" enum="LightShadowRenderer" is_bitfield="true">
-			The path tracer traces shadow rays for the light.
+		<constant name="SHADOW_RENDERER_PATH_TRACER" value="2" enum="ShadowRenderer" is_bitfield="true">
+			The path tracer traces shadow rays for the light, or against the geometry.
 		</constant>
-		<constant name="LIGHT_SHADOW_RENDERER_ALL" value="3" enum="LightShadowRenderer" is_bitfield="true">
-			Both renderers draw the light's shadow.
+		<constant name="SHADOW_RENDERER_ALL" value="3" enum="ShadowRenderer" is_bitfield="true">
+			Both renderers draw the shadow.
 		</constant>
 		<constant name="LIGHT_BAKE_DISABLED" value="0" enum="LightBakeMode">
 			Light is ignored when baking. This is the fastest mode, but the light will be taken into account when baking global illumination. This mode should generally be used for dynamic lights that change quickly, as the effect of global illumination is less noticeable on those lights.

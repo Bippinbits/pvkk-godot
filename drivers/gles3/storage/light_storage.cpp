@@ -236,11 +236,11 @@ uint32_t LightStorage::light_get_shadow_caster_mask(RID p_light) const {
 	return light->shadow_caster_mask;
 }
 
-void LightStorage::light_set_shadow_renderers(RID p_light, BitField<RS::LightShadowRenderer> p_renderers) {
+void LightStorage::light_set_shadow_renderers(RID p_light, BitField<RS::ShadowRenderer> p_renderers) {
 	Light *light = light_owner.get_or_null(p_light);
 	ERR_FAIL_NULL(light);
 
-	light->shadow_renderers = uint32_t(p_renderers) & RS::LIGHT_SHADOW_RENDERER_ALL;
+	light->shadow_renderers = uint32_t(p_renderers) & RS::SHADOW_RENDERER_ALL;
 
 	light->version++;
 	light->dependency.changed_notify(Dependency::DEPENDENCY_CHANGED_LIGHT);

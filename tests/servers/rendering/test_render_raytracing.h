@@ -333,9 +333,9 @@ TEST_CASE("[RenderRaytracing] Material buffer uniform sizes match the shader com
 }
 
 TEST_CASE("[RenderRaytracing] Shadow renderers only apply while shadows are enabled and visible") {
-	constexpr RS::LightShadowRenderer RASTER = RS::LIGHT_SHADOW_RENDERER_RASTERIZER;
-	constexpr RS::LightShadowRenderer PT = RS::LIGHT_SHADOW_RENDERER_PATH_TRACER;
-	constexpr uint32_t ALL = RS::LIGHT_SHADOW_RENDERER_ALL;
+	constexpr RS::ShadowRenderer RASTER = RS::SHADOW_RENDERER_RASTERIZER;
+	constexpr RS::ShadowRenderer PT = RS::SHADOW_RENDERER_PATH_TRACER;
+	constexpr uint32_t ALL = RS::SHADOW_RENDERER_ALL;
 
 	CHECK_FALSE(RendererLightStorage::is_shadow_drawn_by(false, 1.0f, ALL, RASTER));
 	CHECK_FALSE(RendererLightStorage::is_shadow_drawn_by(false, 1.0f, ALL, PT));

@@ -315,11 +315,11 @@ uint32_t LightStorage::light_get_shadow_caster_mask(RID p_light) const {
 	return light->shadow_caster_mask;
 }
 
-void LightStorage::light_set_shadow_renderers(RID p_light, BitField<RS::LightShadowRenderer> p_renderers) {
+void LightStorage::light_set_shadow_renderers(RID p_light, BitField<RS::ShadowRenderer> p_renderers) {
 	Light *light = light_owner.get_or_null(p_light);
 	ERR_FAIL_NULL(light);
 
-	light->shadow_renderers = uint32_t(p_renderers) & RS::LIGHT_SHADOW_RENDERER_ALL;
+	light->shadow_renderers = uint32_t(p_renderers) & RS::SHADOW_RENDERER_ALL;
 
 	light->version++;
 	light->dependency.changed_notify(Dependency::DEPENDENCY_CHANGED_LIGHT);
@@ -690,7 +690,7 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 
 				light_data.size = 1.0 - Math::cos(Math::deg_to_rad(size)); //angle to cosine offset
 
-				light_data.shadow_opacity = (p_using_shadows && light->has_shadow_in(RS::LIGHT_SHADOW_RENDERER_RASTERIZER))
+				light_data.shadow_opacity = (p_using_shadows && light->has_shadow_in(RS::SHADOW_RENDERER_RASTERIZER))
 						? light->param[RS::LIGHT_PARAM_SHADOW_OPACITY]
 						: 0.0;
 
@@ -700,7 +700,7 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 					// technically this will keep expanding until reaching the sun, but all we care
 					// is expand until we reach the radius of the near plane (there can't be more occluders than that)
 					angular_diameter = Math::tan(Math::deg_to_rad(angular_diameter));
-					if (light->has_shadow_in(RS::LIGHT_SHADOW_RENDERER_RASTERIZER) && light->param[RS::LIGHT_PARAM_SHADOW_BLUR] > 0.0) {
+					if (light->has_shadow_in(RS::SHADOW_RENDERER_RASTERIZER) && light->param[RS::LIGHT_PARAM_SHADOW_BLUR] > 0.0) {
 						// Only enable PCSS-like soft shadows if blurring is enabled.
 						// Otherwise, performance would decrease with no visual difference.
 						r_directional_light_soft_shadows = true;
@@ -959,7 +959,7 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 			light_data.projector_rect[3] = 0;
 		}
 
-		const bool raster_shadow = light->has_shadow_in(RS::LIGHT_SHADOW_RENDERER_RASTERIZER);
+		const bool raster_shadow = light->has_shadow_in(RS::SHADOW_RENDERER_RASTERIZER);
 		const bool ray_query_shadow = p_render_data->shadows_from_ray_queries && p_using_shadows && raster_shadow;
 		const bool needs_shadow =
 				!ray_query_shadow &&

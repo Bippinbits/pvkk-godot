@@ -458,7 +458,7 @@ public:
 	FUNC5(light_set_distance_fade, RID, bool, float, float, float)
 	FUNC2(light_set_reverse_cull_face_mode, RID, bool)
 	FUNC2(light_set_shadow_caster_mask, RID, uint32_t)
-	FUNC2(light_set_shadow_renderers, RID, BitField<LightShadowRenderer>)
+	FUNC2(light_set_shadow_renderers, RID, BitField<ShadowRenderer>)
 	FUNC2(light_set_bake_mode, RID, LightBakeMode)
 	FUNC2(light_set_max_sdfgi_cascade, RID, uint32_t)
 

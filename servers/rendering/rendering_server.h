@@ -567,14 +567,15 @@ public:
 	virtual void light_set_reverse_cull_face_mode(RID p_light, bool p_enabled) = 0;
 	virtual void light_set_shadow_caster_mask(RID p_light, uint32_t p_caster_mask) = 0;
 
-	enum LightShadowRenderer {
-		LIGHT_SHADOW_RENDERER_RASTERIZER = 1,
-		LIGHT_SHADOW_RENDERER_PATH_TRACER = 2,
-		LIGHT_SHADOW_RENDERER_ALL = LIGHT_SHADOW_RENDERER_RASTERIZER | LIGHT_SHADOW_RENDERER_PATH_TRACER,
+	// Shared by lights and geometry instances.
+	enum ShadowRenderer {
+		SHADOW_RENDERER_RASTERIZER = 1,
+		SHADOW_RENDERER_PATH_TRACER = 2,
+		SHADOW_RENDERER_ALL = SHADOW_RENDERER_RASTERIZER | SHADOW_RENDERER_PATH_TRACER,
 	};
 
-	/// Renderers that draw this light's shadow while light_set_shadow() is enabled; a LightShadowRenderer bitfield.
-	virtual void light_set_shadow_renderers(RID p_light, BitField<LightShadowRenderer> p_renderers) = 0;
+	// Renderers that draw this light's shadow while light_set_shadow() is enabled; a ShadowRenderer bitfield.
+	virtual void light_set_shadow_renderers(RID p_light, BitField<ShadowRenderer> p_renderers) = 0;
 
 	enum LightBakeMode {
 		LIGHT_BAKE_DISABLED,
@@ -2006,7 +2007,7 @@ VARIANT_ENUM_CAST(RenderingServer::MultimeshTransformFormat);
 VARIANT_ENUM_CAST(RenderingServer::MultimeshPhysicsInterpolationQuality);
 VARIANT_ENUM_CAST(RenderingServer::LightType);
 VARIANT_ENUM_CAST(RenderingServer::LightParam);
-VARIANT_BITFIELD_CAST(RenderingServer::LightShadowRenderer);
+VARIANT_BITFIELD_CAST(RenderingServer::ShadowRenderer);
 VARIANT_ENUM_CAST(RenderingServer::LightBakeMode);
 VARIANT_ENUM_CAST(RenderingServer::LightOmniShadowMode);
 VARIANT_ENUM_CAST(RenderingServer::LightDirectionalShadowMode);
