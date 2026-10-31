@@ -113,6 +113,7 @@ bool RTFogShadows::prepare(RenderRaytracing *p_raytracing, RTViewportState *p_st
 	RendererRD::MaterialStorage::store_transform(p_render_data->scene_data->cam_transform, params.view_to_world);
 	params.frame_index = p_state->frame_counter;
 	params.trace_shadows = GLOBAL_GET_CACHED(bool, "rendering/pathtracing/volumetric_fog_shadows") ? 1 : 0;
+	params.shadow_mask = RT_SHADOW_GROUPS_MASK & ~uint32_t(p_state->shadow_groups.self_shadow_bit);
 	RD::get_singleton()->buffer_update(p_state->fog_shadows_ubo, 0, sizeof(ParamsUBO), &params);
 
 	if (p_state->fog_shadows_uniform_set.is_valid() && RD::get_singleton()->uniform_set_is_valid(p_state->fog_shadows_uniform_set)) {

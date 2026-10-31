@@ -41,6 +41,7 @@
 #define RT_PARAM_TRANSPARENCY_DOMINANT_LAYER_ALPHA 18 // rt_params[4].z - min alpha of the first peel layer to own depth/velocity (0 = never)
 #define RT_PARAM_MAX_TRANSPARENCY_LAYERS_REFLECTION 19 // rt_params[4].w - peel budget on singular (mirror) bounce segments
 #define RT_PARAM_MAX_TRANSPARENCY_LAYERS_INDIRECT 20 // rt_params[5].x - peel budget on other indirect segments
+#define RT_PARAM_SELF_SHADOW_MASK 21 // rt_params[5].y - TLAS shadow group bit of SELF_SHADOWING casters (0 = none)
 
 // RT_PARAM_VIS_MODE values. Must match Environment::PathtracingDebugMode.
 #define RT_VIS_TRANSPARENCY_LAYERS 23
@@ -206,6 +207,8 @@ const uint FLAG_COMPRESSED_UV = 16u;
 const uint FLAG_FACING_INVERTED = 32u;
 // Back faces flip the normal, like raster DO_SIDE_CHECK.
 const uint FLAG_SIDE_CHECK = 64u;
+// SELF_SHADOWING receiver: its shadow rays keep RT_PARAM_SELF_SHADOW_MASK.
+const uint FLAG_SELF_SHADOWING = 128u;
 
 // ============================================================================
 // RANDOM NUMBER GENERATION - PCG (Permuted Congruential Generator)

@@ -229,13 +229,13 @@ vec3 lights_trace_shadow_ray(vec3 origin, vec3 direction, float max_dist, uint p
 #endif
 }
 
-/// Shadow transmittance from origin towards the light, blended towards 1 by the light's shadow opacity.
-/// Skips the trace when the path tracer draws no shadow for this light.
-vec3 lights_shadow_transmittance(RTLightData light, vec3 origin, vec3 direction, float max_dist, inout uint rng_state) {
+// Shadow transmittance from origin towards the light, blended towards 1 by the light's shadow opacity.
+// Skips the trace when the path tracer draws no shadow for this light. p_receiver_shadow_mask filters the light's caster groups.
+vec3 lights_shadow_transmittance(RTLightData light, vec3 origin, vec3 direction, float max_dist, uint p_receiver_shadow_mask, inout uint rng_state) {
 	if (light.shadow_opacity <= 0.001) {
 		return vec3(1.0);
 	}
-	vec3 traced = lights_trace_shadow_ray(origin, direction, max_dist, (light.light_masks >> 24u) & 0xFFu, rng_state);
+	vec3 traced = lights_trace_shadow_ray(origin, direction, max_dist, (light.light_masks >> 24u) & p_receiver_shadow_mask, rng_state);
 	return mix(vec3(1.0), traced, light.shadow_opacity);
 }
 
@@ -300,7 +300,7 @@ bool lights_select(vec3 hit_pos, uint first, uint count, uint instance_layers, i
 
 // Unweighted contribution of one omni or spot light, one shadow ray.
 vec3 lights_evaluate_positional(RTLightData light, vec3 hit_pos, vec3 N, vec3 V, MaterialProperties material,
-		inout uint rng_state, bool is_indirect_bounce) {
+		inout uint rng_state, bool is_indirect_bounce, uint p_receiver_shadow_mask) {
 	vec3 to_light = light.position - hit_pos;
 	float dist_sq = dot(to_light, to_light);
 
@@ -362,7 +362,7 @@ vec3 lights_evaluate_positional(RTLightData light, vec3 hit_pos, vec3 N, vec3 V,
 
 // Unweighted contribution of one directional light, one shadow ray.
 vec3 lights_evaluate_directional(RTLightData light, vec3 hit_pos, vec3 N, vec3 V, MaterialProperties material,
-		inout uint rng_state, bool is_indirect_bounce) {
+		inout uint rng_state, bool is_indirect_bounce, uint p_receiver_shadow_mask) {
 	LightSample ls = lights_prepare_sample(hit_pos, light);
 	float light_pdf;
 	vec3 L = lights_sample_cone(ls, rand2(rng_state), light_pdf);
@@ -371,7 +371,7 @@ vec3 lights_evaluate_directional(RTLightData light, vec3 hit_pos, vec3 N, vec3 V
 		return vec3(0.0);
 	}
 
-	vec3 shadow_transmittance = lights_shadow_transmittance(light, hit_pos, L, ls.max_distance, rng_state);
+	vec3 shadow_transmittance = lights_shadow_transmittance(light, hit_pos, L, ls.max_distance, p_receiver_shadow_mask, rng_state);
 
 	vec3 brdf_diffuse, brdf_specular;
 	evalCombinedBRDFSeparate(N, L, V, material, brdf_diffuse, brdf_specular);
@@ -393,7 +393,8 @@ vec3 lights_evaluate_direct_lighting(
 		inout uint rng_state,
 		bool is_indirect_bounce,
 		uint light_count,
-		uint instance_layers) {
+		uint instance_layers,
+		uint p_receiver_shadow_mask) {
 	uint idx;
 	float select_pdf;
 	if (!lights_select(hit_pos, 0u, light_count, instance_layers, rng_state, idx, select_pdf)) {
@@ -404,10 +405,10 @@ vec3 lights_evaluate_direct_lighting(
 	vec3 contribution;
 	if (light.type == RT_LIGHT_TYPE_DIRECTIONAL) {
 		contribution = lights_evaluate_directional(light, hit_pos, N, V, material,
-				rng_state, is_indirect_bounce);
+				rng_state, is_indirect_bounce, p_receiver_shadow_mask);
 	} else {
 		contribution = lights_evaluate_positional(light, hit_pos, N, V, material,
-				rng_state, is_indirect_bounce);
+				rng_state, is_indirect_bounce, p_receiver_shadow_mask);
 	}
 	return contribution / max(select_pdf, 1e-10);
 }
@@ -422,7 +423,8 @@ vec3 lights_evaluate_direct_lighting_per_group(
 		inout uint rng_state,
 		bool is_indirect_bounce,
 		uint light_count,
-		uint instance_layers) {
+		uint instance_layers,
+		uint p_receiver_shadow_mask) {
 	vec3 result = vec3(0.0);
 	uint directional_count = lights_directional_count(light_count);
 

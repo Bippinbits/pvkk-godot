@@ -3662,10 +3662,12 @@ RTTlasBuilder::InstanceMasks RTTlasBuilder::_instance_masks(const Instance &p_in
 	InstanceMasks masks;
 	masks.camera_visible = (p_inst.layer_mask & camera_visible_layers) != 0 && !p_inst.rt_shadows_only;
 	masks.opaque = masks.camera_visible ? uint8_t(RT_VIS_BIT) : uint8_t(0);
-	if (p_inst.rt_shadow_caster) {
+	if (_casts_self_shadow(p_inst)) {
+		masks.shadow = state->shadow_groups.self_shadow_bits_for_layers(p_inst.layer_mask);
+	} else if (p_inst.rt_shadow_caster) {
 		masks.shadow = state->shadow_groups.group_bits_for_layers(p_inst.layer_mask);
-		masks.opaque |= masks.shadow;
 	}
+	masks.opaque |= masks.shadow;
 	return masks;
 }
 
@@ -3705,7 +3707,7 @@ void RTTlasBuilder::_add_procedural_instance(const Instance &p_inst, const Insta
 	rt.tlas_instances.sbt_offsets.push_back(hg_index);
 
 	RT_GeometryData geom = {};
-	geom.flags = RT_GEOM_FLAG_PROCEDURAL;
+	geom.flags = RT_GEOM_FLAG_PROCEDURAL | _self_shadowing_flag(p_masks.opaque);
 	geom.vertex_buffer_address = ps->gpu_buffer_address;
 	geom.normal_byte_offset = RT_OFFSET_NONE;
 	geom.tangent_byte_offset = RT_OFFSET_NONE;
@@ -4113,7 +4115,7 @@ void RTTlasBuilder::_fill_surface_key(const ShaderData *p_shader, const RTMateri
 }
 
 // Custom index is the first per-geometry entry; push the instance before its entries.
-// Returns the facing flags of its entries; p_raster_mirror is the mirror flag the rasterizer culls the instance with.
+// Returns the per-instance geometry flags of its entries; p_raster_mirror is the mirror flag the rasterizer culls the instance with.
 uint32_t RTTlasBuilder::_push_tlas_instance(const Transform3D &p_transform, RID p_blas, const RTSurfaceGroupKey &p_key, bool p_transparent, bool p_raster_mirror) {
 	const RTTriangleFacing facing = rt_triangle_facing(p_key.cull_mode, p_raster_mirror, p_transform.basis.determinant() < 0);
 	RenderRaytracing::RTInstanceArrays &instances = rt.tlas_instances;
@@ -4126,7 +4128,7 @@ uint32_t RTTlasBuilder::_push_tlas_instance(const Transform3D &p_transform, RID 
 	if (p_transparent && (p_key.tlas_mask & RT_MASK_TRANSPARENT) != 0) {
 		rt.tlas_transparent_instances.push_copy(instances, instances.blass.size() - 1, RT_MASK_TRANSPARENT);
 	}
-	return facing.geometry_flags;
+	return facing.geometry_flags | _self_shadowing_flag(p_key.tlas_mask);
 }
 
 void RTTlasBuilder::_push_tlas_entry(const RT_GeometryData &p_geometry, const RTGeometrySources &p_sources, uint32_t p_facing_flags, const RTMaterialData *p_mat_data,
@@ -4815,6 +4817,7 @@ RID RenderRaytracing::update_uniform_set(RTViewportState *p_state, const RenderD
 		rt_light_count = gather_lights(p_render_data, p_state, rt_light_data, RT_LIGHTS_MAX);
 
 		rt_ubo.params[SceneShaderRaytracing::RT_PARAM_LIGHT_COUNT] = float(rt_light_count);
+		rt_ubo.params[SceneShaderRaytracing::RT_PARAM_SELF_SHADOW_MASK] = p_state ? float(p_state->shadow_groups.self_shadow_bit) : 0.0f;
 
 		// Upload light buffer.
 		{

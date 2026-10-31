@@ -33,6 +33,7 @@
 #include "servers/rendering/renderer_rd/forward_clustered/render_raytracing.h"
 #include "servers/rendering/renderer_rd/forward_clustered/scene_shader_raytracing.h"
 #include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
+#include "servers/rendering/renderer_scene_cull.h"
 #include "servers/rendering/rendering_rt_material_state.h"
 
 #include "tests/test_macros.h"
@@ -350,6 +351,69 @@ TEST_CASE("[RenderRaytracing] Shadow renderers only apply while shadows are enab
 	CHECK(RendererLightStorage::is_shadow_drawn_by(true, 0.01f, ALL, RASTER));
 	CHECK_FALSE(RendererLightStorage::is_shadow_drawn_by(true, 0.0f, ALL, RASTER));
 	CHECK_FALSE(RendererLightStorage::is_shadow_drawn_by(true, 0.0f, ALL, PT));
+}
+
+TEST_CASE("[RenderRaytracing] Geometry shadow renderers only apply while cast shadows is not off") {
+	constexpr RS::ShadowRenderer RASTER = RS::SHADOW_RENDERER_RASTERIZER;
+	constexpr RS::ShadowRenderer PT = RS::SHADOW_RENDERER_PATH_TRACER;
+	constexpr uint32_t ALL = RS::SHADOW_RENDERER_ALL;
+
+	CHECK_FALSE(RendererSceneCull::is_shadow_cast_by(RS::SHADOW_CASTING_SETTING_OFF, ALL, RASTER));
+	CHECK_FALSE(RendererSceneCull::is_shadow_cast_by(RS::SHADOW_CASTING_SETTING_OFF, ALL, PT));
+	CHECK(RendererSceneCull::is_shadow_cast_by(RS::SHADOW_CASTING_SETTING_ON, ALL, RASTER));
+	CHECK(RendererSceneCull::is_shadow_cast_by(RS::SHADOW_CASTING_SETTING_ON, ALL, PT));
+	CHECK(RendererSceneCull::is_shadow_cast_by(RS::SHADOW_CASTING_SETTING_ON, PT, PT));
+	CHECK_FALSE(RendererSceneCull::is_shadow_cast_by(RS::SHADOW_CASTING_SETTING_ON, PT, RASTER));
+	CHECK_FALSE(RendererSceneCull::is_shadow_cast_by(RS::SHADOW_CASTING_SETTING_ON, RASTER, PT));
+	CHECK_FALSE(RendererSceneCull::is_shadow_cast_by(RS::SHADOW_CASTING_SETTING_ON, 0, RASTER));
+	CHECK(RendererSceneCull::is_shadow_cast_by(RS::SHADOW_CASTING_SETTING_DOUBLE_SIDED, PT, PT));
+	CHECK(RendererSceneCull::is_shadow_cast_by(RS::SHADOW_CASTING_SETTING_SHADOWS_ONLY, PT, PT));
+	CHECK_FALSE(RendererSceneCull::is_shadow_cast_by(RS::SHADOW_CASTING_SETTING_SHADOWS_ONLY, PT, RASTER));
+}
+
+TEST_CASE("[RenderRaytracing] Self shadowing geometry only casts path traced shadows") {
+	constexpr uint32_t ALL = RS::SHADOW_RENDERER_ALL;
+
+	CHECK(RendererSceneCull::is_shadow_cast_by(RS::SHADOW_CASTING_SETTING_SELF_SHADOWING, ALL, RS::SHADOW_RENDERER_PATH_TRACER));
+	CHECK_FALSE(RendererSceneCull::is_shadow_cast_by(RS::SHADOW_CASTING_SETTING_SELF_SHADOWING, ALL, RS::SHADOW_RENDERER_RASTERIZER));
+	CHECK_FALSE(RendererSceneCull::is_shadow_cast_by(RS::SHADOW_CASTING_SETTING_SELF_SHADOWING, RS::SHADOW_RENDERER_RASTERIZER, RS::SHADOW_RENDERER_PATH_TRACER));
+}
+
+TEST_CASE("[RenderRaytracing] Shadow group table leaves all six groups to world casters without self shadowing") {
+	RTShadowGroupTable table;
+	table.register_caster_mask(0xFFFFFFFF);
+	CHECK(table.self_shadow_bit == 0);
+	CHECK(table.group_bits_for_layers(1) == RTShadowGroupTable::group_bit(0));
+}
+
+TEST_CASE("[RenderRaytracing] Shadow group table keeps the self shadowing group apart from world groups") {
+	constexpr uint32_t WORLD_LAYER = 1u << 0;
+	constexpr uint32_t VIEWMODEL_LAYER = 1u << 1;
+	RTShadowGroupTable table;
+	table.register_caster_mask(0xFFFFFFFF); // Sun.
+	table.register_caster_mask(WORLD_LAYER); // Lamp that ignores the viewmodel.
+	table.reserve_self_shadow_group();
+
+	const uint8_t self_bit = table.self_shadow_bits_for_layers(VIEWMODEL_LAYER);
+	const uint8_t world_bit = table.group_bits_for_layers(WORLD_LAYER);
+	CHECK(self_bit == table.self_shadow_bit);
+	CHECK(self_bit != 0);
+	CHECK((world_bit & self_bit) == 0);
+	CHECK(table.ray_mask_for_caster_mask(0xFFFFFFFF) == (self_bit | world_bit));
+	CHECK(table.ray_mask_for_caster_mask(WORLD_LAYER) == world_bit);
+}
+
+TEST_CASE("[RenderRaytracing] Shadow group overflow never merges world casters into the self shadowing group") {
+	RTShadowGroupTable table;
+	for (uint32_t layer = 0; layer < 10; layer++) {
+		table.register_caster_mask(1u << layer);
+	}
+	table.reserve_self_shadow_group();
+	ERR_PRINT_OFF;
+	for (uint32_t layer = 0; layer < 10; layer++) {
+		CHECK((table.group_bits_for_layers(1u << layer) & table.self_shadow_bit) == 0);
+	}
+	ERR_PRINT_ON;
 }
 
 TEST_CASE("[RenderRaytracing] Instance data layout packs stride and field offsets") {

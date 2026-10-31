@@ -55,6 +55,14 @@ static float get_halton_value(int p_index, int p_base) {
 }
 #endif // _3D_DISABLED
 
+static void _geometry_instance_set_shadow_casting(RenderGeometryInstance *p_geometry_instance, const RendererSceneCull::Instance *p_instance) {
+	const RS::ShadowCastingSetting setting = p_instance->cast_shadows;
+	p_geometry_instance->set_cast_double_sided_shadows(setting == RS::SHADOW_CASTING_SETTING_DOUBLE_SIDED);
+	p_geometry_instance->set_rt_shadow_caster(p_instance->casts_shadow_in(RS::SHADOW_RENDERER_PATH_TRACER));
+	p_geometry_instance->set_rt_shadows_only(setting == RS::SHADOW_CASTING_SETTING_SHADOWS_ONLY);
+	p_geometry_instance->set_rt_self_shadowing(setting == RS::SHADOW_CASTING_SETTING_SELF_SHADOWING);
+}
+
 /* EVENT QUEUING */
 
 void RendererSceneCull::tick() {
@@ -729,9 +737,7 @@ void RendererSceneCull::instance_set_base(RID p_instance, RID p_base) {
 				geom->geometry_instance->set_use_dynamic_gi(instance->dynamic_gi);
 				geom->geometry_instance->set_use_lightmap(RID(), instance->lightmap_uv_scale, instance->lightmap_slice_index);
 				geom->geometry_instance->set_instance_shader_uniforms_offset(instance->instance_uniforms.location());
-				geom->geometry_instance->set_cast_double_sided_shadows(instance->cast_shadows == RS::SHADOW_CASTING_SETTING_DOUBLE_SIDED);
-				geom->geometry_instance->set_rt_shadow_caster(instance->cast_shadows != RS::SHADOW_CASTING_SETTING_OFF);
-				geom->geometry_instance->set_rt_shadows_only(instance->cast_shadows == RS::SHADOW_CASTING_SETTING_SHADOWS_ONLY);
+				_geometry_instance_set_shadow_casting(geom->geometry_instance, instance);
 				if (instance->lightmap_sh.size() == 9) {
 					geom->geometry_instance->set_lightmap_capture(instance->lightmap_sh.ptr());
 				}
@@ -1339,33 +1345,42 @@ void RendererSceneCull::instance_geometry_set_cast_shadows_setting(RID p_instanc
 	ERR_FAIL_NULL(instance);
 
 	instance->cast_shadows = p_shadow_casting_setting;
+	_instance_update_shadow_casting(instance);
+}
 
-	if (instance->scenario && instance->array_index >= 0) {
-		InstanceData &idata = instance->scenario->instance_data[instance->array_index];
+void RendererSceneCull::instance_geometry_set_shadow_renderers(RID p_instance, BitField<RS::ShadowRenderer> p_renderers) {
+	Instance *instance = instance_owner.get_or_null(p_instance);
+	ERR_FAIL_NULL(instance);
 
-		if (instance->cast_shadows != RS::SHADOW_CASTING_SETTING_OFF) {
+	instance->shadow_renderers = uint32_t(p_renderers) & RS::SHADOW_RENDERER_ALL;
+	_instance_update_shadow_casting(instance);
+}
+
+void RendererSceneCull::_instance_update_shadow_casting(Instance *p_instance) {
+	if (p_instance->scenario && p_instance->array_index >= 0) {
+		InstanceData &idata = p_instance->scenario->instance_data[p_instance->array_index];
+
+		if (p_instance->casts_shadow_in(RS::SHADOW_RENDERER_RASTERIZER)) {
 			idata.flags |= InstanceData::FLAG_CAST_SHADOWS;
 		} else {
 			idata.flags &= ~InstanceData::FLAG_CAST_SHADOWS;
 		}
 
-		if (instance->cast_shadows == RS::SHADOW_CASTING_SETTING_SHADOWS_ONLY) {
+		if (p_instance->cast_shadows == RS::SHADOW_CASTING_SETTING_SHADOWS_ONLY) {
 			idata.flags |= InstanceData::FLAG_CAST_SHADOWS_ONLY;
 		} else {
 			idata.flags &= ~InstanceData::FLAG_CAST_SHADOWS_ONLY;
 		}
 	}
 
-	if ((1 << instance->base_type) & RS::INSTANCE_GEOMETRY_MASK && instance->base_data) {
-		InstanceGeometryData *geom = static_cast<InstanceGeometryData *>(instance->base_data);
+	if ((1 << p_instance->base_type) & RS::INSTANCE_GEOMETRY_MASK && p_instance->base_data) {
+		InstanceGeometryData *geom = static_cast<InstanceGeometryData *>(p_instance->base_data);
 		ERR_FAIL_NULL(geom->geometry_instance);
 
-		geom->geometry_instance->set_cast_double_sided_shadows(instance->cast_shadows == RS::SHADOW_CASTING_SETTING_DOUBLE_SIDED);
-		geom->geometry_instance->set_rt_shadow_caster(instance->cast_shadows != RS::SHADOW_CASTING_SETTING_OFF);
-		geom->geometry_instance->set_rt_shadows_only(instance->cast_shadows == RS::SHADOW_CASTING_SETTING_SHADOWS_ONLY);
+		_geometry_instance_set_shadow_casting(geom->geometry_instance, p_instance);
 	}
 
-	_instance_queue_update(instance, false, true);
+	_instance_queue_update(p_instance, false, true);
 }
 
 void RendererSceneCull::instance_geometry_set_material_override(RID p_instance, RID p_material) {
@@ -1844,7 +1859,7 @@ void RendererSceneCull::_update_instance(Instance *p_instance) const {
 			//always dirty when added
 			idata.flags |= InstanceData::FLAG_REFLECTION_PROBE_DIRTY;
 		}
-		if (p_instance->cast_shadows != RS::SHADOW_CASTING_SETTING_OFF) {
+		if (p_instance->casts_shadow_in(RS::SHADOW_RENDERER_RASTERIZER)) {
 			idata.flags |= InstanceData::FLAG_CAST_SHADOWS;
 		}
 		if (p_instance->cast_shadows == RS::SHADOW_CASTING_SETTING_SHADOWS_ONLY) {
@@ -4181,7 +4196,7 @@ void RendererSceneCull::_update_dirty_instance(Instance *p_instance) const {
 
 			p_instance->instance_uniforms.materials_start();
 
-			if (p_instance->cast_shadows == RS::SHADOW_CASTING_SETTING_OFF) {
+			if (!p_instance->casts_shadow_in(RS::SHADOW_RENDERER_RASTERIZER)) {
 				can_cast_shadows = false;
 			}
 

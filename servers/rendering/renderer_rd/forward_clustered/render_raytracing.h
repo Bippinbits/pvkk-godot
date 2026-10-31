@@ -414,6 +414,8 @@ enum {
 	RT_GEOM_FLAG_FACING_INVERTED = 32u,
 	// The material flips the normal of back faces, like raster DO_SIDE_CHECK (cull_front and cull_disabled).
 	RT_GEOM_FLAG_SIDE_CHECK = 64u,
+	// SHADOW_CASTING_SETTING_SELF_SHADOWING receiver: its shadow rays keep the self-shadow group bit.
+	RT_GEOM_FLAG_SELF_SHADOWING = 128u,
 };
 
 // Facing state of the path traced triangles of one TLAS instance.
@@ -443,6 +445,7 @@ constexpr RTTriangleFacing rt_triangle_facing(RS::CullMode p_cull_mode, bool p_r
 enum : uint8_t {
 	RT_VIS_BIT = 0x01,
 	RT_MASK_TRANSPARENT = 0x02,
+	RT_SHADOW_GROUPS_MASK = 0xFC,
 };
 
 // Volume TLAS instance masks (matches GLSL RT_VOLUME_MASK_*). Free bits are reserved for light volumes.
@@ -817,18 +820,36 @@ struct RTViewportStateKey {
 			render_buffers(p_render_buffers), viewport(p_viewport), environment(p_environment) {}
 };
 
-/// Per-frame table compressing 20-bit render layers into the six
-/// shadow-caster group bits of the 8-bit TLAS instance mask. Two layer masks share a group iff they intersect the same
-/// subset of this frame's light shadow_caster_masks.
+// Per-frame table compressing 20-bit render layers into the six
+// shadow-caster group bits of the 8-bit TLAS instance mask. Two layer masks share a group iff they intersect the same
+// subset of this frame's light shadow_caster_masks.
+// SELF_SHADOWING casters get one extra group that only rays from SELF_SHADOWING receivers keep (RT_PARAM_SELF_SHADOW_MASK).
 struct RTShadowGroupTable {
 	LocalVector<uint32_t> caster_masks; // Distinct light shadow_caster_masks this frame.
 	LocalVector<uint32_t> group_signatures; // Per group: which caster_masks it intersects.
 	HashMap<uint32_t, uint32_t> signature_to_group;
+	uint8_t self_shadow_bit = 0; // Group bit of SELF_SHADOWING casters; 0 when none this frame.
+
+	static constexpr uint8_t group_bit(uint32_t p_group) { return uint8_t(1u << (2u + p_group)); }
 
 	void reset() {
 		caster_masks.clear();
 		group_signatures.clear();
 		signature_to_group.clear();
+		self_shadow_bit = 0;
+	}
+
+	// Must run before group_bits_for_layers, so world groups never fill the slot or merge into it.
+	void reserve_self_shadow_group() {
+		ERR_FAIL_COND(!group_signatures.is_empty());
+		self_shadow_bit = group_bit(0);
+		group_signatures.push_back(0);
+	}
+
+	uint8_t self_shadow_bits_for_layers(uint32_t p_layers) {
+		ERR_FAIL_COND_V(self_shadow_bit == 0, 0);
+		group_signatures[0] |= signature_for_layers(p_layers);
+		return self_shadow_bit;
 	}
 
 	void register_caster_mask(uint32_t p_caster_mask) {
@@ -870,18 +891,18 @@ struct RTShadowGroupTable {
 			group_signatures[5] |= sig;
 			signature_to_group.insert(sig, group);
 		}
-		return uint8_t(1u << (2u + group));
+		return group_bit(group);
 	}
 
 	uint8_t ray_mask_for_caster_mask(uint32_t p_caster_mask) const {
 		int64_t idx = caster_masks.find(p_caster_mask);
 		if (idx < 0) {
-			return 0xFC; // Unregistered (overflow): hit every group.
+			return RT_SHADOW_GROUPS_MASK; // Unregistered (overflow): hit every group.
 		}
 		uint8_t mask = 0;
 		for (uint32_t g = 0; g < group_signatures.size(); g++) {
 			if (group_signatures[g] & (1u << (uint32_t)idx)) {
-				mask |= uint8_t(1u << (2u + g));
+				mask |= group_bit(g);
 			}
 		}
 		return mask;

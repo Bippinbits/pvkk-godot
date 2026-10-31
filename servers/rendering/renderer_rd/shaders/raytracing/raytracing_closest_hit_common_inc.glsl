@@ -305,6 +305,14 @@ MaterialProperties material_properties_from_result(HitData h, MaterialResult m, 
 	return material;
 }
 
+// Shadow-caster groups p_geometry_idx receives shadows from: only SELF_SHADOWING receivers keep the SELF_SHADOWING group.
+uint rt_receiver_shadow_mask(uint p_geometry_idx) {
+	if ((geometries[p_geometry_idx].flags & FLAG_SELF_SHADOWING) != 0u) {
+		return 0xFFu;
+	}
+	return ~uint(get_rt_param(RT_PARAM_SELF_SHADOW_MASK)) & 0xFFu;
+}
+
 // ============================================================================
 // DEBUG VISUALIZATION
 // ============================================================================
@@ -326,7 +334,7 @@ bool debug_is_camera_visible(uint p_geometry_idx, vec3 p_origin, vec3 p_directio
 // White: sun visible. Yellow: only transparent casters (scaled by transmittance).
 // Red: opaque blocker the camera cannot see (raster ignores it). Blue: opaque blocker the camera sees.
 // Darker means a farther blocker. Grey: facing away from the sun. Magenta: no directional light.
-vec3 debug_directional_shadow_blocker(vec3 p_geometry_normal) {
+vec3 debug_directional_shadow_blocker(vec3 p_geometry_normal, uint p_receiver_shadow_mask) {
 	uint light_count = uint(get_rt_param(RT_PARAM_LIGHT_COUNT));
 	int sun = -1;
 	for (uint i = 0u; i < light_count; i++) {
@@ -346,7 +354,7 @@ vec3 debug_directional_shadow_blocker(vec3 p_geometry_normal) {
 	vec3 origin = offset_ray_origin(gl_WorldRayOriginEXT + gl_WorldRayDirectionEXT * gl_HitTEXT, p_geometry_normal);
 	vec3 transmittance = vec3(1.0);
 	rayQueryEXT rq;
-	rayQueryInitializeEXT(rq, tlas, gl_RayFlagsNoOpaqueEXT, 0xFCu, origin, 0.001, to_sun, 10000.0);
+	rayQueryInitializeEXT(rq, tlas, gl_RayFlagsNoOpaqueEXT, RT_SHADOW_GROUPS_MASK & p_receiver_shadow_mask, origin, 0.001, to_sun, 10000.0);
 	while (rayQueryProceedEXT(rq)) {
 		uint geometry_idx = RT_RQ_GEOMETRY_IDX(rq, false);
 		uint mat_flags = materials[geometry_idx].flags;
@@ -485,7 +493,7 @@ void debug_visualize(int vis_mode, MaterialDebugInputs dbg, float alpha) {
 			ps.radiance = color;
 		}
 	} else if (vis_mode == RT_VIS_DIRECTIONAL_SHADOW_BLOCKER) {
-		ps.radiance = debug_directional_shadow_blocker(dbg.geometry_normal);
+		ps.radiance = debug_directional_shadow_blocker(dbg.geometry_normal, rt_receiver_shadow_mask(RT_HIT_GEOMETRY_IDX));
 	} else if (vis_mode == RT_VIS_DYNAMIC_GEOMETRY) {
 		vec3 color = debug_dynamic_geometry(geometries[RT_HIT_GEOMETRY_IDX].debug_state, dbg.albedo, dbg.NdotV);
 		if ((ps.packed_bounces_flags & PEEL_RAY_FLAG) != 0u) {
@@ -619,14 +627,15 @@ vec3 shade_local_surface(HitData h, MaterialResult m, vec3 N, vec3 V, bool p_is_
 	uint light_count = uint(get_rt_param(RT_PARAM_LIGHT_COUNT));
 	vec3 hit_pos_offset = offset_ray_origin(h.hit_pos, h.geometry_normal);
 	uint layers = geometries[h.geometry_idx].layers;
+	uint shadow_mask = rt_receiver_shadow_mask(h.geometry_idx);
 	if (RT_GET_MAX_BOUNCES() == 0u) {
 		// Direct only: one ray per light group, plus the rasterizer's ambient.
 		lit += lights_evaluate_direct_lighting_per_group(hit_pos_offset, N, V, material,
-				rng_state, p_is_indirect, light_count, layers);
+				rng_state, p_is_indirect, light_count, layers, shadow_mask);
 		lit += ambient_approx(N, V, m, material);
 	} else {
 		lit += lights_evaluate_direct_lighting(hit_pos_offset, N, V, material,
-				rng_state, p_is_indirect, light_count, layers);
+				rng_state, p_is_indirect, light_count, layers, shadow_mask);
 	}
 	return lit;
 }

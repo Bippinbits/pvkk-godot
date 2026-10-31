@@ -1959,6 +1959,14 @@
 				Sets the per-instance shader uniform on the specified 3D geometry instance. Equivalent to [method GeometryInstance3D.set_instance_shader_parameter].
 			</description>
 		</method>
+		<method name="instance_geometry_set_shadow_renderers">
+			<return type="void" />
+			<param index="0" name="instance" type="RID" />
+			<param index="1" name="renderers" type="int" enum="RenderingServer.ShadowRenderer" is_bitfield="true" />
+			<description>
+				Sets the renderers that draw this geometry instance's shadow while its cast shadows setting is not [constant SHADOW_CASTING_SETTING_OFF]. Equivalent to [member GeometryInstance3D.shadow_renderers].
+			</description>
+		</method>
 		<method name="instance_geometry_set_transparency">
 			<return type="void" />
 			<param index="0" name="instance" type="RID" />
@@ -5899,6 +5907,9 @@
 		</constant>
 		<constant name="SHADOW_CASTING_SETTING_SHADOWS_ONLY" value="3" enum="ShadowCastingSetting">
 			Only render the shadows from the object. The object itself will not be drawn.
+		</constant>
+		<constant name="SHADOW_CASTING_SETTING_SELF_SHADOWING" value="4" enum="ShadowCastingSetting">
+			The path tracer casts the object's shadows only onto objects that also use [constant SHADOW_CASTING_SETTING_SELF_SHADOWING]. The object still receives shadows from everything, and still appears in reflections and indirect lighting. The rasterizer casts no shadows from it, like [constant SHADOW_CASTING_SETTING_OFF].
 		</constant>
 		<constant name="VISIBILITY_RANGE_FADE_DISABLED" value="0" enum="VisibilityRangeFadeMode" keywords="LOD_FADE_DISABLED">
 			Disable visibility range fading for the given instance.

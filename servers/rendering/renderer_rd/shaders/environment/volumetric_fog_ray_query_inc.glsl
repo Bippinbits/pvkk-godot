@@ -25,8 +25,8 @@ layout(set = 1, binding = 4, std140) uniform FogRayQueryParams {
 	mat4 view_to_world;
 	uint frame_index;
 	uint trace_shadows;
+	uint shadow_mask; // Shadow-caster groups of the unified TLAS mask, without the SELF_SHADOWING group.
 	uint pad1;
-	uint pad2;
 }
 fog_ray_query;
 
@@ -38,8 +38,6 @@ layout(constant_id = 0) const uint FOG_RQ_POSITIONAL_SHADOW_RAYS = 2u;
 
 // Must match RTFogShadows::MAX_POSITIONAL_SHADOW_RAYS.
 #define FOG_RQ_MAX_POSITIONAL_SHADOW_RAYS 4
-// Every shadow-caster group of the unified TLAS mask (bits 2-7).
-#define FOG_RQ_SHADOW_MASK 0xFCu
 #define FOG_RQ_DIRECTIONAL_DISTANCE 10000.0
 #define FOG_RQ_ALPHA_LOD 2.0
 
@@ -122,7 +120,7 @@ vec3 fog_shadows_trace(vec3 p_view_pos, FogShadowSlot p_slot, inout uint r_rng) 
 	vec3 direction = normalize(mat3(fog_ray_query.view_to_world) * p_slot.to_light);
 	vec3 visibility = vec3(1.0);
 	if (fog_ray_query.trace_shadows != 0u) {
-		visibility = ray_query_shadow_transmittance(origin, direction, 0.001, p_slot.distance - 0.001, FOG_RQ_SHADOW_MASK, FOG_RQ_ALPHA_LOD, r_rng);
+		visibility = ray_query_shadow_transmittance(origin, direction, 0.001, p_slot.distance - 0.001, fog_ray_query.shadow_mask, FOG_RQ_ALPHA_LOD, r_rng);
 	}
 	return p_slot.light * visibility * (p_slot.weight_sum / p_slot.weight);
 }

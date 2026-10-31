@@ -59,7 +59,8 @@ private:
 		float view_to_world[16];
 		uint32_t frame_index;
 		uint32_t trace_shadows;
-		uint32_t pad[2];
+		uint32_t shadow_mask; // TLAS shadow-caster groups, without the SELF_SHADOWING group.
+		uint32_t pad;
 	};
 
 	VolumetricFogProcessShaderRD shader;

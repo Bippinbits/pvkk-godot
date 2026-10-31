@@ -1537,6 +1537,7 @@ public:
 		SHADOW_CASTING_SETTING_ON,
 		SHADOW_CASTING_SETTING_DOUBLE_SIDED,
 		SHADOW_CASTING_SETTING_SHADOWS_ONLY,
+		SHADOW_CASTING_SETTING_SELF_SHADOWING,
 	};
 
 	enum VisibilityRangeFadeMode {
@@ -1547,6 +1548,8 @@ public:
 
 	virtual void instance_geometry_set_flag(RID p_instance, InstanceFlags p_flags, bool p_enabled) = 0;
 	virtual void instance_geometry_set_cast_shadows_setting(RID p_instance, ShadowCastingSetting p_shadow_casting_setting) = 0;
+	// Renderers that draw this instance's shadow while its cast shadows setting is not off.
+	virtual void instance_geometry_set_shadow_renderers(RID p_instance, BitField<ShadowRenderer> p_renderers) = 0;
 	virtual void instance_geometry_set_material_override(RID p_instance, RID p_material) = 0;
 	virtual void instance_geometry_set_material_overlay(RID p_instance, RID p_material) = 0;
 	virtual void instance_geometry_set_visibility_range(RID p_instance, float p_min, float p_max, float p_min_margin, float p_max_margin, VisibilityRangeFadeMode p_fade_mode) = 0;

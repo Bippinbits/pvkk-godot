@@ -97,6 +97,10 @@ void RenderGeometryInstanceBase::set_rt_shadows_only(bool p_shadows_only) {
 	rt_shadows_only = p_shadows_only;
 }
 
+void RenderGeometryInstanceBase::set_rt_self_shadowing(bool p_self_shadowing) {
+	rt_self_shadowing = p_self_shadowing;
+}
+
 void RenderGeometryInstanceBase::set_rt_shadow_caster(bool p_casts) {
 	rt_shadow_caster = p_casts;
 }

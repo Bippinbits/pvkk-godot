@@ -95,7 +95,8 @@ public:
 		SHADOW_CASTING_SETTING_OFF = RS::SHADOW_CASTING_SETTING_OFF,
 		SHADOW_CASTING_SETTING_ON = RS::SHADOW_CASTING_SETTING_ON,
 		SHADOW_CASTING_SETTING_DOUBLE_SIDED = RS::SHADOW_CASTING_SETTING_DOUBLE_SIDED,
-		SHADOW_CASTING_SETTING_SHADOWS_ONLY = RS::SHADOW_CASTING_SETTING_SHADOWS_ONLY
+		SHADOW_CASTING_SETTING_SHADOWS_ONLY = RS::SHADOW_CASTING_SETTING_SHADOWS_ONLY,
+		SHADOW_CASTING_SETTING_SELF_SHADOWING = RS::SHADOW_CASTING_SETTING_SELF_SHADOWING
 	};
 
 	enum GIMode {
@@ -120,6 +121,7 @@ public:
 
 private:
 	ShadowCastingSetting shadow_casting_setting = SHADOW_CASTING_SETTING_ON;
+	BitField<RS::ShadowRenderer> shadow_renderers = RS::SHADOW_RENDERER_ALL;
 	Ref<Material> material_override;
 	Ref<Material> material_overlay;
 
@@ -155,6 +157,9 @@ protected:
 public:
 	void set_cast_shadows_setting(ShadowCastingSetting p_shadow_casting_setting);
 	ShadowCastingSetting get_cast_shadows_setting() const;
+
+	void set_shadow_renderers(BitField<RS::ShadowRenderer> p_renderers);
+	BitField<RS::ShadowRenderer> get_shadow_renderers() const;
 
 	void set_transparency(float p_transparency);
 	float get_transparency() const;

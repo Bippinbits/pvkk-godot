@@ -78,6 +78,7 @@ public:
 	virtual void set_rt_procedural_bounds(const Vector<float> &p_aabb_data, bool p_expose_bounds) {}
 	virtual void set_rt_shadow_caster(bool p_casts) {}
 	virtual void set_rt_shadows_only(bool p_shadows_only) {}
+	virtual void set_rt_self_shadowing(bool p_self_shadowing) {}
 };
 
 // Base implementation of RenderGeometryInstance shared by internal renderers.
@@ -102,8 +103,9 @@ public:
 	bool use_aabb_center = true;
 
 	uint32_t layer_mask = 1;
-	bool rt_shadow_caster = true; // cast_shadows != SHADOW_CASTING_SETTING_OFF.
+	bool rt_shadow_caster = true; // RendererSceneCull::is_shadow_cast_by(..., SHADOW_RENDERER_PATH_TRACER).
 	bool rt_shadows_only = false; // cast_shadows == SHADOW_CASTING_SETTING_SHADOWS_ONLY.
+	bool rt_self_shadowing = false; // cast_shadows == SHADOW_CASTING_SETTING_SELF_SHADOWING.
 
 	bool fade_near = false;
 	float fade_near_begin = 0;
@@ -156,6 +158,7 @@ public:
 	virtual void set_cast_double_sided_shadows(bool p_enable) override;
 	virtual void set_rt_shadow_caster(bool p_casts) override;
 	virtual void set_rt_shadows_only(bool p_shadows_only) override;
+	virtual void set_rt_self_shadowing(bool p_self_shadowing) override;
 
 	virtual void reset_motion_vectors() override;
 

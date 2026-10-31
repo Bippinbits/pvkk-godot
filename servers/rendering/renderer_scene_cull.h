@@ -52,6 +52,14 @@ class RendererSceneCull : public RenderingMethod {
 public:
 	RendererSceneRender *scene_render = nullptr;
 
+	// Geometry counterpart of RendererLightStorage::is_shadow_drawn_by().
+	_FORCE_INLINE_ static bool is_shadow_cast_by(RS::ShadowCastingSetting p_setting, BitField<RS::ShadowRenderer> p_renderers, RS::ShadowRenderer p_renderer) {
+		if (p_setting == RS::SHADOW_CASTING_SETTING_OFF || (p_setting == RS::SHADOW_CASTING_SETTING_SELF_SHADOWING && p_renderer != RS::SHADOW_RENDERER_PATH_TRACER)) {
+			return false;
+		}
+		return p_renderers.has_flag(p_renderer);
+	}
+
 	enum {
 		SDFGI_MAX_CASCADES = 8,
 		SDFGI_MAX_REGIONS_PER_CASCADE = 3,
@@ -419,6 +427,9 @@ public:
 		Vector<RID> materials;
 
 		RS::ShadowCastingSetting cast_shadows;
+		BitField<RS::ShadowRenderer> shadow_renderers = RS::SHADOW_RENDERER_ALL;
+
+		bool casts_shadow_in(RS::ShadowRenderer p_renderer) const { return is_shadow_cast_by(cast_shadows, shadow_renderers, p_renderer); }
 
 		uint32_t layer_mask;
 		// Fit in 32 bits.
@@ -1074,6 +1085,8 @@ public:
 
 	virtual void instance_geometry_set_flag(RID p_instance, RS::InstanceFlags p_flags, bool p_enabled);
 	virtual void instance_geometry_set_cast_shadows_setting(RID p_instance, RS::ShadowCastingSetting p_shadow_casting_setting);
+	virtual void instance_geometry_set_shadow_renderers(RID p_instance, BitField<RS::ShadowRenderer> p_renderers);
+	void _instance_update_shadow_casting(Instance *p_instance);
 	virtual void instance_geometry_set_material_override(RID p_instance, RID p_material);
 	virtual void instance_geometry_set_material_overlay(RID p_instance, RID p_material);
 
