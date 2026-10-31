@@ -181,6 +181,10 @@ private:
 
 	mutable RID_Owner<Mesh, true> mesh_owner;
 
+	uint64_t rt_invalidation_version = 0;
+	// Creation and updates share one monotonic counter, so a new surface never reuses a value an older surface held.
+	uint32_t _next_rt_invalidation_counter() { return uint32_t(++rt_invalidation_version); }
+
 	/* Mesh Instance API */
 
 	struct MeshInstance {
@@ -588,6 +592,9 @@ public:
 		Mesh::Surface *s = reinterpret_cast<Mesh::Surface *>(p_surface);
 		return s->rt_invalidation_counter;
 	}
+
+	// Advances whenever any mesh surface's rt_invalidation_counter is assigned.
+	uint64_t mesh_get_rt_invalidation_version() const { return rt_invalidation_version; }
 
 	_FORCE_INLINE_ void mesh_surface_get_vertex_arrays_and_format(void *p_surface, uint64_t p_input_mask, bool p_input_motion_vectors, bool p_point_size_emulated, RID &r_vertex_array_rd, RD::VertexFormatID &r_vertex_format) {
 		Mesh::Surface *s = reinterpret_cast<Mesh::Surface *>(p_surface);

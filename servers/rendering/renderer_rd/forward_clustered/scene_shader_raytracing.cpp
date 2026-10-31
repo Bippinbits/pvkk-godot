@@ -387,6 +387,7 @@ void SceneShaderRaytracing::invalidate_pipeline_bundles() {
 	}
 	pipeline_bundles.clear();
 	variant_compile_contexts.clear();
+	ready_version++;
 }
 
 // Async bundle rebuild task (worker: SPIR-V + pipeline; main thread: SBT + swap). Single-lane globally.
@@ -538,6 +539,7 @@ uint32_t SceneShaderRaytracing::_register_slot(uint32_t /*p_shader_id*/, RID p_m
 		uint32_t failed_index = (uint32_t)hit_group_slots.size();
 		hit_group_slots.push_back(failed_slot);
 		source_hash_to_slot.insert(hash, failed_index);
+		ready_version++;
 		for (KeyValue<uint32_t, PipelineBundle> &kv : pipeline_bundles) {
 			_bundle_resize_for_slots(kv.value);
 			kv.value.per_hg_states[failed_index] = HGState::Failed;
@@ -559,6 +561,7 @@ uint32_t SceneShaderRaytracing::_register_slot(uint32_t /*p_shader_id*/, RID p_m
 	uint32_t slot_index = (uint32_t)hit_group_slots.size();
 	hit_group_slots.push_back(slot);
 	source_hash_to_slot.insert(hash, slot_index);
+	ready_version++;
 
 	for (KeyValue<uint32_t, PipelineBundle> &kv : pipeline_bundles) {
 		PipelineBundle &bundle = kv.value;
@@ -1183,6 +1186,7 @@ bool SceneShaderRaytracing::_build_initial_bundle(uint32_t p_rt_flags, PipelineB
 	r_bundle.live_hg_count = 1;
 	r_bundle.live_ready_mask.clear();
 	r_bundle.live_ready_mask.push_back(true);
+	ready_version++;
 	return true;
 }
 
@@ -1610,6 +1614,7 @@ void SceneShaderRaytracing::_finalize_pipeline_build(PipelineBuildTask *p_task) 
 	bundle.hit_sbt = new_sbt;
 	bundle.live_hg_count = n;
 	bundle.live_ready_mask = p_task->new_ready_mask;
+	ready_version++;
 }
 
 // Single-lane rebuild dispatcher. No queue: the next dirty bundle IS the target, re-read fresh

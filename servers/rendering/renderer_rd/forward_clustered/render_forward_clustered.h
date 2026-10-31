@@ -600,8 +600,24 @@ protected:
 
 	class GeometryInstanceForwardClustered : public RenderGeometryInstanceBase {
 	public:
-		/// Heap-allocated procedural RT state. Only created when the instance is procedural.
+		enum TransformStatus {
+			NONE,
+			MOVED,
+			TELEPORTED,
+		};
+
+		// RT-hot fields, read together per instance every frame.
+		// Heap-allocated procedural RT state. Only created when the instance is procedural.
 		RTProceduralState *rt_procedural = nullptr;
+		// Dense index unique among live geometry instances; recycled after geometry_instance_free.
+		uint32_t rt_index = UINT32_MAX;
+		// Number of nodes in surface_caches.
+		uint32_t rt_surface_count = 0;
+		// Renewed whenever surface_caches or the procedural state change; never repeats across instances or over time.
+		uint64_t rt_surfaces_version = 0;
+		GeometryInstanceSurfaceDataCache *surface_caches = nullptr;
+		TransformStatus transform_status = TransformStatus::MOVED;
+		Transform3D prev_transform;
 
 		// lightmap
 		RID lightmap_instance;
@@ -623,14 +639,7 @@ protected:
 		//used during setup
 		uint64_t prev_transform_change_frame = 0xFFFFFFFF;
 		uint64_t last_aged_frame = 0;
-		enum TransformStatus {
-			NONE,
-			MOVED,
-			TELEPORTED,
-		} transform_status = TransformStatus::MOVED;
-		Transform3D prev_transform;
 		RID voxel_gi_instances[MAX_VOXEL_GI_INSTANCESS_PER_INSTANCE];
-		GeometryInstanceSurfaceDataCache *surface_caches = nullptr;
 		SelfList<GeometryInstanceForwardClustered> dirty_list_element;
 
 		GeometryInstanceForwardClustered() :
@@ -645,6 +654,7 @@ protected:
 
 		RTProceduralState *_ensure_procedural_state();
 		void _free_procedural_state();
+		void _renew_rt_surfaces_version();
 
 		virtual void set_rt_procedural(bool p_procedural, const AABB &p_aabb) override;
 		virtual void set_rt_procedural_bounds(const Vector<float> &p_aabb_data, bool p_expose_bounds) override;
@@ -673,6 +683,9 @@ protected:
 
 	PagedAllocator<GeometryInstanceForwardClustered> geometry_instance_alloc;
 	PagedAllocator<GeometryInstanceSurfaceDataCache> geometry_instance_surface_alloc;
+	LocalVector<uint32_t> geometry_instance_rt_index_free_list;
+	uint32_t geometry_instance_rt_index_count = 0;
+	uint64_t geometry_instance_rt_surfaces_version = 0;
 	PagedAllocator<GeometryInstanceLightmapSH> geometry_instance_lightmap_sh;
 
 	struct SurfacePipelineData {

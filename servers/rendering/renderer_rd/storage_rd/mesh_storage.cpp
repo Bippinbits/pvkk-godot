@@ -259,13 +259,6 @@ void MeshStorage::mesh_set_blend_shape_count(RID p_mesh, int p_blend_shape_count
 	mesh->blend_shape_count = p_blend_shape_count;
 }
 
-/// Returns stride
-// Creation and updates share one monotonic counter, so a new surface never reuses a value an older surface held.
-static uint32_t _next_rt_invalidation_counter() {
-	static uint32_t next = 1;
-	return next++;
-}
-
 void MeshStorage::mesh_add_surface(RID p_mesh, const RS::SurfaceData &p_surface) {
 	Mesh *mesh = mesh_owner.get_or_null(p_mesh);
 	ERR_FAIL_NULL(mesh);
@@ -1667,10 +1660,8 @@ void MeshStorage::_multimesh_get_motion_vectors_offsets(RID p_multimesh, uint32_
 	MultiMesh *multimesh = multimesh_owner.get_or_null(p_multimesh);
 	ERR_FAIL_NULL(multimesh);
 	r_current_offset = multimesh->motion_vectors_current_offset;
-	if (!_multimesh_uses_motion_vectors(multimesh)) {
-		multimesh->motion_vectors_previous_offset = multimesh->motion_vectors_current_offset;
-	}
-	r_prev_offset = multimesh->motion_vectors_previous_offset;
+	// Read-only, so render planning can call it from worker threads; the stored offset is reassigned before its next use.
+	r_prev_offset = _multimesh_uses_motion_vectors(multimesh) ? multimesh->motion_vectors_previous_offset : multimesh->motion_vectors_current_offset;
 }
 
 bool MeshStorage::_multimesh_uses_motion_vectors_offsets(RID p_multimesh) {

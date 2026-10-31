@@ -4177,6 +4177,7 @@ void RenderForwardClustered::GeometryInstanceForwardClustered::_mark_dirty() {
 	}
 
 	surface_caches = nullptr;
+	rt_surface_count = 0;
 
 	RenderForwardClustered::get_singleton()->geometry_instance_dirty_list.add(&dirty_list_element);
 }
@@ -4319,6 +4320,7 @@ void RenderForwardClustered::_geometry_instance_add_surface_with_material(Geomet
 
 	sdcache->next = ginstance->surface_caches;
 	ginstance->surface_caches = sdcache;
+	ginstance->rt_surface_count++;
 
 	//sortkey
 
@@ -4573,6 +4575,7 @@ void RenderForwardClustered::_geometry_instance_update(RenderGeometryInstance *p
 		ginstance->data->dirty_dependencies = false;
 	}
 
+	ginstance->_renew_rt_surfaces_version();
 	ginstance->dirty_list_element.remove_from_list();
 }
 
@@ -4976,6 +4979,14 @@ RenderGeometryInstance *RenderForwardClustered::geometry_instance_create(RID p_b
 	ginstance->data->dependency_tracker.changed_callback = _geometry_instance_dependency_changed;
 	ginstance->data->dependency_tracker.deleted_callback = _geometry_instance_dependency_deleted;
 
+	if (geometry_instance_rt_index_free_list.is_empty()) {
+		ginstance->rt_index = geometry_instance_rt_index_count++;
+	} else {
+		ginstance->rt_index = geometry_instance_rt_index_free_list[geometry_instance_rt_index_free_list.size() - 1];
+		geometry_instance_rt_index_free_list.resize(geometry_instance_rt_index_free_list.size() - 1);
+	}
+	ginstance->_renew_rt_surfaces_version();
+
 	ginstance->_mark_dirty();
 
 	return ginstance;
@@ -5034,9 +5045,14 @@ void RenderForwardClustered::GeometryInstanceForwardClustered::set_lightmap_capt
 	_mark_dirty();
 }
 
+void RenderForwardClustered::GeometryInstanceForwardClustered::_renew_rt_surfaces_version() {
+	rt_surfaces_version = ++RenderForwardClustered::get_singleton()->geometry_instance_rt_surfaces_version;
+}
+
 RTProceduralState *RenderForwardClustered::GeometryInstanceForwardClustered::_ensure_procedural_state() {
 	if (!rt_procedural) {
 		rt_procedural = memnew(RTProceduralState);
+		_renew_rt_surfaces_version();
 	}
 	return rt_procedural;
 }
@@ -5046,6 +5062,7 @@ void RenderForwardClustered::GeometryInstanceForwardClustered::set_rt_procedural
 		RTProceduralState *s = _ensure_procedural_state();
 		if (s->culling_aabb != p_aabb) {
 			s->dirty = true;
+			_renew_rt_surfaces_version();
 		}
 		s->culling_aabb = p_aabb;
 	} else if (rt_procedural) {
@@ -5057,6 +5074,7 @@ void RenderForwardClustered::GeometryInstanceForwardClustered::set_rt_procedural
 	RTProceduralState *s = _ensure_procedural_state();
 	if (s->aabb_data != p_aabb_data || s->expose_bounds != p_expose_bounds) {
 		s->dirty = true;
+		_renew_rt_surfaces_version();
 	}
 	s->aabb_data = p_aabb_data;
 	s->expose_bounds = p_expose_bounds;
@@ -5074,6 +5092,7 @@ void RenderForwardClustered::GeometryInstanceForwardClustered::_free_procedural_
 	}
 	memdelete(rt_procedural);
 	rt_procedural = nullptr;
+	_renew_rt_surfaces_version();
 }
 
 void RenderForwardClustered::geometry_instance_free(RenderGeometryInstance *p_geometry_instance) {
@@ -5090,6 +5109,7 @@ void RenderForwardClustered::geometry_instance_free(RenderGeometryInstance *p_ge
 		surf = next;
 	}
 	memdelete(ginstance->data);
+	geometry_instance_rt_index_free_list.push_back(ginstance->rt_index);
 	geometry_instance_alloc.free(ginstance);
 }
 

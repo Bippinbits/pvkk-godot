@@ -41,6 +41,7 @@
 #include "servers/rendering/renderer_rd/forward_clustered/raytracing_decal_selection.h"
 #include "servers/rendering/renderer_rd/forward_clustered/render_raytracing_capture.h"
 #include "servers/rendering/renderer_rd/forward_clustered/render_raytracing_debug.h"
+#include "servers/rendering/renderer_rd/forward_clustered/render_raytracing_plan.h"
 #include "servers/rendering/renderer_rd/forward_clustered/render_raytracing_scheduler.h"
 #include "servers/rendering/renderer_rd/forward_clustered/render_raytracing_validation.h"
 #include "servers/rendering/renderer_rd/shaders/raytracing/multimesh_merge.glsl.gen.h"
@@ -63,6 +64,12 @@
 
 class RenderDataRD;
 class RenderSceneBuffersRD;
+struct RTViewFrustum;
+
+namespace RendererRD {
+class MaterialStorage;
+class MeshStorage;
+} // namespace RendererRD
 
 namespace RendererSceneRenderImplementation {
 
@@ -652,23 +659,8 @@ struct RTMeshGroupEntry {
 	uint64_t last_used = 0; // Use stamp; picks the variant to drop when a mesh has too many.
 };
 
-/// TLAS instance state that surfaces must share to be merged into one multi-geometry BLAS.
-struct RTSurfaceGroupKey {
-	RS::CullMode cull_mode = RS::CULL_MODE_BACK; ///< Picks the TLAS instance facing bits, see rt_triangle_facing().
-	uint32_t sbt_offset = 0;
-	uint8_t tlas_mask = 0;
-	RenderingBillboard::Settings billboard; ///< Camera-dependent surfaces get their own TLAS transform.
-	bool opaque = true; ///< No any-hit. Not part of the key: opacity is a per-geometry flag in merged BLASes.
-	bool groupable = false; ///< False keeps the surface on the single-surface path.
-
-	bool operator==(const RTSurfaceGroupKey &p_other) const {
-		return groupable && p_other.groupable && cull_mode == p_other.cull_mode &&
-				sbt_offset == p_other.sbt_offset && tlas_mask == p_other.tlas_mask && billboard == p_other.billboard;
-	}
-};
-
-/// For each surface, writes the index of the first surface with an equal key, or its own index when
-/// it has no equal predecessor or is not groupable. Quadratic, meant for the surfaces of one instance.
+// For each surface, writes the index of the first surface with an equal key, or its own index when
+// it has no equal predecessor or is not groupable. Quadratic, meant for the surfaces of one instance.
 void rt_assign_surface_groups(Span<RTSurfaceGroupKey> p_keys, LocalVector<uint32_t> &r_leaders);
 
 // Inputs for a surface backed by a per-frame-deformed vertex buffer.
@@ -704,17 +696,28 @@ struct RTMaterialData {
 	RID emission_texture_rd;
 };
 
-/// A traced surface of one mesh instance, gathered before grouping.
+// A traced surface of one mesh instance while it is planned, before grouping.
 struct RTSurfaceRecord {
-	const void *surf = nullptr; ///< RenderForwardClustered::GeometryInstanceSurfaceDataCache.
-	void *mesh_surface = nullptr;
-	RTMaterialData *mat_data = nullptr;
-	RTDeformedGeometrySource deformed; ///< Per-frame geometry (vertex capture or mesh instance); see is_deformed().
-	RTSurfaceGroupKey key;
-	uint32_t surface_index = 0;
-	uint32_t surface_counter = 0;
-	uint32_t material_flags = 0; ///< OR-ed into the material entry.
-	bool transparent = false;
+	RTPlanSurface surface; // Written to the plan once grouped.
+	RTSurfaceGroupKey key; // Decides the surface's group.
+};
+
+// Per-instance scratch of the TLAS plan, kept to avoid per-frame allocations. One per concurrent planner.
+struct RTPlanScratch {
+	LocalVector<RTSurfaceRecord> records; // Traced surfaces of the instance being planned.
+	LocalVector<RTSurfaceGroupKey> group_keys; // Key of each record, in record order.
+	LocalVector<uint32_t> group_leaders; // Per record: the first record of its group.
+	LocalVector<uint32_t> group_cursors; // Per leader: its group's next member position.
+	LocalVector<uint32_t> group_order; // Records in plan order.
+	LocalVector<Pair<const void *, uint64_t>> global_uniform_stamps; // Per shader: its global_uniforms_stamp of global_uniform_stamps_frame.
+	uint64_t global_uniform_stamps_frame = UINT64_MAX; // Frame global_uniform_stamps belongs to.
+};
+
+// Scratch of planning a view's instances on the worker pool, then serially for the deferred ones.
+struct RTPlanWorkspace {
+	RTPlanScratch serial; // Used by the serial pass.
+	LocalVector<RTPlanScratch> chunks; // One per worker chunk.
+	LocalVector<uint8_t> deferred; // Per instance: whether a worker deferred its plan to the serial pass.
 };
 
 struct RTCacheEntry {
@@ -780,7 +783,24 @@ struct RTCaptureRequest {
 	bool committed = false; // Set by build_tlas once the recorded capture replaced the surface's kept capture.
 };
 
-/// Per-instance records the merge bake reads: a MultiMesh or a 3D particle system.
+// Inputs of the plan passes of one view, read once per frame. Plans read engine state only through these and
+// RenderRaytracing's read-only lookups, and write only their own arena records, so they can run on worker threads.
+struct RTPlanContext {
+	RendererRD::MeshStorage *mesh_storage = nullptr; // Read only.
+	RendererRD::MaterialStorage *material_storage = nullptr; // Read only.
+	const SceneShaderRaytracing *rt_shader = nullptr;
+	const LocalVector<RTCaptureRequest> *captures = nullptr; // The view's capture requests; null while they are prepared.
+	RTPlanVersions versions; // Global versions of the frame.
+	RTVertexCapture::Stamps view_stamps; // Per-view capture inputs: frame, camera, mode and instance uniform versions.
+	uint32_t rt_flags = 0; // SceneShaderRaytracing::RT_FLAG_* of the pipeline the view is traced with.
+	uint32_t camera_visible_layers = 0xFFFFFFFFu; // Camera lane input of the instance masks.
+	RTVertexCapture::Mode capture_mode = RTVertexCapture::MODE_DISABLED;
+	const RTViewFrustum *frustum = nullptr; // Camera frustum of the view while its captures are prepared, else null.
+	// Plans may update caches at their isolated points: material misses and first shader dependency analysis.
+	bool allow_mutation = false;
+};
+
+// Per-instance records the merge bake reads: a MultiMesh or a 3D particle system.
 struct RTInstanceSource {
 	RID base; // MultiMesh or Particles RID.
 	RID gpu_buffer; // Records: row-major 3x4 transform, then optional color and custom data.
@@ -874,9 +894,22 @@ struct RTMMSurfaceKey {
 	}
 };
 
+// Where an incremental prune of a HashMap<RTMMSurfaceKey, RID> resumes next frame.
+struct RTHandleMapCursor {
+	RTMMSurfaceKey key; // Next entry to check; the sweep restarts from the first entry when it is gone.
+	bool valid = false; // False when the next check starts from the first entry.
+};
+
+// Incremental sweep over a RID_Owner: a snapshot of its RIDs, walked a bounded slice per frame.
+struct RTPoolSweep {
+	LocalVector<RID> pending; // RIDs owned when the snapshot was taken; freed ones fail get_or_null.
+	uint32_t cursor = 0; // Next index into pending.
+};
+
 struct RTMaterialCacheEntry {
 	RTMaterialData *ptr = nullptr;
 	uint32_t last_used_frame = 0;
+	uint32_t slot_checked_frame = 0; // Frame the hit group slot of a custom shader was last found current.
 	uint16_t cached_counter = 0;
 	uint32_t cached_rid_version = 0;
 };
@@ -1034,6 +1067,7 @@ struct RTViewportState {
 
 	// Camera-dependent merged MultiMesh surfaces, baked against this viewport's camera.
 	HashMap<RTMMSurfaceKey, RID> billboard_mm_entries; // Handles into merged_mm_pool.
+	RTHandleMapCursor billboard_mm_prune;
 	LocalVector<RTMergeBillboardParams> merge_billboards; // This frame's entries, indexed by the merge push constant.
 	RID merge_billboard_buffer;
 	uint32_t merge_billboard_buffer_capacity = 0;
@@ -1042,6 +1076,15 @@ struct RTViewportState {
 	// meshes, into merged_mm_pool for MultiMesh and particle surfaces.
 	HashMap<RTMMSurfaceKey, RID> capture_entries;
 	HashMap<RTMMSurfaceKey, RID> captured_mm_entries;
+	RTHandleMapCursor capture_prune;
+	RTHandleMapCursor captured_mm_prune;
+
+	// Instance plans: plan_arenas[plan_current] is this frame's, the other last frame's.
+	RTPlanArena plan_arenas[2];
+	uint32_t plan_current = 0;
+	uint64_t plan_frame = UINT64_MAX; // Frame plan_arenas[plan_current] was opened in.
+	uint32_t plan_rt_flags = 0; // RTPlanContext::rt_flags the plans were made with.
+	LocalVector<uint32_t> plan_lookup; // By instance rt_index: its record in last frame's arena, see rt_plan_lookup().
 
 	RID light_buffer;
 	RID params_buffer;
@@ -1114,6 +1157,8 @@ class RenderRaytracing {
 
 	RID_Owner<RTDeformedCacheEntry> deformed_pool;
 	RID_Owner<RTMergedMMEntry> merged_mm_pool;
+	RTPoolSweep deformed_sweep; // TTL eviction of deformed_pool.
+	RTPoolSweep merged_mm_sweep; // TTL eviction of merged_mm_pool.
 
 	RTDeformedCacheEntry *_access_deformed_slot(RID &r_handle);
 	RTDeformedCacheEntry *_access_capture_entry(RID &r_handle);
@@ -1140,6 +1185,8 @@ class RenderRaytracing {
 	uint32_t capture_code_version_counter = 0; // Source of RTVertexCapture::ShaderTraits::code_version.
 	HashMap<RTMMSurfaceKey, RID> shared_capture_entries; // Handles into deformed_pool.
 	HashMap<RTMMSurfaceKey, RID> shared_captured_mm_entries; // Handles into merged_mm_pool.
+	RTHandleMapCursor shared_capture_prune;
+	RTHandleMapCursor shared_captured_mm_prune;
 
 	// Capture state of one surface for the current view.
 	struct CaptureBinding {
@@ -1164,12 +1211,16 @@ class RenderRaytracing {
 	void _bind_capture(const void *p_surf, const CaptureBinding &p_binding);
 	CaptureBinding *_capture_binding(const void *p_surf);
 	void _update_capture_mode(RTVertexCapture::Mode p_mode);
-	static RTVertexCapture::Stamps _capture_inputs(const void *p_surface_cache, uint32_t p_dependencies, const RTVertexCapture::Stamps &p_view, const RTVertexCapture::Layout &p_layout, uint64_t p_instances);
+	// Reads only, so plans call it on workers; r_scratch memoizes the per-shader global uniform stamp.
+	static RTVertexCapture::Stamps _capture_inputs(RTPlanScratch &r_scratch, const void *p_surface_cache, uint32_t p_dependencies, const RTVertexCapture::Stamps &p_view, const RTVertexCapture::Stamps &p_kept, const RTVertexCapture::Layout &p_layout, uint64_t p_instances);
 	RTCaptureState *_capture_state(const CaptureBinding &p_binding);
+	const RTCaptureState *_peek_capture_state(const CaptureBinding &p_binding) const;
 	void _reset_capture_entry(const CaptureBinding &p_binding);
 	void _free_capture_entry_map(HashMap<RTMMSurfaceKey, RID> &r_map, bool p_merged);
+	RID _surface_material_rid(const void *p_surf) const;
 	RTMaterialData *_surface_material(const void *p_surf);
-	bool _surface_hit_group_ready(const void *p_surf, uint32_t p_rt_flags);
+	// True when _commit_capture would return a binding for p_surf, without committing.
+	bool _peek_captured(const void *p_surf, const LocalVector<RTCaptureRequest> &p_captures) const;
 	CaptureBinding *_commit_capture(const void *p_surf, LocalVector<RTCaptureRequest> &r_captures, RTCaptureRequest *&r_recorded);
 	bool _resolve_captured_source(const void *p_surf, LocalVector<RTCaptureRequest> &r_captures, RTDeformedGeometrySource &r_source);
 	bool _resolve_captured_mm(const void *p_surf, LocalVector<RTCaptureRequest> &r_captures, RID &r_entry, RTSchedulerAction &r_action, RTMergeBakeInputs &r_bake);
@@ -1202,6 +1253,7 @@ class RenderRaytracing {
 	// Camera-independent merged particle surfaces, keyed by (particles, 0, surface ordinal).
 	// Particles RIDs come from another allocator than MultiMesh ones, so they can't share mm_handles.
 	HashMap<RTMMSurfaceKey, RID> particle_mm_entries; // Handles into merged_mm_pool.
+	RTHandleMapCursor particle_mm_prune;
 
 	// Multi-geometry BLASes of merged mesh surfaces. Not evicted by age: the RT instance set follows the
 	// camera, so aging out would rebuild large BLASes when turning around.
@@ -1209,16 +1261,32 @@ class RenderRaytracing {
 	uint64_t mesh_group_use_counter = 0;
 	uint64_t mesh_group_build_first_use = 0; // mesh_group_use_counter when the current build_tlas started; newer variants are already in its TLAS.
 
-	// Per-instance scratch for build_tlas, kept to avoid per-frame allocations.
-	LocalVector<RTSurfaceRecord> surface_records;
-	LocalVector<RTSurfaceGroupKey> surface_group_keys;
-	LocalVector<uint32_t> surface_group_leaders;
-	LocalVector<uint32_t> surface_group_members;
+	RTPlanWorkspace plan_workspace; // TLAS planning of the view being built.
+
+	// Instance plans of the views, see render_raytracing_plan.h. Plans run before their apply pass, which keeps every
+	// side effect; the context and arena of a view are opened once per frame.
+	LocalVector<uint32_t> plan_capacities; // Scratch of _open_plan_arena.
+	RTPlanContext _make_plan_context(const RenderDataRD *p_render_data, uint32_t p_rt_flags, const LocalVector<RTCaptureRequest> *p_captures) const;
+	RTPlanArena &_open_plan_arena(RTViewportState *p_state, const RenderDataRD *p_render_data, const RTPlanContext &p_ctx);
+	// Capture part of record p_index for p_inst (a RenderForwardClustered::GeometryInstanceForwardClustered): reused from
+	// last frame's record when it had no capture surface, else planned. False when deferred.
+	bool _plan_captures(const RTPlanContext &p_ctx, RTPlanScratch &r_scratch, const RTViewportState &p_state, const void *p_inst, RTPlanArena &r_arena, uint32_t p_index);
+	bool _plan_capture_instance(const RTPlanContext &p_ctx, const void *p_inst, RTPlanArena &r_arena, uint32_t p_index);
+	bool _plan_capture_dependencies(const RTPlanContext &p_ctx, const void *p_surf);
+	// Frustum test of the captures of record p_index, plus apply's inputs and decision for those whose memo entry is live.
+	void _evaluate_captures(const RTPlanContext &p_ctx, RTPlanScratch &r_scratch, const void *p_inst, RTPlanArena &r_arena, uint32_t p_index) const;
+	// Kept capture of a live, unexpired entry; null when apply would allocate or reset it.
+	const RTCaptureState *_peek_live_capture_state(RID p_entry, bool p_merged, uint32_t p_frame) const;
+	// Binds or schedules the captures planned for p_inst in record p_index; memoizes their entries in the record.
+	void _apply_capture_instance(const RTPlanContext &p_ctx, RTViewportState *p_state, const void *p_inst, RTPlanArena &r_arena, uint32_t p_index);
+	HashMap<RTMMSurfaceKey, RID> &_capture_entry_map(RTViewportState *p_state, uint8_t p_capture_flags);
+	RID _resolve_capture_entry(RTViewportState *p_state, const RTMMSurfaceKey &p_key, RTPlanCapture &r_capture);
+	const RTMaterialData *_plan_surface_material(const RTPlanContext &p_ctx, const void *p_surf, uint32_t &r_slot, uint16_t &r_counter);
 
 	// Compression transforms of every compressed BLAS. Cleared last in cleanup_caches.
 	RTBlasTransformPool blas_transform_pool;
 
-	RTMeshGroupEntry *_process_mesh_group(const RTMeshGroupKey &p_key, Span<uint32_t> p_members, LocalVector<RID> &r_dirty_blas_list);
+	RTMeshGroupEntry *_process_mesh_group(const RTMeshGroupKey &p_key, Span<const RTPlanSurface> p_members, LocalVector<RID> &r_dirty_blas_list);
 	void _trim_mesh_group_variants(uint64_t p_mesh_id);
 	void _evict_dead_mesh_groups();
 
@@ -1326,12 +1394,37 @@ class RenderRaytracing {
 	static uint32_t get_rid_version(RID p_rid);
 	RTCacheEntry *get_surface_cache_entry(uint32_t p_index);
 	RTMaterialCacheEntry *get_material_cache_entry(uint32_t p_index);
+	const RTMaterialCacheEntry *_find_material_cache_entry(uint32_t p_slot) const;
 	uint32_t allocate_material_slot();
 
+	// Material cache access split for planning. Custom-shader slots used last frame are checked by
+	// _refresh_custom_shader_slots before planning; others are checked by process_material on first use.
+	LocalVector<uint32_t> custom_material_slots; // Custom-shader material slots touched in material_frame.
+	LocalVector<uint32_t> custom_material_slots_prev; // Same, for the frame before.
+	uint32_t material_frame = UINT32_MAX; // Frame _refresh_custom_shader_slots last ran in.
+	uint64_t material_slot_version = 0; // Bumped when a material's hit group slot changes; part of RTPlanKey::material_version.
+	void _touch_material_entry(RTMaterialCacheEntry &r_entry, uint32_t p_slot, uint32_t p_frame);
+	bool _custom_shader_slot_current(RTMaterialCacheEntry &r_entry, RID p_material_rid, uint32_t p_frame);
+	void _refresh_custom_shader_slots();
+	// Cached material, or null when missing, stale, or its custom-shader slot wasn't checked this frame. r_slot is the
+	// material cache slot, UINT32_MAX for the default material.
+	const RTMaterialData *lookup_material(RID p_material_rid, uint16_t p_material_invalidation_counter, uint32_t &r_slot) const;
+	// Marks the material in p_slot used this frame like process_material does; the default material for UINT32_MAX.
+	RTMaterialData *touch_material(uint32_t p_slot);
+
 	// Internal methods.
+	// Surface BLAS cache key of p_surf: the mesh RID local index (MultiMeshes use their mesh) and the surface index.
+	static void _surface_cache_key(const void *p_surf, uint32_t &r_cache_key, uint32_t &r_mesh_rid_version);
 	RTSurfaceData *process_surface(
 			const void *p_surf,
-			void *p_mesh_surface,
+			uint32_t p_surface_invalidation_counter,
+			const Transform3D &p_transform,
+			LocalVector<RID> &r_dirty_blas_list);
+	// process_surface with the cache key resolved by _surface_cache_key.
+	RTSurfaceData *process_surface_cached(
+			const void *p_surf,
+			uint32_t p_cache_key,
+			uint32_t p_mesh_rid_version,
 			uint32_t p_surface_invalidation_counter,
 			const Transform3D &p_transform,
 			LocalVector<RID> &r_dirty_blas_list);
@@ -1388,7 +1481,14 @@ class RenderRaytracing {
 
 	// Strict validation only: parallel to geometry_data.
 	LocalVector<RTGeometrySources> geometry_sources;
-	LocalVector<RID> material_sources;
+
+	// Strict validation only: every reused plan record is planned again into rtv_plan_arena and compared.
+	RTPlanArena rtv_plan_arena;
+	// Sizes rtv_plan_arena to one empty record like record p_index of p_arena, with its key.
+	RTPlanArena &_rtv_replan_arena(const RTPlanArena &p_arena, uint32_t p_index);
+	// Reports when record p_index differs in its TLAS or capture part from rtv_plan_arena's; p_planned false when deferred.
+	void _rtv_check_reused_plan(const RTPlanArena &p_arena, uint32_t p_index, bool p_tlas_part, bool p_planned) const;
+	void _rtv_check_reused_captures(const RTPlanContext &p_ctx, const void *p_inst, const RTPlanArena &p_arena, uint32_t p_index);
 #endif
 
 public:

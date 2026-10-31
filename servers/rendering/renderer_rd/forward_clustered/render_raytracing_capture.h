@@ -112,6 +112,8 @@ public:
 		uint64_t camera = 0; // DEP_CAMERA: view and projection of the capturing viewport.
 		uint64_t model_transform = 0; // DEP_MODEL_TRANSFORM.
 		uint64_t instance_uniforms = 0; // DEP_INSTANCE_UNIFORMS: the instance's slice of the global uniform buffer.
+		// Global instance uniform version instance_uniforms was taken at; an equal version allows reusing it. Not compared.
+		uint64_t instance_uniforms_version = UINT64_MAX;
 		uint64_t material = 0; // DEP_MATERIAL_UNIFORMS: material identity and parameter counter.
 		uint64_t deformation = 0; // Skeleton or blend shape output vertex() reads; compared for every shader.
 		uint64_t instances = 0; // MultiMesh or particle instance records vertex() reads; compared for every shader.

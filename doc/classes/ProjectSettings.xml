@@ -3276,6 +3276,9 @@
 			Maximum total triangle count ([code]instance_count * triangles_per_surface[/code]) for a [MultiMesh] surface to use a single merged BLAS in the path tracer. When the combined triangle count exceeds this value, the path tracer falls back to one TLAS entry per instance sharing a common BLAS instead. Lower this value to reduce peak GPU memory for large MultiMeshes; raise it to prefer the merged path (which avoids per-instance TLAS overhead).
 			[b]Note:[/b] Requires a restart to take effect.
 		</member>
+		<member name="rendering/pathtracing/parallel_planning" type="bool" setter="" getter="" default="true">
+			If [code]true[/code], the path tracer plans its per-frame instance records on the worker thread pool once a viewport has at least 256 instances. Instances that need to create or modify shared resources are deferred and planned serially afterwards, so the result matches serial planning. Disable this to plan on the render thread only, for example to rule out threading issues while debugging.
+		</member>
 		<member name="rendering/pathtracing/transparency_dominant_layer_alpha" type="float" setter="" getter="" default="0.5">
 			Minimum alpha the nearest transparent layer needs to become the pixel's dominant surface in the path tracer. The dominant surface writes depth and motion vectors instead of the geometry behind it, and blends into the DLSS Ray Reconstruction guides. Dense smoke and flipbook particles then move with their own motion instead of smearing with the background. Additive and subtractive layers never become dominant unless they use [code]depth_draw_always[/code]. [code]0[/code] disables dominance, so transparent layers keep the motion of what is behind them. Changes take effect immediately.
 		</member>

@@ -525,6 +525,7 @@ public:
 	uint32_t get_hit_group_slot_count() const { return hit_group_slots.size(); }
 
 	bool is_hg_ready_in_bundle(uint32_t p_slot_index, uint32_t p_rt_flags) const;
+	uint32_t get_ready_version() const { return ready_version; }
 	bool is_compiling();
 	void drain_completed_compiles();
 	void finalize_custom_shaders();
@@ -574,6 +575,7 @@ private:
 	bool async_compilation_enabled = true;
 	Mutex spirv_compile_mutex; // Serialize glslang calls (RD::shader_compile_spirv_from_source).
 	CompileLane compile_lane;
+	uint32_t ready_version = 0;
 
 public:
 	void invalidate_pipeline_bundles();

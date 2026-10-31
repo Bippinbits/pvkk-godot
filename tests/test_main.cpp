@@ -156,6 +156,7 @@
 #ifdef RD_ENABLED
 #include "tests/servers/rendering/test_render_raytracing.h"
 #include "tests/servers/rendering/test_render_raytracing_capture.h"
+#include "tests/servers/rendering/test_render_raytracing_plan.h"
 #include "tests/servers/rendering/test_render_raytracing_scheduler.h"
 #endif
 #include "tests/servers/rendering/test_rendering_billboard.h"

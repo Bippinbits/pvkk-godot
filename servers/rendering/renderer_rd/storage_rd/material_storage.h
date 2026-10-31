@@ -212,6 +212,7 @@ private:
 		bool must_update_buffer_materials = false;
 
 		HashMap<RID, int32_t> instance_buffer_pos;
+		uint64_t instance_version = 0;
 	} global_shader_uniforms;
 
 	int32_t _global_shader_uniform_allocate(uint32_t p_elements);
@@ -282,6 +283,9 @@ private:
 
 	SelfList<Material>::List material_update_list;
 	Mutex material_update_list_mutex;
+
+	uint64_t material_rt_version = 0;
+	void _material_rt_invalidate(Material *p_material);
 
 	static void _material_uniform_set_erased(void *p_material);
 
@@ -422,6 +426,8 @@ public:
 	virtual int32_t global_shader_parameters_instance_allocate(RID p_instance) override;
 	virtual void global_shader_parameters_instance_free(RID p_instance) override;
 	virtual void global_shader_parameters_instance_update(RID p_instance, int p_index, const Variant &p_value, int p_flags_count = 0) override;
+	// Advances whenever any instance's slice of the global uniform buffer is allocated, freed or written.
+	uint64_t global_shader_parameters_instance_get_version() const { return global_shader_uniforms.instance_version; }
 
 	RID global_shader_uniforms_get_storage_buffer() const;
 	// Returns the override (or value) RID for a global texture parameter, or RID() if not found.
@@ -515,7 +521,10 @@ public:
 		return material->rt_invalidation_counter;
 	}
 
-	/// CPU copy of the global uniform buffer, four floats per element; instance uniforms start at their shader_uniforms_offset.
+	// Advances whenever any material's rt_invalidation_counter changes.
+	uint64_t material_get_rt_version() const { return material_rt_version; }
+
+	// CPU copy of the global uniform buffer, four floats per element; instance uniforms start at their shader_uniforms_offset.
 	_FORCE_INLINE_ Span<const float> global_shader_uniforms_get_values() const {
 		return Span<const float>(&global_shader_uniforms.buffer_values->x, global_shader_uniforms.buffer_size * 4);
 	}

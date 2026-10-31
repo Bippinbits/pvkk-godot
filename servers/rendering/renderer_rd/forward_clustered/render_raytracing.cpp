@@ -30,6 +30,7 @@
 
 #include "core/config/project_settings.h"
 #include "core/math/math_funcs.h"
+#include "core/object/worker_thread_pool.h"
 #include "core/os/os.h"
 #include "servers/rendering/renderer_rd/environment/sky.h"
 #include "servers/rendering/renderer_rd/forward_clustered/raytracing_decal_selection.h"
@@ -482,6 +483,7 @@ void RenderRaytracing::initialize(RenderForwardClustered *p_owner) {
 #ifdef RT_VALIDATION_ENABLED
 	GLOBAL_DEF(PropertyInfo(Variant::BOOL, "rendering/pathtracing/debug/strict_validation"), false);
 #endif
+	GLOBAL_DEF(PropertyInfo(Variant::BOOL, "rendering/pathtracing/parallel_planning"), true);
 
 	// Initialize merged MultiMesh BLAS compute shader.
 	Vector<String> merge_modes;
@@ -856,6 +858,8 @@ void RenderRaytracing::cleanup_caches() {
 	for (KeyValue<RTViewportStateKey, RTViewportState *> &kv : viewport_states) {
 		kv.value->capture_entries.clear();
 		kv.value->captured_mm_entries.clear();
+		// Plans name material cache slots, which are freed below.
+		kv.value->plan_lookup.clear();
 	}
 	_free_rid_if_valid(capture_arena);
 	_free_rid_if_valid(capture_params_buffer);
@@ -895,6 +899,9 @@ void RenderRaytracing::cleanup_caches() {
 		}
 	}
 	material_chunks.clear();
+	material_table.reset();
+	custom_material_slots.reset();
+	custom_material_slots_prev.reset();
 
 	_free_decal_box_blas();
 	decal_cache.reset();
@@ -1121,17 +1128,46 @@ void RenderRaytracing::_schedule_dynamic_items(const RenderDataRD *p_render_data
 	}
 }
 
-// Drops map entries whose pooled entry was evicted or freed.
-template <typename T>
-static void _rt_prune_handle_map(HashMap<RTMMSurfaceKey, RID> &r_map, const RID_Owner<T> &p_pool) {
-	LocalVector<RTMMSurfaceKey> evicted;
-	for (const KeyValue<RTMMSurfaceKey, RID> &kv : r_map) {
-		if (!p_pool.owns(kv.value)) {
-			evicted.push_back(kv.key);
+// Pool eviction and handle map pruning only bound memory (expired entries are reset or reused on access, freed
+// handles reallocated), so each call checks a bounded slice and resumes there next frame: no frame scans everything.
+static constexpr uint32_t RT_SWEEP_BUDGET = 64;
+
+// Calls p_visit(handle, entry) for up to RT_SWEEP_BUDGET live entries of p_pool. p_visit may free the entry it gets.
+template <typename T, typename F>
+static void _rt_sweep_pool(RTPoolSweep &r_sweep, RID_Owner<T> &p_pool, const F &p_visit) {
+	if (r_sweep.cursor >= r_sweep.pending.size()) {
+		r_sweep.pending = p_pool.get_owned_list();
+		r_sweep.cursor = 0;
+	}
+	const uint32_t end = MIN(r_sweep.cursor + RT_SWEEP_BUDGET, r_sweep.pending.size());
+	for (; r_sweep.cursor < end; r_sweep.cursor++) {
+		const RID handle = r_sweep.pending[r_sweep.cursor];
+		T *entry = p_pool.get_or_null(handle);
+		if (entry) {
+			p_visit(handle, *entry);
 		}
 	}
-	for (const RTMMSurfaceKey &key : evicted) {
-		r_map.erase(key);
+}
+
+// Drops up to RT_SWEEP_BUDGET checked map entries whose pooled entry was evicted or freed.
+template <typename T>
+static void _rt_prune_handle_map(HashMap<RTMMSurfaceKey, RID> &r_map, RTHandleMapCursor &r_cursor, const RID_Owner<T> &p_pool) {
+	HashMap<RTMMSurfaceKey, RID>::Iterator it = r_cursor.valid ? r_map.find(r_cursor.key) : r_map.begin();
+	if (!it) {
+		it = r_map.begin();
+	}
+	for (uint32_t i = 0; i < RT_SWEEP_BUDGET && it; i++) {
+		// Map nodes don't move on erase, so the next iterator stays valid.
+		HashMap<RTMMSurfaceKey, RID>::Iterator next = it;
+		++next;
+		if (!p_pool.owns(it->value)) {
+			r_map.remove(it);
+		}
+		it = next;
+	}
+	r_cursor.valid = bool(it);
+	if (it) {
+		r_cursor.key = it->key;
 	}
 }
 
@@ -1148,22 +1184,20 @@ void RenderRaytracing::prepare_frame() {
 
 	const uint32_t current_frame = RSG::rasterizer->get_frame_number();
 
-	// TTL-evict stale deformed-surface entries.
-	for (const RID &handle : deformed_pool.get_owned_list()) {
-		if (_rt_deformed_entry_expired(*deformed_pool.get_or_null(handle), current_frame)) {
-			_free_deformed_entry(handle);
+	_rt_sweep_pool(deformed_sweep, deformed_pool, [&](RID p_handle, RTDeformedCacheEntry &p_entry) {
+		if (_rt_deformed_entry_expired(p_entry, current_frame)) {
+			_free_deformed_entry(p_handle);
 		}
-	}
-	_rt_prune_handle_map(shared_capture_entries, deformed_pool);
+	});
+	_rt_prune_handle_map(shared_capture_entries, shared_capture_prune, deformed_pool);
 
-	// TTL-evict stale merged-MultiMesh entries.
-	for (const RID &handle : merged_mm_pool.get_owned_list()) {
-		if (_rt_merged_mm_entry_expired(*merged_mm_pool.get_or_null(handle), current_frame)) {
-			_free_merged_mm_entry(handle);
+	_rt_sweep_pool(merged_mm_sweep, merged_mm_pool, [&](RID p_handle, RTMergedMMEntry &p_entry) {
+		if (_rt_merged_mm_entry_expired(p_entry, current_frame)) {
+			_free_merged_mm_entry(p_handle);
 		}
-	}
-	_rt_prune_handle_map(particle_mm_entries, merged_mm_pool);
-	_rt_prune_handle_map(shared_captured_mm_entries, merged_mm_pool);
+	});
+	_rt_prune_handle_map(particle_mm_entries, particle_mm_prune, merged_mm_pool);
+	_rt_prune_handle_map(shared_captured_mm_entries, shared_captured_mm_prune, merged_mm_pool);
 
 	_evict_dead_mesh_groups();
 
@@ -1181,27 +1215,40 @@ void RenderRaytracing::prepare_frame() {
 // Surface processing
 // ---------------------------------------------------------------------------
 
-RTSurfaceData *RenderRaytracing::process_surface(
-		const void *p_surf,
-		void *p_mesh_surface,
-		uint32_t p_surface_invalidation_counter,
-		const Transform3D &p_transform,
-		LocalVector<RID> &r_dirty_blas_list) {
+void RenderRaytracing::_surface_cache_key(const void *p_surf, uint32_t &r_cache_key, uint32_t &r_mesh_rid_version) {
 	const RenderForwardClustered::GeometryInstanceSurfaceDataCache *surf =
 			static_cast<const RenderForwardClustered::GeometryInstanceSurfaceDataCache *>(p_surf);
-
-	RendererRD::MeshStorage *mesh_storage = RendererRD::MeshStorage::get_singleton();
-
 	RID mesh_rid = surf->owner->data->base;
 	if (surf->owner->data->base_type == RSE::INSTANCE_MULTIMESH) {
-		RID underlying = mesh_storage->multimesh_get_mesh(mesh_rid);
+		RID underlying = RendererRD::MeshStorage::get_singleton()->multimesh_get_mesh(mesh_rid);
 		if (underlying.is_valid()) {
 			mesh_rid = underlying;
 		}
 	}
+	r_cache_key = (mesh_rid.get_local_index() << 8) | (surf->surface_index & 0xFF);
+	r_mesh_rid_version = get_rid_version(mesh_rid);
+}
 
-	uint32_t cache_key = (mesh_rid.get_local_index() << 8) | (surf->surface_index & 0xFF);
-	uint32_t mesh_version = get_rid_version(mesh_rid);
+RTSurfaceData *RenderRaytracing::process_surface(
+		const void *p_surf,
+		uint32_t p_surface_invalidation_counter,
+		const Transform3D &p_transform,
+		LocalVector<RID> &r_dirty_blas_list) {
+	uint32_t cache_key = 0;
+	uint32_t mesh_rid_version = 0;
+	_surface_cache_key(p_surf, cache_key, mesh_rid_version);
+	return process_surface_cached(p_surf, cache_key, mesh_rid_version, p_surface_invalidation_counter, p_transform, r_dirty_blas_list);
+}
+
+RTSurfaceData *RenderRaytracing::process_surface_cached(
+		const void *p_surf,
+		uint32_t p_cache_key,
+		uint32_t p_mesh_rid_version,
+		uint32_t p_surface_invalidation_counter,
+		const Transform3D &p_transform,
+		LocalVector<RID> &r_dirty_blas_list) {
+	const uint32_t cache_key = p_cache_key;
+	const uint32_t mesh_version = p_mesh_rid_version;
 	RTCacheEntry *entry = get_surface_cache_entry(cache_key);
 
 	uint32_t current_frame = RSG::rasterizer->get_frame_number();
@@ -1226,7 +1273,8 @@ RTSurfaceData *RenderRaytracing::process_surface(
 
 	RTSurfaceData *surf_data = entry->ptr;
 
-	_populate_surface_blas(p_mesh_surface, RID(), RID(), false, false, false, cache_key, surf_data, r_dirty_blas_list);
+	void *mesh_surface = static_cast<const RenderForwardClustered::GeometryInstanceSurfaceDataCache *>(p_surf)->surface;
+	_populate_surface_blas(mesh_surface, RID(), RID(), false, false, false, cache_key, surf_data, r_dirty_blas_list);
 
 	if (!surf_data->blas.is_valid()) {
 		return surf_data;
@@ -1405,13 +1453,55 @@ static RTVertexCapture::Layout _rt_capture_layout(void *p_mesh_surface) {
 	return layout;
 }
 
-static uint64_t _rt_hash_bytes(const void *p_data, size_t p_size) {
-	return (uint64_t(hash_murmur3_buffer(p_data, int(p_size), HASH_MURMUR3_SEED)) << 32) | hash_murmur3_buffer(p_data, int(p_size), 0x9E3779B9u);
+static _FORCE_INLINE_ uint64_t _rt_fmix64(uint64_t p_h) {
+	p_h ^= p_h >> 33;
+	p_h *= 0xFF51AFD7ED558CCDull;
+	p_h ^= p_h >> 33;
+	p_h *= 0xC4CEB9FE1A85EC53ull;
+	return p_h ^ (p_h >> 33);
 }
 
-// Stamps of the inputs p_dependencies name; the others stay 0. p_view holds the per-view fields, p_instances the change
-// stamp of the instance records vertex() reads (0 for meshes).
-RTVertexCapture::Stamps RenderRaytracing::_capture_inputs(const void *p_surface_cache, uint32_t p_dependencies, const RTVertexCapture::Stamps &p_view, const RTVertexCapture::Layout &p_layout, uint64_t p_instances) {
+// 64-bit change stamp in one pass over 8-byte words; stamps only compare within a run, never persist.
+static uint64_t _rt_hash_bytes(const void *p_data, size_t p_size) {
+	constexpr uint64_t K = 0x9E3779B97F4A7C15ull;
+	const uint8_t *bytes = static_cast<const uint8_t *>(p_data);
+	uint64_t h = K ^ p_size;
+	size_t i = 0;
+	for (; i + sizeof(uint64_t) <= p_size; i += sizeof(uint64_t)) {
+		uint64_t word;
+		memcpy(&word, bytes + i, sizeof(word));
+		h = (h ^ _rt_fmix64(word)) * K;
+	}
+	if (i < p_size) {
+		uint64_t word = 0;
+		memcpy(&word, bytes + i, p_size - i);
+		h = (h ^ _rt_fmix64(word)) * K;
+	}
+	return _rt_fmix64(h);
+}
+
+// Stamps of the inputs p_dependencies name; the others stay 0. p_view holds the per-view fields, p_kept the inputs of the
+// entry's kept capture, p_instances the change stamp of the instance records vertex() reads (0 for meshes).
+// global_uniforms_stamp of p_traits this frame, computed once per shader and scratch.
+static uint64_t _rt_capture_global_uniforms(RTPlanScratch &r_scratch, const RTVertexCapture::ShaderTraits &p_traits, uint64_t p_frame) {
+	if (r_scratch.global_uniform_stamps_frame != p_frame) {
+		r_scratch.global_uniform_stamps_frame = p_frame;
+		r_scratch.global_uniform_stamps.clear();
+	}
+	for (const Pair<const void *, uint64_t> &stamp : r_scratch.global_uniform_stamps) {
+		if (stamp.first == &p_traits) {
+			return stamp.second;
+		}
+	}
+	const RendererRD::MaterialStorage *material_storage = RendererRD::MaterialStorage::get_singleton();
+	const uint64_t stamp = RTVertexCapture::global_uniforms_stamp(p_traits.dependencies.global_uniforms, [material_storage](const StringName &p_name) {
+		return RTVertexCapture::GlobalUniformValue{ material_storage->global_shader_uniform_get_values(p_name), material_storage->global_shader_uniform_get_texture(p_name).get_id() };
+	});
+	r_scratch.global_uniform_stamps.push_back({ &p_traits, stamp });
+	return stamp;
+}
+
+RTVertexCapture::Stamps RenderRaytracing::_capture_inputs(RTPlanScratch &r_scratch, const void *p_surface_cache, uint32_t p_dependencies, const RTVertexCapture::Stamps &p_view, const RTVertexCapture::Stamps &p_kept, const RTVertexCapture::Layout &p_layout, uint64_t p_instances) {
 	const RenderForwardClustered::GeometryInstanceSurfaceDataCache *surf =
 			static_cast<const RenderForwardClustered::GeometryInstanceSurfaceDataCache *>(p_surface_cache);
 	const RenderForwardClustered::GeometryInstanceForwardClustered *inst = surf->owner;
@@ -1421,10 +1511,9 @@ RTVertexCapture::Stamps RenderRaytracing::_capture_inputs(const void *p_surface_
 	stamps.mode_version = p_view.mode_version;
 	stamps.frame = p_view.frame;
 	stamps.instances = p_instances;
+	stamps.instance_uniforms_version = p_view.instance_uniforms_version;
 	if (p_dependencies & RTVertexCapture::DEP_GLOBAL_UNIFORMS) {
-		stamps.global_uniforms = RTVertexCapture::global_uniforms_stamp(surf->shader->rt_capture.dependencies.global_uniforms, [material_storage](const StringName &p_name) {
-			return RTVertexCapture::GlobalUniformValue{ material_storage->global_shader_uniform_get_values(p_name), material_storage->global_shader_uniform_get_texture(p_name).get_id() };
-		});
+		stamps.global_uniforms = _rt_capture_global_uniforms(r_scratch, surf->shader->rt_capture, p_view.frame);
 	}
 	if (p_dependencies & RTVertexCapture::DEP_CAMERA) {
 		stamps.camera = p_view.camera;
@@ -1436,8 +1525,10 @@ RTVertexCapture::Stamps RenderRaytracing::_capture_inputs(const void *p_surface_
 		const Span<const float> values = material_storage->global_shader_uniforms_get_values();
 		const uint64_t first = uint64_t(inst->shader_uniforms_offset) * 4;
 		const uint64_t count = ShaderLanguage::MAX_INSTANCE_UNIFORM_INDICES * 4;
+		// A kept stamp of 0 was never hashed (the dependency is new), so it can't be reused.
+		const bool reuse = p_kept.instance_uniforms != 0 && p_kept.instance_uniforms_version == p_view.instance_uniforms_version;
 		if (first + count <= values.size()) {
-			stamps.instance_uniforms = _rt_hash_bytes(values.ptr() + first, count * sizeof(float));
+			stamps.instance_uniforms = reuse ? p_kept.instance_uniforms : _rt_hash_bytes(values.ptr() + first, count * sizeof(float));
 		}
 	}
 	if (p_dependencies & RTVertexCapture::DEP_MATERIAL_UNIFORMS) {
@@ -1541,16 +1632,526 @@ RenderRaytracing::CaptureBinding *RenderRaytracing::_capture_binding(const void 
 }
 
 // The material the rasterizer draws the surface with. Its fallback default material is traced as the RT default.
-RTMaterialData *RenderRaytracing::_surface_material(const void *p_surf) {
+RID RenderRaytracing::_surface_material_rid(const void *p_surf) const {
 	const RenderForwardClustered::GeometryInstanceSurfaceDataCache *surf =
 			static_cast<const RenderForwardClustered::GeometryInstanceSurfaceDataCache *>(p_surf);
-	const RID material = surf->rt_material == owner->scene_shader.default_material ? RID() : surf->rt_material;
+	return surf->rt_material == owner->scene_shader.default_material ? RID() : surf->rt_material;
+}
+
+RTMaterialData *RenderRaytracing::_surface_material(const void *p_surf) {
+	const RID material = _surface_material_rid(p_surf);
 	return process_material(material, RendererRD::MaterialStorage::get_singleton()->material_get_rt_invalidation_counter(material));
 }
 
-// Captures can only be committed once the surface's hit group is traced, so they aren't recorded before.
-bool RenderRaytracing::_surface_hit_group_ready(const void *p_surf, uint32_t p_rt_flags) {
-	return SceneShaderRaytracing::get_singleton()->is_hg_ready_in_bundle(_surface_material(p_surf)->rt_sbt_offset, p_rt_flags);
+// The only point where planning may update the material cache: when p_ctx allows mutation. Null when deferred.
+const RTMaterialData *RenderRaytracing::_plan_surface_material(const RTPlanContext &p_ctx, const void *p_surf, uint32_t &r_slot, uint16_t &r_counter) {
+	const RID material = _surface_material_rid(p_surf);
+	r_counter = p_ctx.material_storage->material_get_rt_invalidation_counter(material);
+	const RTMaterialData *mat_data = lookup_material(material, r_counter, r_slot);
+	if (mat_data || !p_ctx.allow_mutation) {
+		return mat_data;
+	}
+	r_slot = material.is_valid() ? get_rid_index(material) : UINT32_MAX;
+	return process_material(material, r_counter);
+}
+
+const RTCaptureState *RenderRaytracing::_peek_capture_state(const CaptureBinding &p_binding) const {
+	// get_or_null() doesn't modify the pools; RID_Owner only lacks a const overload.
+	return const_cast<RenderRaytracing *>(this)->_capture_state(p_binding);
+}
+
+bool RenderRaytracing::_peek_captured(const void *p_surf, const LocalVector<RTCaptureRequest> &p_captures) const {
+	const RenderForwardClustered::GeometryInstanceSurfaceDataCache *surf =
+			static_cast<const RenderForwardClustered::GeometryInstanceSurfaceDataCache *>(p_surf);
+	if (surf->rt_capture_view != capture_view) {
+		return false;
+	}
+	const CaptureBinding &binding = capture_bindings[surf->rt_capture_binding];
+	const RTCaptureState *capture = _peek_capture_state(binding);
+	return capture && ((binding.request != UINT32_MAX && p_captures[binding.request].recorded) || capture->stamp != 0);
+}
+
+RTPlanContext RenderRaytracing::_make_plan_context(const RenderDataRD *p_render_data, uint32_t p_rt_flags, const LocalVector<RTCaptureRequest> *p_captures) const {
+	RTPlanContext ctx;
+	ctx.mesh_storage = RendererRD::MeshStorage::get_singleton();
+	ctx.material_storage = RendererRD::MaterialStorage::get_singleton();
+	ctx.rt_shader = SceneShaderRaytracing::get_singleton();
+	ctx.captures = p_captures;
+	ctx.versions.material_version = ctx.material_storage->material_get_rt_version();
+	ctx.versions.mesh_version = ctx.mesh_storage->mesh_get_rt_invalidation_version();
+	// A changed hit group slot rebuilds its material with an unchanged counter, so it invalidates plans like readiness does.
+	ctx.versions.ready_version = ctx.rt_shader->get_ready_version() + uint32_t(material_slot_version);
+	ctx.versions.capture_mode_version = capture_mode_version;
+	ctx.view_stamps.frame = RSG::rasterizer->get_frame_number();
+	ctx.view_stamps.mode_version = capture_mode_version;
+	ctx.view_stamps.instance_uniforms_version = ctx.material_storage->global_shader_parameters_instance_get_version();
+	if (const RenderSceneDataRD *scene_data = p_render_data->scene_data) {
+		const uint64_t camera[2] = {
+			_rt_hash_bytes(&scene_data->cam_transform, sizeof(Transform3D)),
+			_rt_hash_bytes(&scene_data->cam_projection, sizeof(Projection)),
+		};
+		ctx.view_stamps.camera = _rt_hash_bytes(camera, sizeof(camera));
+		ctx.camera_visible_layers = scene_data->camera_visible_layers;
+	}
+	ctx.rt_flags = p_rt_flags;
+	ctx.capture_mode = read_capture_mode();
+	ctx.allow_mutation = true;
+	return ctx;
+}
+
+// prepare_vertex_captures and build_tlas plan into the same records, so whichever runs first in a frame opens the arena.
+RTPlanArena &RenderRaytracing::_open_plan_arena(RTViewportState *p_state, const RenderDataRD *p_render_data, const RTPlanContext &p_ctx) {
+	// Plans don't record the pipeline their hit groups were checked against, so a flags change drops them.
+	if (p_state->plan_rt_flags != p_ctx.rt_flags) {
+		p_state->plan_rt_flags = p_ctx.rt_flags;
+		p_state->plan_lookup.clear();
+	}
+	const PagedArray<RenderGeometryInstance *> &instances = *p_render_data->rt_instances;
+	const uint32_t count = uint32_t(instances.size());
+	const uint64_t frame = RSG::rasterizer->get_frame_number();
+	const bool opened = p_state->plan_frame == frame && p_state->plan_arenas[p_state->plan_current].instances.size() == count;
+	if (!opened && p_state->plan_frame != frame) {
+		p_state->plan_current ^= 1;
+		p_state->plan_frame = frame;
+	}
+	RTPlanArena &arena = p_state->plan_arenas[p_state->plan_current];
+	if (!opened) {
+		plan_capacities.resize(count);
+		for (uint32_t i = 0; i < count; i++) {
+			const RenderForwardClustered::GeometryInstanceForwardClustered *inst =
+					static_cast<const RenderForwardClustered::GeometryInstanceForwardClustered *>(instances[i]);
+			plan_capacities[i] = inst ? inst->rt_surface_count : 0;
+		}
+		rt_plan_reserve(arena, plan_capacities);
+	}
+	// The pass planning now validates against its own context; the TLAS pass runs last, so its versions are kept.
+	arena.versions = p_ctx.versions;
+	return arena;
+}
+
+// Instances per planning task.
+static constexpr uint32_t RT_PLAN_CHUNK_SIZE = 64;
+static constexpr uint32_t RT_PLAN_PARALLEL_MIN_INSTANCES = 256;
+
+// Strict validation re-plans reused records into one shared arena, so it keeps planning serial.
+static bool _rt_plan_parallel(uint32_t p_count) {
+#ifdef RT_VALIDATION_ENABLED
+	if (rt_validation().strict) {
+		return false;
+	}
+#endif
+	return p_count >= RT_PLAN_PARALLEL_MIN_INSTANCES && GLOBAL_GET_CACHED(bool, "rendering/pathtracing/parallel_planning");
+}
+
+// Calls p_plan(ctx, scratch, index) for instances [0, p_count): first on the worker pool with mutation off, then serially,
+// in index order, for those it deferred. p_plan returns false when deferred, and must only write its own record.
+template <typename F>
+static void _rt_plan_instances(const RTPlanContext &p_ctx, uint32_t p_count, RTPlanWorkspace &r_workspace, const F &p_plan) {
+	const bool parallel = _rt_plan_parallel(p_count);
+	if (parallel) {
+		struct Job {
+			const F *plan;
+			RTPlanContext ctx;
+			RTPlanWorkspace *workspace;
+			uint32_t count;
+		};
+		Job job = { &p_plan, p_ctx, &r_workspace, p_count };
+		job.ctx.allow_mutation = false;
+		const uint32_t chunks = (p_count + RT_PLAN_CHUNK_SIZE - 1) / RT_PLAN_CHUNK_SIZE;
+		r_workspace.chunks.resize(chunks);
+		r_workspace.deferred.resize(p_count);
+		const auto run_chunk = [](void *p_job, uint32_t p_chunk) {
+			const Job &j = *static_cast<const Job *>(p_job);
+			const uint32_t end = MIN((p_chunk + 1) * RT_PLAN_CHUNK_SIZE, j.count);
+			for (uint32_t i = p_chunk * RT_PLAN_CHUNK_SIZE; i < end; i++) {
+				j.workspace->deferred[i] = !(*j.plan)(j.ctx, j.workspace->chunks[p_chunk], i);
+			}
+		};
+		WorkerThreadPool *pool = WorkerThreadPool::get_singleton();
+		pool->wait_for_group_task_completion(pool->add_native_group_task(run_chunk, &job, int(chunks), -1, true));
+	}
+	for (uint32_t i = 0; i < p_count; i++) {
+		if (!parallel || r_workspace.deferred[i]) {
+			ERR_CONTINUE_MSG(!p_plan(p_ctx, r_workspace.serial, i), "Serial planning can't be deferred.");
+		}
+	}
+}
+
+static const RTPlanArena &_rt_prev_plan_arena(const RTViewportState &p_state) {
+	return p_state.plan_arenas[p_state.plan_current ^ 1];
+}
+
+// Last frame's record of p_inst in _rt_prev_plan_arena(p_state), or UINT32_MAX.
+static uint32_t _rt_plan_prev_index(const RTViewportState &p_state, uint32_t p_rt_index, uint64_t p_surfaces_version) {
+	uint32_t index = UINT32_MAX;
+	if (p_rt_index != UINT32_MAX) {
+		const LocalVector<uint32_t> &lookup = p_state.plan_lookup;
+		rt_plan_lookup(Span<uint32_t>(lookup.ptr(), lookup.size()), _rt_prev_plan_arena(p_state), p_rt_index, p_surfaces_version, index);
+	}
+	return index;
+}
+
+// Flags the capture plan owns; the TLAS plan and its copies keep them.
+static constexpr uint8_t RT_PLAN_CAPTURE_PART_FLAGS = RT_PLAN_INSTANCE_NO_CAPTURE_SURFACES;
+
+template <typename T>
+static void _rt_copy_plan_range(const LocalVector<T> &p_src, uint32_t p_src_begin, LocalVector<T> &r_dst, uint32_t p_dst_begin, uint32_t p_count) {
+	static_assert(std::is_trivially_copyable_v<T>, "Plan ranges are copied with memcpy.");
+	if (p_count > 0) {
+		memcpy(r_dst.ptr() + p_dst_begin, p_src.ptr() + p_src_begin, size_t(p_count) * sizeof(T));
+	}
+}
+
+// rt_plan_copy_forward of the TLAS part only: the destination keeps its key and this frame's capture plan.
+static bool _rt_copy_tlas_plan(const RTPlanArena &p_src, uint32_t p_src_index, RTPlanArena &r_dst, uint32_t p_dst_index) {
+	const RTPlanInstance &src = p_src.instances[p_src_index];
+	RTPlanInstance &dst = r_dst.instances[p_dst_index];
+	if (src.surface_count > dst.range_capacity) {
+		return false;
+	}
+	dst.group_count = src.group_count;
+	dst.surface_count = src.surface_count;
+	dst.pending_surfaces = src.pending_surfaces;
+	dst.flags = uint8_t((src.flags & ~RT_PLAN_CAPTURE_PART_FLAGS) | (dst.flags & RT_PLAN_CAPTURE_PART_FLAGS));
+	_rt_copy_plan_range(p_src.groups, src.range_begin, r_dst.groups, dst.range_begin, src.group_count);
+	_rt_copy_plan_range(p_src.surfaces, src.range_begin, r_dst.surfaces, dst.range_begin, src.surface_count);
+	return true;
+}
+
+// Keeps the entry memo of captures planned again for the same surfaces.
+static void _rt_carry_capture_entries(const RTPlanArena &p_prev, uint32_t p_prev_index, RTPlanArena &r_arena, uint32_t p_index) {
+	const RTPlanInstance &prev = p_prev.instances[p_prev_index];
+	const RTPlanInstance &record = r_arena.instances[p_index];
+	const uint32_t count = MIN(prev.capture_count, record.capture_count);
+	for (uint32_t k = 0; k < count; k++) {
+		const RTPlanCapture &old = p_prev.captures[prev.range_begin + k];
+		RTPlanCapture &capture = r_arena.captures[record.range_begin + k];
+		if (old.surf == capture.surf && old.surface_key == capture.surface_key &&
+				(old.flags & RT_PLAN_CAPTURE_IDENTITY_FLAGS) == (capture.flags & RT_PLAN_CAPTURE_IDENTITY_FLAGS)) {
+			capture.entry = old.entry;
+		}
+	}
+}
+
+#ifdef RT_VALIDATION_ENABLED
+static bool _rt_plan_element_equal(const RTPlanGroup &p_a, const RTPlanGroup &p_b) {
+	const RTSurfaceGroupKey &a = p_a.key;
+	const RTSurfaceGroupKey &b = p_b.key;
+	return a.cull_mode == b.cull_mode && a.sbt_offset == b.sbt_offset && a.tlas_mask == b.tlas_mask && a.billboard == b.billboard &&
+			a.opaque == b.opaque && a.groupable == b.groupable && p_a.surface_mask == p_b.surface_mask && p_a.opaque_mask == p_b.opaque_mask &&
+			p_a.surface_begin == p_b.surface_begin && p_a.surface_count == p_b.surface_count && p_a.transparent == p_b.transparent;
+}
+
+static bool _rt_plan_element_equal(const RTPlanSurface &p_a, const RTPlanSurface &p_b) {
+	return p_a.surf == p_b.surf && p_a.material_slot == p_b.material_slot && p_a.cache_key == p_b.cache_key && p_a.mesh_rid_version == p_b.mesh_rid_version &&
+			p_a.surface_counter == p_b.surface_counter && p_a.material_flags == p_b.material_flags && p_a.material_counter == p_b.material_counter &&
+			p_a.surface_index == p_b.surface_index && p_a.deformed_kind == p_b.deformed_kind && p_a.flags == p_b.flags;
+}
+
+// The entry memo is resolved by apply, so it isn't part of the plan.
+static bool _rt_plan_element_equal(const RTPlanCapture &p_a, const RTPlanCapture &p_b) {
+	return p_a.surf == p_b.surf && p_a.layout.vertex_count == p_b.layout.vertex_count && p_a.layout.instance_count == p_b.layout.instance_count &&
+			p_a.layout.has_normal == p_b.layout.has_normal && p_a.layout.has_tangent == p_b.layout.has_tangent && p_a.dependencies == p_b.dependencies &&
+			p_a.triangle_count == p_b.triangle_count && p_a.surface_key == p_b.surface_key &&
+			(p_a.flags & RT_PLAN_CAPTURE_IDENTITY_FLAGS) == (p_b.flags & RT_PLAN_CAPTURE_IDENTITY_FLAGS);
+}
+
+static bool _rt_plan_element_equal(const AABB &p_a, const AABB &p_b) {
+	return p_a == p_b;
+}
+
+template <typename T>
+static bool _rt_plan_ranges_equal(const LocalVector<T> &p_a, uint32_t p_a_begin, const LocalVector<T> &p_b, uint32_t p_b_begin, uint32_t p_count) {
+	for (uint32_t i = 0; i < p_count; i++) {
+		if (!_rt_plan_element_equal(p_a[p_a_begin + i], p_b[p_b_begin + i])) {
+			return false;
+		}
+	}
+	return true;
+}
+
+// True when the TLAS part (p_tlas_part) or the capture part of two records holds the same plan.
+static bool _rt_plan_records_equal(const RTPlanArena &p_a, uint32_t p_a_index, const RTPlanArena &p_b, uint32_t p_b_index, bool p_tlas_part) {
+	const RTPlanInstance &a = p_a.instances[p_a_index];
+	const RTPlanInstance &b = p_b.instances[p_b_index];
+	const uint8_t part_flags = p_tlas_part ? uint8_t(~RT_PLAN_CAPTURE_PART_FLAGS) : RT_PLAN_CAPTURE_PART_FLAGS;
+	if ((a.flags & part_flags) != (b.flags & part_flags)) {
+		return false;
+	}
+	if (!p_tlas_part) {
+		return a.capture_count == b.capture_count && _rt_plan_ranges_equal(p_a.captures, a.range_begin, p_b.captures, b.range_begin, a.capture_count) &&
+				_rt_plan_ranges_equal(p_a.capture_aabbs, a.range_begin, p_b.capture_aabbs, b.range_begin, a.capture_count);
+	}
+	return a.group_count == b.group_count && a.surface_count == b.surface_count && a.pending_surfaces == b.pending_surfaces &&
+			_rt_plan_ranges_equal(p_a.groups, a.range_begin, p_b.groups, b.range_begin, a.group_count) &&
+			_rt_plan_ranges_equal(p_a.surfaces, a.range_begin, p_b.surfaces, b.range_begin, a.surface_count);
+}
+
+RTPlanArena &RenderRaytracing::_rtv_replan_arena(const RTPlanArena &p_arena, uint32_t p_index) {
+	uint32_t capacity = p_arena.instances[p_index].range_capacity;
+	rt_plan_reserve(rtv_plan_arena, Span<uint32_t>(&capacity, 1));
+	rtv_plan_arena.versions = p_arena.versions;
+	rtv_plan_arena.instances[0].key = p_arena.instances[p_index].key;
+	return rtv_plan_arena;
+}
+
+void RenderRaytracing::_rtv_check_reused_plan(const RTPlanArena &p_arena, uint32_t p_index, bool p_tlas_part, bool p_planned) const {
+	if (p_planned && _rt_plan_records_equal(p_arena, p_index, rtv_plan_arena, 0, p_tlas_part)) {
+		return;
+	}
+	if (p_tlas_part) {
+		ERR_PRINT_ONCE("Raytracing: a reused TLAS plan differs from a fresh one.");
+	} else {
+		ERR_PRINT_ONCE("Raytracing: a reused capture plan differs from a fresh one.");
+	}
+}
+
+void RenderRaytracing::_rtv_check_reused_captures(const RTPlanContext &p_ctx, const void *p_inst, const RTPlanArena &p_arena, uint32_t p_index) {
+	const bool planned = _plan_capture_instance(p_ctx, p_inst, _rtv_replan_arena(p_arena, p_index), 0);
+	_rtv_check_reused_plan(p_arena, p_index, false, planned);
+}
+
+static void _rtv_check_capture_memo(const RID *p_mapped, RID p_memo) {
+	if (!p_mapped || *p_mapped != p_memo) {
+		ERR_PRINT_ONCE("Raytracing: a capture entry memo differs from its handle map entry.");
+	}
+}
+#endif
+
+// Last frame's capture part can be kept only when it had no capture surface: anything else follows per-frame state.
+// A degenerate transform skips the surface check in _plan_capture_instance, so it isn't reused either.
+static bool _rt_capture_part_reusable(const RTPlanArena &p_prev, uint32_t p_prev_index, const Transform3D &p_transform, const RTPlanContext &p_ctx) {
+	return (p_prev.instances[p_prev_index].flags & RT_PLAN_INSTANCE_NO_CAPTURE_SURFACES) && p_prev.versions.capture_mode_version == p_ctx.versions.capture_mode_version &&
+			!Math::is_zero_approx(p_transform.basis.determinant());
+}
+
+bool RenderRaytracing::_plan_captures(const RTPlanContext &p_ctx, RTPlanScratch &r_scratch, const RTViewportState &p_state, const void *p_inst, RTPlanArena &r_arena, uint32_t p_index) {
+	const RenderForwardClustered::GeometryInstanceForwardClustered *inst =
+			static_cast<const RenderForwardClustered::GeometryInstanceForwardClustered *>(p_inst);
+	const RTPlanArena &prev = _rt_prev_plan_arena(p_state);
+	const uint32_t prev_index = inst ? _rt_plan_prev_index(p_state, inst->rt_index, inst->rt_surfaces_version) : UINT32_MAX;
+	if (prev_index != UINT32_MAX && _rt_capture_part_reusable(prev, prev_index, inst->transform, p_ctx)) {
+		RTPlanInstance &record = r_arena.instances[p_index];
+		record.capture_count = 0;
+		record.flags |= RT_PLAN_INSTANCE_NO_CAPTURE_SURFACES;
+		RT_VALIDATE(_rtv_check_reused_captures(p_ctx, p_inst, r_arena, p_index));
+		return true;
+	}
+	if (!_plan_capture_instance(p_ctx, p_inst, r_arena, p_index)) {
+		return false;
+	}
+	if (prev_index != UINT32_MAX) {
+		_rt_carry_capture_entries(prev, prev_index, r_arena, p_index);
+	}
+	_evaluate_captures(p_ctx, r_scratch, p_inst, r_arena, p_index);
+	return true;
+}
+
+const RTCaptureState *RenderRaytracing::_peek_live_capture_state(RID p_entry, bool p_merged, uint32_t p_frame) const {
+	RenderRaytracing *self = const_cast<RenderRaytracing *>(this); // RID_Owner only lacks a const get_or_null.
+	if (p_merged) {
+		const RTMergedMMEntry *entry = self->merged_mm_pool.get_or_null(p_entry);
+		return entry && !_rt_merged_mm_entry_expired(*entry, p_frame) ? &entry->capture : nullptr;
+	}
+	const RTDeformedCacheEntry *entry = self->deformed_pool.get_or_null(p_entry);
+	return entry && !_rt_deformed_entry_expired(*entry, p_frame) ? &entry->capture : nullptr;
+}
+
+void RenderRaytracing::_evaluate_captures(const RTPlanContext &p_ctx, RTPlanScratch &r_scratch, const void *p_inst, RTPlanArena &r_arena, uint32_t p_index) const {
+	const RTPlanInstance &record = r_arena.instances[p_index];
+	if (record.capture_count == 0 || !p_ctx.frustum) {
+		return;
+	}
+	const RenderForwardClustered::GeometryInstanceForwardClustered *inst =
+			static_cast<const RenderForwardClustered::GeometryInstanceForwardClustered *>(p_inst);
+	RTInstanceSource source;
+	if (inst->data->base_type != RSE::INSTANCE_MESH && !_rt_instance_source(inst->data->base_type, inst->data->base, source)) {
+		return;
+	}
+	const uint32_t frame = uint32_t(p_ctx.view_stamps.frame);
+	for (uint32_t index = record.range_begin; index < record.range_begin + record.capture_count; index++) {
+		RTPlanCapture &capture = r_arena.captures[index];
+		capture.flags &= RT_PLAN_CAPTURE_IDENTITY_FLAGS;
+		if (p_ctx.frustum->intersects(r_arena.capture_aabbs[index])) {
+			capture.flags |= RT_PLAN_CAPTURE_IN_FRUSTUM;
+		}
+		const RTCaptureState *kept = _peek_live_capture_state(capture.entry, capture.flags & RT_PLAN_CAPTURE_MERGED, frame);
+		if (!kept) {
+			continue;
+		}
+		RTPlanCaptureEval &eval = r_arena.capture_evals[index];
+		eval.inputs = _capture_inputs(r_scratch, capture.surf, capture.dependencies, p_ctx.view_stamps, kept->inputs, capture.layout, source.last_change);
+		eval.recapture = kept->frame == p_ctx.view_stamps.frame
+				? RTVertexCapture::RECAPTURE_NONE
+				: RTVertexCapture::needs_recapture(kept->stamp != 0, kept->inputs, eval.inputs, capture.dependencies);
+		capture.flags |= RT_PLAN_CAPTURE_EVALUATED;
+	}
+}
+
+HashMap<RTMMSurfaceKey, RID> &RenderRaytracing::_capture_entry_map(RTViewportState *p_state, uint8_t p_capture_flags) {
+	const bool merged = p_capture_flags & RT_PLAN_CAPTURE_MERGED;
+	if (p_capture_flags & RT_PLAN_CAPTURE_CAMERA_DEPENDENT) {
+		return merged ? p_state->captured_mm_entries : p_state->capture_entries;
+	}
+	return merged ? shared_captured_mm_entries : shared_capture_entries;
+}
+
+// The pool entry of r_capture: its memo while the pool owns it, which then equals the handle map's entry, else the
+// handle map's. Null when it can't be allocated.
+RID RenderRaytracing::_resolve_capture_entry(RTViewportState *p_state, const RTMMSurfaceKey &p_key, RTPlanCapture &r_capture) {
+	const bool merged = r_capture.flags & RT_PLAN_CAPTURE_MERGED;
+	HashMap<RTMMSurfaceKey, RID> &entries = _capture_entry_map(p_state, r_capture.flags);
+	const bool memo_alive = merged ? merged_mm_pool.owns(r_capture.entry) : deformed_pool.owns(r_capture.entry);
+	RID &handle = memo_alive ? r_capture.entry : entries[p_key];
+	// Resets an expired entry in place, like a handle map access.
+	const bool accessed = merged ? _access_captured_mm_entry(handle) != nullptr : _access_capture_entry(handle) != nullptr;
+	if (!accessed) {
+		return RID();
+	}
+	if (memo_alive) {
+		RT_VALIDATE(_rtv_check_capture_memo(entries.getptr(p_key), handle));
+	}
+	r_capture.entry = handle;
+	return handle;
+}
+
+// The only shader state planning writes: the vertex() analysis on a shader's first capture. False when deferred.
+bool RenderRaytracing::_plan_capture_dependencies(const RTPlanContext &p_ctx, const void *p_surf) {
+	const RenderForwardClustered::GeometryInstanceSurfaceDataCache *surf =
+			static_cast<const RenderForwardClustered::GeometryInstanceSurfaceDataCache *>(p_surf);
+	RTVertexCapture::ShaderTraits &traits = surf->shader->rt_capture;
+	if (traits.dependencies.mask != RTVertexCapture::DEP_UNKNOWN) {
+		return true;
+	}
+	if (!p_ctx.allow_mutation) {
+		return false;
+	}
+	traits.dependencies = SceneShaderRaytracing::compute_vertex_capture_dependencies(surf->shader->code);
+	traits.code_version = ++capture_code_version_counter;
+	return true;
+}
+
+bool RenderRaytracing::_plan_capture_instance(const RTPlanContext &p_ctx, const void *p_inst, RTPlanArena &r_arena, uint32_t p_index) {
+	const RenderForwardClustered::GeometryInstanceForwardClustered *inst =
+			static_cast<const RenderForwardClustered::GeometryInstanceForwardClustered *>(p_inst);
+	RTPlanInstance &record = r_arena.instances[p_index];
+	record.capture_count = 0;
+	record.flags &= ~RT_PLAN_INSTANCE_NO_CAPTURE_SURFACES;
+	if (!inst || !inst->data || Math::is_zero_approx(inst->transform.basis.determinant())) {
+		return true;
+	}
+	// MultiMesh and particle captures are merged into one BLAS per surface, in TLAS instance space.
+	const bool merged = inst->data->base_type != RSE::INSTANCE_MESH;
+	RTInstanceSource source;
+	if (merged && !_rt_instance_source(inst->data->base_type, inst->data->base, source)) {
+		return true;
+	}
+
+	// Particle surface indices restart for every draw pass mesh, so they are keyed by list position.
+	uint32_t surface_ordinal = 0;
+	bool has_capture_surface = false;
+	for (const RenderForwardClustered::GeometryInstanceSurfaceDataCache *surf = inst->surface_caches; surf; surf = surf->next, surface_ordinal++) {
+		if (!is_capture_surface(surf, p_ctx.capture_mode)) {
+			continue;
+		}
+		has_capture_surface = true;
+		// Captures can only be committed once the surface's hit group is traced, so they aren't recorded before.
+		uint32_t material_slot = UINT32_MAX;
+		uint16_t material_counter = 0;
+		const RTMaterialData *mat_data = _plan_surface_material(p_ctx, surf, material_slot, material_counter);
+		if (!mat_data) {
+			return false;
+		}
+		if (!p_ctx.rt_shader->is_hg_ready_in_bundle(mat_data->rt_sbt_offset, p_ctx.rt_flags)) {
+			continue;
+		}
+		RTVertexCapture::Layout layout = _rt_capture_layout(surf->surface);
+		if (merged) {
+			layout.instance_count = _rt_drawn_instances(source, surf->flags & RenderForwardClustered::GeometryInstanceSurfaceDataCache::FLAG_USES_PARTICLE_TRAILS).count;
+		}
+		if (layout.point_count() == 0) {
+			continue;
+		}
+		if (!_plan_capture_dependencies(p_ctx, surf)) {
+			return false;
+		}
+		ERR_BREAK_MSG(record.capture_count >= record.range_capacity, "Instance has more surfaces than its rt_surface_count.");
+
+		const uint32_t index = record.range_begin + record.capture_count++;
+		RTPlanCapture &capture = r_arena.captures[index];
+		capture = RTPlanCapture();
+		capture.surf = surf;
+		capture.layout = layout;
+		capture.dependencies = RTVertexCapture::surface_dependencies(surf->shader->rt_capture, surf->shader->billboard.is_camera_dependent());
+		const uint64_t triangles = uint64_t(_rt_indices_to_primitives(surf->primitive, p_ctx.mesh_storage->mesh_surface_get_vertices_drawn_count(surf->surface))) * layout.instance_count;
+		capture.triangle_count = uint32_t(MIN(triangles, uint64_t(UINT32_MAX)));
+		capture.surface_key = source.particles ? surface_ordinal : surf->surface_index;
+		capture.flags = uint8_t((merged ? RT_PLAN_CAPTURE_MERGED : 0) | ((capture.dependencies & RTVertexCapture::DEP_CAMERA) ? RT_PLAN_CAPTURE_CAMERA_DEPENDENT : 0));
+		r_arena.capture_aabbs[index] = inst->transformed_aabb;
+	}
+	if (!has_capture_surface) {
+		record.flags |= RT_PLAN_INSTANCE_NO_CAPTURE_SURFACES;
+	}
+	return true;
+}
+
+void RenderRaytracing::_apply_capture_instance(const RTPlanContext &p_ctx, RTViewportState *p_state, const void *p_inst, RTPlanArena &r_arena, uint32_t p_index) {
+	const RTPlanInstance &record = r_arena.instances[p_index];
+	if (record.capture_count == 0) {
+		return;
+	}
+	const RenderForwardClustered::GeometryInstanceForwardClustered *inst =
+			static_cast<const RenderForwardClustered::GeometryInstanceForwardClustered *>(p_inst);
+	RTInstanceSource source;
+	if (inst->data->base_type != RSE::INSTANCE_MESH) {
+		ERR_FAIL_COND(!_rt_instance_source(inst->data->base_type, inst->data->base, source));
+	}
+	const Transform3D capture_transform = source.world_space ? Transform3D() : inst->transform;
+
+	for (uint32_t index = record.range_begin; index < record.range_begin + record.capture_count; index++) {
+		RTPlanCapture &capture = r_arena.captures[index];
+		const bool merged = capture.flags & RT_PLAN_CAPTURE_MERGED;
+		const RTMMSurfaceKey key{ inst->data->base.get_id(), uint64_t(uintptr_t(inst)), capture.surface_key };
+		const RID evaluated_entry = capture.entry;
+		const RID handle = _resolve_capture_entry(p_state, key, capture);
+		ERR_CONTINUE(handle.is_null());
+
+		CaptureBinding binding;
+		binding.entry = handle;
+		binding.merged = merged;
+		RTVertexCapture::Recapture recapture;
+		if ((capture.flags & RT_PLAN_CAPTURE_EVALUATED) && handle == evaluated_entry) {
+			const RTPlanCaptureEval &eval = r_arena.capture_evals[index];
+			binding.inputs = eval.inputs;
+			recapture = eval.recapture;
+		} else {
+			const RTCaptureState &kept = *_capture_state(binding);
+			binding.inputs = _capture_inputs(plan_workspace.serial, capture.surf, capture.dependencies, p_ctx.view_stamps, kept.inputs, capture.layout, source.last_change);
+			recapture = kept.frame == p_ctx.view_stamps.frame
+					? RTVertexCapture::RECAPTURE_NONE
+					: RTVertexCapture::needs_recapture(kept.stamp != 0, kept.inputs, binding.inputs, capture.dependencies);
+		}
+		if (recapture == RTVertexCapture::RECAPTURE_NONE) {
+			_bind_capture(capture.surf, binding);
+			continue;
+		}
+		if (recapture == RTVertexCapture::RECAPTURE_REBUILD) {
+			_reset_capture_entry(binding);
+			binding.rebuild = true;
+		}
+
+		RTSchedulerItem item;
+		item.slot = _rt_scheduler_slot(handle, merged ? RT_SCHEDULER_POOL_CAPTURED_MM : RT_SCHEDULER_POOL_CAPTURE);
+		item.gen = _rt_entry_generation(handle);
+		item.needs_build = binding.rebuild;
+		item.in_frustum = capture.flags & RT_PLAN_CAPTURE_IN_FRUSTUM;
+		item.blas_update = rt_resolve_blas_update(inst->rt_blas_update,
+				static_cast<const RenderForwardClustered::GeometryInstanceSurfaceDataCache *>(capture.surf)->shader->rt_blas_update);
+		item.aabb = r_arena.capture_aabbs[index];
+		item.triangle_count = capture.triangle_count;
+		dynamic_items.push_back(item);
+		capture_candidates.push_back(CaptureCandidate{ capture.surf, binding, capture.layout, capture_transform, source.dead_position });
+	}
 }
 
 void RenderRaytracing::prepare_vertex_captures(const RenderDataRD *p_render_data, uint32_t p_rt_flags, LocalVector<RTCaptureRequest> &r_requests) {
@@ -1559,6 +2160,7 @@ void RenderRaytracing::prepare_vertex_captures(const RenderDataRD *p_render_data
 	_clear_capture_bindings();
 	capture_candidates.clear();
 	capture_arena_used = 0;
+	_refresh_custom_shader_slots();
 	const RTVertexCapture::Mode mode = read_capture_mode();
 	_update_capture_mode(mode);
 	if (mode == RTVertexCapture::MODE_DISABLED || !p_render_data->rt_instances || !p_render_data->scene_data ||
@@ -1569,95 +2171,23 @@ void RenderRaytracing::prepare_vertex_captures(const RenderDataRD *p_render_data
 	if (!state) {
 		return;
 	}
-	_rt_prune_handle_map(state->capture_entries, deformed_pool);
-	_rt_prune_handle_map(state->captured_mm_entries, merged_mm_pool);
+	_rt_prune_handle_map(state->capture_entries, state->capture_prune, deformed_pool);
+	_rt_prune_handle_map(state->captured_mm_entries, state->captured_mm_prune, merged_mm_pool);
 
-	RendererRD::MeshStorage *mesh_storage = RendererRD::MeshStorage::get_singleton();
 	const RenderSceneDataRD *scene_data = p_render_data->scene_data;
-	RTVertexCapture::Stamps view_inputs;
-	view_inputs.frame = RSG::rasterizer->get_frame_number();
-	view_inputs.mode_version = capture_mode_version;
-	const uint64_t camera[2] = {
-		_rt_hash_bytes(&scene_data->cam_transform, sizeof(Transform3D)),
-		_rt_hash_bytes(&scene_data->cam_projection, sizeof(Projection)),
-	};
-	view_inputs.camera = _rt_hash_bytes(camera, sizeof(camera));
+	const RTViewFrustum frustum(p_render_data);
+	RTPlanContext ctx = _make_plan_context(p_render_data, p_rt_flags, nullptr);
+	ctx.frustum = &frustum;
+	RTPlanArena &arena = _open_plan_arena(state, p_render_data, ctx);
+	const PagedArray<RenderGeometryInstance *> &rt_instances = *p_render_data->rt_instances;
+	_rt_plan_instances(ctx, arena.instances.size(), plan_workspace, [&](const RTPlanContext &p_ctx, RTPlanScratch &r_scratch, uint32_t p_index) {
+		return _plan_captures(p_ctx, r_scratch, *state, rt_instances[p_index], arena, p_index);
+	});
 
 	// Bind surfaces whose capture is current; queue the others for the scheduler.
-	const RTViewFrustum frustum(p_render_data);
 	dynamic_items.clear();
-	const PagedArray<RenderGeometryInstance *> &rt_instances = *p_render_data->rt_instances;
-	for (uint32_t i = 0; i < (uint32_t)rt_instances.size(); i++) {
-		const RenderForwardClustered::GeometryInstanceForwardClustered *inst =
-				static_cast<const RenderForwardClustered::GeometryInstanceForwardClustered *>(rt_instances[i]);
-		if (!inst || !inst->data || Math::is_zero_approx(inst->transform.basis.determinant())) {
-			continue;
-		}
-		// MultiMesh and particle captures are merged into one BLAS per surface, in TLAS instance space.
-		const bool merged = inst->data->base_type != RSE::INSTANCE_MESH;
-		RTInstanceSource source;
-		if (merged && !_rt_instance_source(inst->data->base_type, inst->data->base, source)) {
-			continue;
-		}
-		const Transform3D capture_transform = source.world_space ? Transform3D() : inst->transform;
-
-		// Particle surface indices restart for every draw pass mesh, so they are keyed by list position.
-		uint32_t surface_ordinal = 0;
-		for (const RenderForwardClustered::GeometryInstanceSurfaceDataCache *surf = inst->surface_caches; surf; surf = surf->next, surface_ordinal++) {
-			if (!is_capture_surface(surf, mode) || !_surface_hit_group_ready(surf, p_rt_flags)) {
-				continue;
-			}
-			RTVertexCapture::Layout layout = _rt_capture_layout(surf->surface);
-			if (merged) {
-				layout.instance_count = _rt_drawn_instances(source, surf->flags & RenderForwardClustered::GeometryInstanceSurfaceDataCache::FLAG_USES_PARTICLE_TRAILS).count;
-			}
-			if (layout.point_count() == 0) {
-				continue;
-			}
-			RTVertexCapture::ShaderTraits &traits = surf->shader->rt_capture;
-			if (traits.dependencies.mask == RTVertexCapture::DEP_UNKNOWN) {
-				traits.dependencies = SceneShaderRaytracing::compute_vertex_capture_dependencies(surf->shader->code);
-				traits.code_version = ++capture_code_version_counter;
-			}
-			const uint32_t dependencies = RTVertexCapture::surface_dependencies(traits, surf->shader->billboard.is_camera_dependent());
-
-			const bool camera_dependent = dependencies & RTVertexCapture::DEP_CAMERA;
-			HashMap<RTMMSurfaceKey, RID> &entries = camera_dependent
-					? (merged ? state->captured_mm_entries : state->capture_entries)
-					: (merged ? shared_captured_mm_entries : shared_capture_entries);
-			const RTMMSurfaceKey key{ inst->data->base.get_id(), uint64_t(uintptr_t(inst)), source.particles ? surface_ordinal : surf->surface_index };
-			RID &handle = entries[key];
-			const bool accessed = merged ? _access_captured_mm_entry(handle) != nullptr : _access_capture_entry(handle) != nullptr;
-			ERR_CONTINUE(!accessed);
-
-			CaptureBinding binding;
-			binding.entry = handle;
-			binding.merged = merged;
-			binding.inputs = _capture_inputs(surf, dependencies, view_inputs, layout, source.last_change);
-			const RTCaptureState &capture = *_capture_state(binding);
-			const RTVertexCapture::Recapture recapture = capture.frame == view_inputs.frame
-					? RTVertexCapture::RECAPTURE_NONE
-					: RTVertexCapture::needs_recapture(capture.stamp != 0, capture.inputs, binding.inputs, dependencies);
-			if (recapture == RTVertexCapture::RECAPTURE_NONE) {
-				_bind_capture(surf, binding);
-				continue;
-			}
-			if (recapture == RTVertexCapture::RECAPTURE_REBUILD) {
-				_reset_capture_entry(binding);
-				binding.rebuild = true;
-			}
-
-			const uint64_t triangles = uint64_t(_rt_indices_to_primitives(surf->primitive, mesh_storage->mesh_surface_get_vertices_drawn_count(surf->surface))) * layout.instance_count;
-			RTSchedulerItem item;
-			item.slot = _rt_scheduler_slot(handle, merged ? RT_SCHEDULER_POOL_CAPTURED_MM : RT_SCHEDULER_POOL_CAPTURE);
-			item.gen = _rt_entry_generation(handle);
-			item.needs_build = binding.rebuild;
-			item.aabb = inst->transformed_aabb;
-			item.in_frustum = frustum.intersects(item.aabb);
-			item.triangle_count = uint32_t(MIN(triangles, uint64_t(UINT32_MAX)));
-			dynamic_items.push_back(item);
-			capture_candidates.push_back(CaptureCandidate{ surf, binding, layout, capture_transform, source.dead_position });
-		}
+	for (uint32_t i = 0; i < arena.instances.size(); i++) {
+		_apply_capture_instance(ctx, state, rt_instances[i], arena, i);
 	}
 
 	// Held captures keep their last capture; a held first capture leaves the surface unbound (static fallback).
@@ -2364,17 +2894,93 @@ void RenderRaytracing::update_procedural_blas(RTProceduralState *p_state, LocalV
 // Material processing
 // ---------------------------------------------------------------------------
 
-RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t p_material_invalidation_counter) {
-	// Static default material for invalid/null materials
-	static RTMaterialData s_default_mat;
-	static bool s_default_mat_initialized = false;
-	if (!s_default_mat_initialized) {
-		s_default_mat.data = rt_material_data_default();
-		s_default_mat_initialized = true;
-	}
+// Traced for surfaces without a material.
+static RTMaterialData &_rt_default_material() {
+	static RTMaterialData s_default_mat = [] {
+		RTMaterialData mat;
+		mat.data = rt_material_data_default();
+		return mat;
+	}();
+	return s_default_mat;
+}
 
+const RTMaterialCacheEntry *RenderRaytracing::_find_material_cache_entry(uint32_t p_slot) const {
+	const uint32_t chunk_idx = p_slot >> RT_CACHE_CHUNK_SHIFT;
+	if (chunk_idx >= uint32_t(material_chunks.size()) || !material_chunks[chunk_idx]) {
+		return nullptr;
+	}
+	return &material_chunks[chunk_idx][p_slot & RT_CACHE_CHUNK_MASK];
+}
+
+void RenderRaytracing::_touch_material_entry(RTMaterialCacheEntry &r_entry, uint32_t p_slot, uint32_t p_frame) {
+	if (r_entry.last_used_frame != p_frame && r_entry.ptr->is_custom_shader) {
+		custom_material_slots.push_back(p_slot);
+	}
+	r_entry.last_used_frame = p_frame;
+}
+
+// A hit group slot only changes when the shader source is first registered, so checking once per frame catches it.
+// False when the slot changed, which invalidates the cached UBO layout and BDA.
+bool RenderRaytracing::_custom_shader_slot_current(RTMaterialCacheEntry &r_entry, RID p_material_rid, uint32_t p_frame) {
+	const uint32_t shader_id = RendererRD::MaterialStorage::get_singleton()->material_get_shader_id(p_material_rid);
+	if (SceneShaderRaytracing::get_singleton()->register_custom_shader(shader_id, p_material_rid) != r_entry.ptr->rt_sbt_offset) {
+		material_slot_version++;
+		return false;
+	}
+	r_entry.slot_checked_frame = p_frame;
+	return true;
+}
+
+void RenderRaytracing::_refresh_custom_shader_slots() {
+	const uint32_t frame = RSG::rasterizer->get_frame_number();
+	if (frame == material_frame) {
+		return;
+	}
+	material_frame = frame;
+	SWAP(custom_material_slots, custom_material_slots_prev);
+	custom_material_slots.clear();
+	RendererRD::MaterialStorage *material_storage = RendererRD::MaterialStorage::get_singleton();
+	for (uint32_t slot : custom_material_slots_prev) {
+		RTMaterialCacheEntry *entry = get_material_cache_entry(slot);
+		if (!entry->ptr || !entry->ptr->is_custom_shader || entry->slot_checked_frame == frame) {
+			continue;
+		}
+		// Stale entries are rebuilt on use, which registers the shader again.
+		const RID material = RID::from_uint64((uint64_t(entry->cached_rid_version) << 32) | slot);
+		if (!material_storage->owns_material(material) || material_storage->material_get_rt_invalidation_counter(material) != entry->cached_counter) {
+			continue;
+		}
+		// A changed slot stays unchecked, so the next use rebuilds the entry like process_material always did.
+		_custom_shader_slot_current(*entry, material, frame);
+	}
+}
+
+const RTMaterialData *RenderRaytracing::lookup_material(RID p_material_rid, uint16_t p_material_invalidation_counter, uint32_t &r_slot) const {
 	if (!p_material_rid.is_valid()) {
-		return &s_default_mat;
+		r_slot = UINT32_MAX;
+		return &_rt_default_material();
+	}
+	r_slot = get_rid_index(p_material_rid);
+	const RTMaterialCacheEntry *entry = _find_material_cache_entry(r_slot);
+	if (!entry || !entry->ptr || entry->cached_rid_version != get_rid_version(p_material_rid) || entry->cached_counter != p_material_invalidation_counter) {
+		return nullptr;
+	}
+	const bool slot_checked = !entry->ptr->is_custom_shader || entry->slot_checked_frame == RSG::rasterizer->get_frame_number();
+	return slot_checked ? entry->ptr : nullptr;
+}
+
+RTMaterialData *RenderRaytracing::touch_material(uint32_t p_slot) {
+	if (p_slot == UINT32_MAX) {
+		return &_rt_default_material();
+	}
+	RTMaterialCacheEntry *entry = get_material_cache_entry(p_slot);
+	_touch_material_entry(*entry, p_slot, RSG::rasterizer->get_frame_number());
+	return entry->ptr;
+}
+
+RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t p_material_invalidation_counter) {
+	if (!p_material_rid.is_valid()) {
+		return &_rt_default_material();
 	}
 
 	// Cache lookup
@@ -2388,18 +2994,9 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 			entry->cached_counter != p_material_invalidation_counter;
 
 	if (!needs_refresh) {
-		// A hit group slot only changes when the shader source is first registered, so once per frame catches it.
-		const bool slot_checked = entry->last_used_frame == current_frame;
-		entry->last_used_frame = current_frame;
-		if (entry->ptr->is_custom_shader && !slot_checked) {
-			uint32_t shader_id = RendererRD::MaterialStorage::get_singleton()->material_get_shader_id(p_material_rid);
-			uint32_t old_sbt = entry->ptr->rt_sbt_offset;
-			uint32_t new_sbt = SceneShaderRaytracing::get_singleton()->register_custom_shader(shader_id, p_material_rid);
-			entry->ptr->rt_sbt_offset = new_sbt;
-			// HG slot change invalidates cached UBO layout / BDA.
-			if (old_sbt != new_sbt) {
-				needs_refresh = true;
-			}
+		_touch_material_entry(*entry, mat_idx, current_frame);
+		if (entry->ptr->is_custom_shader && entry->slot_checked_frame != current_frame && !_custom_shader_slot_current(*entry, p_material_rid, current_frame)) {
+			needs_refresh = true;
 		}
 		if (!needs_refresh) {
 			return entry->ptr;
@@ -2785,7 +3382,9 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 	// Update cache entry
 	entry->cached_counter = p_material_invalidation_counter;
 	entry->cached_rid_version = mat_version;
-	entry->last_used_frame = current_frame;
+	entry->slot_checked_frame = current_frame;
+	_touch_material_entry(*entry, mat_idx, current_frame);
+	material_table.set(mat_data->table_index, mat);
 
 	return mat_data;
 }
@@ -3276,7 +3875,7 @@ bool RenderRaytracing::_build_merged_mm_blas(
 // Merged mesh surface groups
 // ---------------------------------------------------------------------------
 
-RTMeshGroupEntry *RenderRaytracing::_process_mesh_group(const RTMeshGroupKey &p_key, Span<uint32_t> p_members, LocalVector<RID> &r_dirty_blas_list) {
+RTMeshGroupEntry *RenderRaytracing::_process_mesh_group(const RTMeshGroupKey &p_key, Span<const RTPlanSurface> p_members, LocalVector<RID> &r_dirty_blas_list) {
 	RTMeshGroupEntry *entry = mesh_groups.getptr(p_key);
 	if (!entry) {
 		_trim_mesh_group_variants(p_key.mesh_id);
@@ -3286,7 +3885,7 @@ RTMeshGroupEntry *RenderRaytracing::_process_mesh_group(const RTMeshGroupKey &p_
 
 	bool up_to_date = entry->blas.is_valid() && entry->surface_counters.size() == p_members.size();
 	for (uint32_t i = 0; up_to_date && i < p_members.size(); i++) {
-		up_to_date = entry->surface_counters[i] == surface_records[p_members[i]].surface_counter;
+		up_to_date = entry->surface_counters[i] == p_members[i].surface_counter;
 	}
 	if (up_to_date) {
 		cache_hits++;
@@ -3304,9 +3903,10 @@ RTMeshGroupEntry *RenderRaytracing::_process_mesh_group(const RTMeshGroupKey &p_
 	LocalVector<RD::AccelerationStructureGeometry> as_geoms;
 	as_geoms.resize(count);
 	for (uint32_t i = 0; i < count; i++) {
-		const RTSurfaceRecord &rec = surface_records[p_members[i]];
+		const RTPlanSurface &rec = p_members[i];
+		void *mesh_surface = static_cast<const RenderForwardClustered::GeometryInstanceSurfaceDataCache *>(rec.surf)->surface;
 		RTSurfaceData surf_data;
-		if (!_fill_surface_blas_geometry(rec.mesh_surface, RID(), RID(), false, &surf_data, as_geoms[i])) {
+		if (!_fill_surface_blas_geometry(mesh_surface, RID(), RID(), false, &surf_data, as_geoms[i])) {
 			mesh_groups.erase(p_key);
 			return nullptr;
 		}
@@ -3449,9 +4049,18 @@ static bool _rt_uses_alpha_scissor(const SceneShaderForwardClustered::ShaderData
 
 struct RTSurfaceRecordOrder {
 	_FORCE_INLINE_ bool operator()(const RTSurfaceRecord &p_a, const RTSurfaceRecord &p_b) const {
-		return p_a.surface_index < p_b.surface_index;
+		return p_a.surface.surface_index < p_b.surface.surface_index;
 	}
 };
+
+// Key of a group member traced on its own: members share the group key except for their opacity.
+static RTSurfaceGroupKey _rt_member_key(const RTPlanGroup &p_group, const RTPlanSurface &p_member) {
+	RTSurfaceGroupKey key = p_group.key;
+	if (p_group.surface_count > 1) {
+		key.opaque = (p_group.opaque_mask >> p_member.surface_index) & 1;
+	}
+	return key;
+}
 
 static RSE::CullMode _rt_cull_mode(const SceneShaderForwardClustered::ShaderData *p_shader) {
 	return p_shader ? p_shader->rt_cull_mode() : RSE::CULL_MODE_BACK;
@@ -3460,15 +4069,16 @@ static RSE::CullMode _rt_cull_mode(const SceneShaderForwardClustered::ShaderData
 namespace RendererSceneRenderImplementation {
 
 // Gathers the TLAS instances of one view and their geometry and material entries, for RenderRaytracing::build_tlas.
-// Mesh and procedural instances are added while gathering. MultiMesh and particle surfaces are collected and added
-// afterwards, so their merge dispatches share one compute list.
+// Mesh instances are planned into the view's arena first, then every instance is applied in order: mesh and procedural
+// instances are added, MultiMesh and particle surfaces collected and added afterwards, so their merge dispatches share
+// one compute list.
 class RTTlasBuilder {
 public:
-	RTTlasBuilder(RenderRaytracing &p_rt, const RenderDataRD *p_render_data, uint32_t p_rt_flags, LocalVector<RTCaptureRequest> &r_captures, RTViewportState *p_state);
+	RTTlasBuilder(RenderRaytracing &p_rt, const RenderDataRD *p_render_data, const RTPlanContext &p_ctx, LocalVector<RTCaptureRequest> &r_captures, RTViewportState *p_state);
 
-	/// Adds the mesh and procedural instances and collects the MultiMesh and particle surfaces.
-	void gather_instances();
-	/// Adds the surfaces collected by gather_instances, merged into one BLAS per surface where the merge bake can.
+	// Plans the mesh instances into r_arena, adds them and the procedural instances and collects the MultiMesh and particle surfaces.
+	void gather_instances(RTPlanArena &r_arena);
+	// Adds the surfaces collected by gather_instances, merged into one BLAS per surface where the merge bake can.
 	void add_multimesh_surfaces();
 	// Adds this view's counters to its render info and flags surfaces still waiting to be traced.
 	void finish();
@@ -3495,6 +4105,14 @@ private:
 		}
 	};
 
+	// How gather_instances treats an instance of rt_instances.
+	enum InstanceKind : uint8_t {
+		INSTANCE_SKIPPED,
+		INSTANCE_PROCEDURAL,
+		INSTANCE_MERGED, // MultiMesh or particles.
+		INSTANCE_MESH,
+	};
+
 	struct PendingMMSurface {
 		RTInstanceSource source;
 		const SurfaceCache *mm_surf;
@@ -3518,6 +4136,7 @@ private:
 		RID capture_entry; // Merged entry holding the surface's capture when bake.captured.
 		RTSchedulerAction capture_action = RT_SCHEDULER_HOLD; // Picked by prepare_vertex_captures when bake.captured.
 		AABB aabb; // World-space instance bounds, for scheduling.
+		RS::RTBlasUpdate blas_update = RS::RT_BLAS_UPDATE_AUTO; // Resolved against the shader, for scheduling.
 	};
 
 	struct MergedJob {
@@ -3548,17 +4167,17 @@ private:
 
 	RenderRaytracing &rt;
 	const RenderDataRD *render_data = nullptr;
-	const uint32_t rt_flags = 0;
+	const RTPlanContext &ctx;
 	LocalVector<RTCaptureRequest> &captures;
 	RTViewportState *state = nullptr;
 	RendererRD::MeshStorage *mesh_storage = nullptr;
 	RendererRD::MaterialStorage *material_storage = nullptr;
 	SceneShaderRaytracing *rt_shader = nullptr;
-	uint32_t camera_visible_layers = 0xFFFFFFFFu;
 	// Path-traced billboards face the camera for every ray type, like raster Enabled/Y modes do for the main camera.
 	RenderingBillboard::Camera billboard_camera;
 	RenderingBillboard::Camera prev_billboard_camera;
 
+	LocalVector<InstanceKind> instance_kinds; // Per rt_instances entry.
 	LocalVector<PendingMMSurface> pending_mm_surfaces;
 	uint32_t pending_surface_count = 0; // Surfaces left out until their hit group or capture is ready.
 
@@ -3594,13 +4213,35 @@ private:
 		return p_inst.transform_status == Instance::TransformStatus::MOVED;
 	}
 
+	static bool _casts_self_shadow(const Instance &p_inst) { return p_inst.rt_self_shadowing && p_inst.rt_shadow_caster; }
+	uint32_t _self_shadowing_flag(uint8_t p_tlas_mask) const {
+		return (p_tlas_mask & state->shadow_groups.self_shadow_bit) != 0 ? uint32_t(RT_GEOM_FLAG_SELF_SHADOWING) : 0u;
+	}
+	static InstanceKind _instance_kind(const Instance *p_inst);
+	static InstanceMasks _plan_masks(const RTPlanKey &p_key) { return { p_key.camera_visible, p_key.mask_opaque, p_key.mask_shadow }; }
+
 	void _register_shadow_groups();
 	InstanceMasks _instance_masks(const Instance &p_inst) const;
 	void _add_procedural_instance(const Instance &p_inst, const InstanceMasks &p_masks);
 	void _gather_mm_surfaces(const Instance &p_inst, const InstanceMasks &p_masks);
-	void _add_mesh_instance(const Instance &p_inst, const InstanceMasks &p_masks);
-	bool _collect_surface_records(const Instance &p_inst, const InstanceMasks &p_masks);
-	void _add_surface_group(const Instance &p_inst, uint32_t p_leader, int32_t p_motion_index);
+
+	// Planning: reads p_ctx and the caches, writes only the record p_index of r_arena and r_scratch, so it runs on workers.
+	// p_ctx is ctx, with allow_mutation off on workers (see RenderRaytracing::_plan_surface_material).
+	bool _plan_mesh_record(const RTPlanContext &p_ctx, RTPlanScratch &r_scratch, RTPlanArena &r_arena, uint32_t p_index);
+	bool _reuse_mesh_plan(const Instance &p_inst, RTPlanArena &r_arena, uint32_t p_index);
+	bool _plan_surfaces_current(const RTPlanArena &p_arena, const RTPlanInstance &p_record) const;
+	bool _plan_mesh_instance(const RTPlanContext &p_ctx, RTPlanScratch &r_scratch, const Instance &p_inst, RTPlanArena &r_arena, uint32_t p_index);
+	uint8_t _plan_deformed_kind(const Instance &p_inst, const SurfaceCache *p_surf) const;
+	static void _plan_groups(RTPlanScratch &r_scratch, RTPlanArena &r_arena, RTPlanInstance &r_record);
+#ifdef RT_VALIDATION_ENABLED
+	void _rtv_check_reused_tlas(const Instance &p_inst, const RTPlanArena &p_arena, uint32_t p_index);
+#endif
+
+	// Applying a plan: every side effect, in TLAS order.
+	void _apply_mesh_instance(const Instance &p_inst, const RTPlanArena &p_arena, const RTPlanInstance &p_record);
+	void _apply_surface_group(const Instance &p_inst, const RTPlanGroup &p_group, Span<const RTPlanSurface> p_members, int32_t p_motion_index);
+	RTSurfaceData *_process_plan_surface(const Instance &p_inst, const RTPlanSurface &p_surface);
+	RTDeformedGeometrySource _deformed_source(const Instance &p_inst, const RTPlanSurface &p_surface);
 
 	void _upload_merge_billboards();
 	void _resolve_merged_jobs(LocalVector<MergedJob> &r_jobs);
@@ -3622,18 +4263,18 @@ private:
 
 } // namespace RendererSceneRenderImplementation
 
-RTTlasBuilder::RTTlasBuilder(RenderRaytracing &p_rt, const RenderDataRD *p_render_data, uint32_t p_rt_flags, LocalVector<RTCaptureRequest> &r_captures, RTViewportState *p_state) :
+RTTlasBuilder::RTTlasBuilder(RenderRaytracing &p_rt, const RenderDataRD *p_render_data, const RTPlanContext &p_ctx, LocalVector<RTCaptureRequest> &r_captures, RTViewportState *p_state) :
 		rt(p_rt),
 		render_data(p_render_data),
-		rt_flags(p_rt_flags),
+		ctx(p_ctx),
 		captures(r_captures),
 		state(p_state),
 		mesh_storage(RendererRD::MeshStorage::get_singleton()),
 		material_storage(RendererRD::MaterialStorage::get_singleton()),
 		rt_shader(SceneShaderRaytracing::get_singleton()),
-		collect_render_info(p_render_data->render_info != nullptr) {
+		collect_render_info(p_render_data->render_info != nullptr),
+		preserve_front_facing(RenderForwardClustered::get_singleton()->is_front_facing_preserved_when_mirrored()) {
 	if (p_render_data->scene_data) {
-		camera_visible_layers = p_render_data->scene_data->camera_visible_layers;
 		billboard_camera = _rt_billboard_camera(p_render_data->scene_data->cam_transform, p_render_data->scene_data->cam_projection);
 		prev_billboard_camera = _rt_billboard_camera(p_render_data->scene_data->prev_cam_transform, p_render_data->scene_data->prev_cam_projection);
 	}
@@ -3642,22 +4283,70 @@ RTTlasBuilder::RTTlasBuilder(RenderRaytracing &p_rt, const RenderDataRD *p_rende
 	}
 }
 
-void RTTlasBuilder::gather_instances() {
+RTTlasBuilder::InstanceKind RTTlasBuilder::_instance_kind(const Instance *p_inst) {
+	if (!p_inst || !p_inst->data || _fully_faded(*p_inst)) {
+		return INSTANCE_SKIPPED;
+	}
+	if (p_inst->rt_procedural) {
+		return INSTANCE_PROCEDURAL;
+	}
+	const bool merged = p_inst->data->base_type == RSE::INSTANCE_MULTIMESH || p_inst->data->base_type == RSE::INSTANCE_PARTICLES;
+	return merged ? INSTANCE_MERGED : INSTANCE_MESH;
+}
+
+void RTTlasBuilder::gather_instances(RTPlanArena &r_arena) {
 	_register_shadow_groups();
 
 	const PagedArray<RenderGeometryInstance *> &instances = *render_data->rt_instances;
-	for (uint32_t i = 0; i < (uint32_t)instances.size(); i++) {
+	const uint32_t count = r_arena.instances.size();
+	for (uint32_t i = 0; i < count; i++) {
 		const Instance *inst = static_cast<const Instance *>(instances[i]);
-		if (!inst || !inst->data || _fully_faded(*inst)) {
+		if (inst && _casts_self_shadow(*inst)) {
+			state->shadow_groups.reserve_self_shadow_group();
+			break;
+		}
+	}
+	// Shadow-caster groups are allocated on first use, so masks are assigned serially and in instance order.
+	instance_kinds.resize(count);
+	for (uint32_t i = 0; i < count; i++) {
+		const Instance *inst = static_cast<const Instance *>(instances[i]);
+		instance_kinds[i] = _instance_kind(inst);
+		if (instance_kinds[i] == INSTANCE_SKIPPED) {
 			continue;
 		}
 		const InstanceMasks masks = _instance_masks(*inst);
-		if (inst->rt_procedural) {
-			_add_procedural_instance(*inst, masks);
-		} else if (inst->data->base_type == RSE::INSTANCE_MULTIMESH || inst->data->base_type == RSE::INSTANCE_PARTICLES) {
-			_gather_mm_surfaces(*inst, masks);
-		} else {
-			_add_mesh_instance(*inst, masks);
+		RTPlanKey &key = r_arena.instances[i].key;
+		key.camera_visible = masks.camera_visible;
+		key.mask_opaque = masks.opaque;
+		key.mask_shadow = masks.shadow;
+		key.transparency = uint8_t(rt_instance_transparency(_instance_alpha(*inst)));
+	}
+
+	_rt_plan_instances(ctx, count, rt.plan_workspace, [&](const RTPlanContext &p_ctx, RTPlanScratch &r_scratch, uint32_t p_index) {
+		return _plan_mesh_record(p_ctx, r_scratch, r_arena, p_index);
+	});
+	for (uint32_t i = 0; i < count; i++) {
+		const Instance *inst = static_cast<const Instance *>(instances[i]);
+		if (instance_kinds[i] == INSTANCE_MESH && inst->rt_index != UINT32_MAX) {
+			rt_plan_set_lookup(state->plan_lookup, inst->rt_index, i);
+		}
+	}
+
+	for (uint32_t i = 0; i < count; i++) {
+		const Instance *inst = static_cast<const Instance *>(instances[i]);
+		const RTPlanInstance &record = r_arena.instances[i];
+		switch (instance_kinds[i]) {
+			case INSTANCE_PROCEDURAL:
+				_add_procedural_instance(*inst, _plan_masks(record.key));
+				break;
+			case INSTANCE_MERGED:
+				_gather_mm_surfaces(*inst, _plan_masks(record.key));
+				break;
+			case INSTANCE_MESH:
+				_apply_mesh_instance(*inst, r_arena, record);
+				break;
+			case INSTANCE_SKIPPED:
+				break;
 		}
 	}
 }
@@ -3728,7 +4417,7 @@ void RTTlasBuilder::_register_shadow_groups() {
 
 RTTlasBuilder::InstanceMasks RTTlasBuilder::_instance_masks(const Instance &p_inst) const {
 	InstanceMasks masks;
-	masks.camera_visible = (p_inst.layer_mask & camera_visible_layers) != 0 && !p_inst.rt_shadows_only;
+	masks.camera_visible = (p_inst.layer_mask & ctx.camera_visible_layers) != 0 && !p_inst.rt_shadows_only;
 	masks.opaque = masks.camera_visible ? uint8_t(RT_VIS_BIT) : uint8_t(0);
 	if (_casts_self_shadow(p_inst)) {
 		masks.shadow = state->shadow_groups.self_shadow_bits_for_layers(p_inst.layer_mask);
@@ -3754,7 +4443,7 @@ void RTTlasBuilder::_add_procedural_instance(const Instance &p_inst, const Insta
 	if (hg_index == 0) {
 		return;
 	}
-	if (!rt_shader->is_hg_ready_in_bundle(hg_index, rt_flags)) {
+	if (!rt_shader->is_hg_ready_in_bundle(hg_index, ctx.rt_flags)) {
 		pending_surface_count++;
 		return;
 	}
@@ -3879,82 +4568,217 @@ void RTTlasBuilder::_gather_mm_surfaces(const Instance &p_inst, const InstanceMa
 	}
 }
 
-void RTTlasBuilder::_add_mesh_instance(const Instance &p_inst, const InstanceMasks &p_masks) {
-	const bool all_hit_groups_ready = _collect_surface_records(p_inst, p_masks);
-	LocalVector<RTSurfaceRecord> &records = rt.surface_records;
-	if (records.is_empty()) {
-		return;
+// TLAS part of record p_index: reused from last frame or planned. True for instances that aren't meshes; false when deferred.
+bool RTTlasBuilder::_plan_mesh_record(const RTPlanContext &p_ctx, RTPlanScratch &r_scratch, RTPlanArena &r_arena, uint32_t p_index) {
+	if (instance_kinds[p_index] != INSTANCE_MESH) {
+		return true;
 	}
-
-	// Grouping is deferred until every hit group is live, so the group does not rebuild as each one compiles.
-	records.sort_custom<RTSurfaceRecordOrder>();
-	rt.surface_group_keys.resize(records.size());
-	for (uint32_t s = 0; s < records.size(); s++) {
-		records[s].key.groupable = records[s].key.groupable && all_hit_groups_ready;
-		rt.surface_group_keys[s] = records[s].key;
-	}
-	rt_assign_surface_groups(rt.surface_group_keys, rt.surface_group_leaders);
-
-	const int32_t motion_index = _moved(p_inst) ? _push_motion_transform(_prev_transform(p_inst)) : -1;
-	for (uint32_t leader = 0; leader < records.size(); leader++) {
-		if (rt.surface_group_leaders[leader] == leader) {
-			_add_surface_group(p_inst, leader, motion_index);
-		}
-	}
+	const Instance &inst = *static_cast<const Instance *>((*render_data->rt_instances)[p_index]);
+	r_arena.instances[p_index].key.surfaces_version = inst.rt_surfaces_version;
+	return _reuse_mesh_plan(inst, r_arena, p_index) || _plan_mesh_instance(p_ctx, r_scratch, inst, r_arena, p_index);
 }
 
-// Gathers the traced surfaces of p_inst into rt.surface_records, in surface order. False while a hit group is compiling.
-bool RTTlasBuilder::_collect_surface_records(const Instance &p_inst, const InstanceMasks &p_masks) {
-	rt.surface_records.clear();
+// Copies last frame's TLAS plan of p_inst into record p_index when its inputs still match. False to plan it anew.
+bool RTTlasBuilder::_reuse_mesh_plan(const Instance &p_inst, RTPlanArena &r_arena, uint32_t p_index) {
+	const uint32_t prev_index = _rt_plan_prev_index(*state, p_inst.rt_index, p_inst.rt_surfaces_version);
+	if (prev_index == UINT32_MAX) {
+		return false;
+	}
+	const RTPlanArena &prev = _rt_prev_plan_arena(*state);
+	const RTPlanInstance &cached = prev.instances[prev_index];
+	if (cached.flags & RT_PLAN_INSTANCE_DYNAMIC) {
+		return false;
+	}
+	const RTPlanKeyMatch match = rt_plan_key_match(cached.key, prev.versions, r_arena.instances[p_index].key, r_arena.versions);
+	const bool current = match == RT_PLAN_KEY_MATCH || (match == RT_PLAN_KEY_GLOBAL_ONLY && _plan_surfaces_current(prev, cached));
+	if (!current || !_rt_copy_tlas_plan(prev, prev_index, r_arena, p_index)) {
+		return false;
+	}
+	RT_VALIDATE(_rtv_check_reused_tlas(p_inst, r_arena, p_index));
+	return true;
+}
+
+// Slow path of a key that only moved in global versions: whether every planned surface's mesh and material are unchanged.
+bool RTTlasBuilder::_plan_surfaces_current(const RTPlanArena &p_arena, const RTPlanInstance &p_record) const {
+	// The inputs of surfaces left out until their hit group is ready aren't recorded.
+	if (p_record.pending_surfaces > 0) {
+		return false;
+	}
+	for (uint32_t s = p_record.range_begin; s < p_record.range_begin + p_record.surface_count; s++) {
+		const RTPlanSurface &surface = p_arena.surfaces[s];
+		const SurfaceCache *surf = static_cast<const SurfaceCache *>(surface.surf);
+		if (ctx.mesh_storage->mesh_surface_get_rt_invalidation_counter(surf->surface) != surface.surface_counter) {
+			return false;
+		}
+		const RID material = rt._surface_material_rid(surf);
+		const uint16_t material_counter = ctx.material_storage->material_get_rt_invalidation_counter(material);
+		uint32_t material_slot = UINT32_MAX;
+		if (material_counter != surface.material_counter || !rt.lookup_material(material, material_counter, material_slot) || material_slot != surface.material_slot) {
+			return false;
+		}
+	}
+	return true;
+}
+
+#ifdef RT_VALIDATION_ENABLED
+void RTTlasBuilder::_rtv_check_reused_tlas(const Instance &p_inst, const RTPlanArena &p_arena, uint32_t p_index) {
+	const bool planned = _plan_mesh_instance(ctx, rt.plan_workspace.serial, p_inst, rt._rtv_replan_arena(p_arena, p_index), 0);
+	rt._rtv_check_reused_plan(p_arena, p_index, true, planned);
+}
+#endif
+
+// Plans the traced surfaces of p_inst: material, readiness, BLAS cache key, deformation and grouping.
+bool RTTlasBuilder::_plan_mesh_instance(const RTPlanContext &p_ctx, RTPlanScratch &r_scratch, const Instance &p_inst, RTPlanArena &r_arena, uint32_t p_index) {
+	RTPlanInstance &record = r_arena.instances[p_index];
+	record.group_count = 0;
+	record.surface_count = 0;
+	record.pending_surfaces = 0;
+	// Deformation can start without a key change (first skinning, first capture), so such instances are never reused.
+	const uint8_t dynamic = p_inst.mesh_instance.is_valid() ? RT_PLAN_INSTANCE_DYNAMIC : 0;
+	record.flags = uint8_t(RT_PLAN_INSTANCE_VALID | dynamic | (record.flags & RT_PLAN_CAPTURE_PART_FLAGS));
+
+	const InstanceMasks masks = _plan_masks(record.key);
+	const float instance_alpha = _instance_alpha(p_inst);
+	LocalVector<RTSurfaceRecord> &records = r_scratch.records;
+	records.clear();
 	bool all_hit_groups_ready = true;
 	for (const SurfaceCache *surf = p_inst.surface_caches; surf; surf = surf->next) {
 		if (!surf->rt_base_pass) {
 			continue;
 		}
-		const ShaderData::RTBlendClass blend_class = _blend_class(surf->shader, _instance_alpha(p_inst));
+		const ShaderData::RTBlendClass blend_class = _blend_class(surf->shader, instance_alpha);
 		const bool transparent = blend_class != ShaderData::RT_BLEND_OPAQUE;
-		const uint8_t tlas_mask = p_masks.for_surface(transparent);
+		const uint8_t tlas_mask = masks.for_surface(transparent);
 		if (tlas_mask == 0) {
 			continue;
 		}
 
-		RTMaterialData *mat_data = rt._surface_material(surf);
+		uint32_t material_slot = UINT32_MAX;
+		uint16_t material_counter = 0;
+		const RTMaterialData *mat_data = rt._plan_surface_material(p_ctx, surf, material_slot, material_counter);
+		if (!mat_data) {
+			return false;
+		}
 		if (!_hit_group_ready(mat_data)) {
 			all_hit_groups_ready = false;
-			pending_surface_count++;
+			record.pending_surfaces++;
 			continue;
 		}
 
-		RTSurfaceRecord rec;
-		rec.surf = surf;
-		rec.mesh_surface = surf->surface;
-		rec.mat_data = mat_data;
-		rec.surface_index = surf->surface_index;
-		rec.surface_counter = mesh_storage->mesh_surface_get_rt_invalidation_counter(surf->surface);
-		if (!rt._resolve_captured_source(surf, captures, rec.deformed) && p_inst.mesh_instance.is_valid()) {
-			rec.deformed = _rt_mesh_instance_source(p_inst.mesh_instance, surf->surface_index);
-			rec.deformed.cache_handle = &surf->rt_deformed_handle;
-		}
-		rec.deformed.surface_counter = rec.surface_counter;
-		rec.transparent = transparent;
-		_fill_surface_key(surf->shader, mat_data, blend_class, tlas_mask, rec.key, rec.material_flags);
+		records.resize(records.size() + 1);
+		RTSurfaceRecord &rec = records[records.size() - 1];
+		rec = RTSurfaceRecord();
+		RTPlanSurface &surface = rec.surface;
+		surface.surf = surf;
+		surface.material_slot = material_slot;
+		surface.material_counter = material_counter;
+		rt._surface_cache_key(surf, surface.cache_key, surface.mesh_rid_version);
+		surface.surface_counter = p_ctx.mesh_storage->mesh_surface_get_rt_invalidation_counter(surf->surface);
+		surface.surface_index = uint8_t(surf->surface_index);
+		surface.deformed_kind = _plan_deformed_kind(p_inst, surf);
+		surface.flags = uint8_t(transparent ? RT_PLAN_SURFACE_TRANSPARENT : 0);
+		_fill_surface_key(surf->shader, mat_data, blend_class, tlas_mask, rec.key, surface.material_flags);
 		// Captured positions already include the billboard.
-		if (surf->shader && !rec.deformed.captured) {
+		if (surf->shader && surface.deformed_kind != RT_PLAN_DEFORMED_CAPTURED) {
 			rec.key.billboard = surf->shader->billboard;
 		}
-		rec.key.groupable = rec.surface_index < 64 && !rec.deformed.is_deformed();
-		rt.surface_records.push_back(rec);
+		rec.key.groupable = surf->surface_index < 64 && surface.deformed_kind == RT_PLAN_DEFORMED_NONE;
+		if (RenderRaytracing::is_capture_surface(surf, p_ctx.capture_mode)) {
+			record.flags |= RT_PLAN_INSTANCE_DYNAMIC;
+		}
 	}
-	return all_hit_groups_ready;
+	if (all_hit_groups_ready) {
+		record.flags |= RT_PLAN_INSTANCE_HIT_GROUPS_READY;
+	}
+	ERR_FAIL_COND_V_MSG(records.size() > record.range_capacity, true, "Instance has more surfaces than its rt_surface_count.");
+
+	// Grouping is deferred until every hit group is live, so the group does not rebuild as each one compiles.
+	records.sort_custom<RTSurfaceRecordOrder>();
+	r_scratch.group_keys.resize(records.size());
+	for (uint32_t s = 0; s < records.size(); s++) {
+		records[s].key.groupable = records[s].key.groupable && all_hit_groups_ready;
+		r_scratch.group_keys[s] = records[s].key;
+	}
+	rt_assign_surface_groups(r_scratch.group_keys, r_scratch.group_leaders);
+	_plan_groups(r_scratch, r_arena, record);
+	return true;
 }
 
-// Adds the surfaces led by p_leader: one TLAS instance on their shared multi-geometry BLAS, or one per surface.
-void RTTlasBuilder::_add_surface_group(const Instance &p_inst, uint32_t p_leader, int32_t p_motion_index) {
-	const LocalVector<RTSurfaceRecord> &records = rt.surface_records;
-	LocalVector<uint32_t> &members = rt.surface_group_members;
+// Where the surface's per-frame geometry comes from; resolved again by apply, which also commits captures.
+uint8_t RTTlasBuilder::_plan_deformed_kind(const Instance &p_inst, const SurfaceCache *p_surf) const {
+	if (rt._peek_captured(p_surf, *ctx.captures)) {
+		return RT_PLAN_DEFORMED_CAPTURED;
+	}
+	const bool deformed = p_inst.mesh_instance.is_valid() && ctx.mesh_storage->mesh_instance_get_vertex_buffer(p_inst.mesh_instance, p_surf->surface_index).is_valid();
+	return deformed ? RT_PLAN_DEFORMED_MESH_INSTANCE : RT_PLAN_DEFORMED_NONE;
+}
 
+// Writes r_scratch.records into r_record's range, grouped by r_scratch.group_leaders: groups in leader order, each
+// group's members contiguous and in surface order, which is the order apply adds TLAS entries in.
+void RTTlasBuilder::_plan_groups(RTPlanScratch &r_scratch, RTPlanArena &r_arena, RTPlanInstance &r_record) {
+	const LocalVector<RTSurfaceRecord> &records = r_scratch.records;
+	const LocalVector<uint32_t> &leaders = r_scratch.group_leaders;
+	LocalVector<uint32_t> &first_member = r_scratch.group_cursors;
+	LocalVector<uint32_t> &order = r_scratch.group_order;
+	const uint32_t count = records.size();
+
+	// Counting sort by leader; a leader precedes its members, so offsets assigned at leaders follow leader order.
+	first_member.resize(count);
+	for (uint32_t s = 0; s < count; s++) {
+		first_member[s] = 0;
+	}
+	for (uint32_t s = 0; s < count; s++) {
+		first_member[leaders[s]]++;
+	}
+	uint32_t offset = 0;
+	for (uint32_t s = 0; s < count; s++) {
+		if (leaders[s] == s) {
+			const uint32_t members = first_member[s];
+			first_member[s] = offset;
+			offset += members;
+		}
+	}
+	order.resize(count);
+	for (uint32_t s = 0; s < count; s++) {
+		order[first_member[leaders[s]]++] = s;
+	}
+
+	for (uint32_t m = 0; m < count;) {
+		const uint32_t leader = leaders[order[m]];
+		RTPlanGroup &group = r_arena.groups[r_record.range_begin + r_record.group_count++];
+		group = RTPlanGroup();
+		group.key = records[leader].key;
+		group.transparent = records[leader].surface.flags & RT_PLAN_SURFACE_TRANSPARENT;
+		group.surface_begin = uint16_t(m);
+		for (; m < count && leaders[order[m]] == leader; m++) {
+			const RTSurfaceRecord &rec = records[order[m]];
+			r_arena.surfaces[r_record.range_begin + m] = rec.surface;
+			const uint64_t bit = rec.surface.surface_index < 64 ? 1ULL << rec.surface.surface_index : 0;
+			group.surface_mask |= bit;
+			group.opaque_mask |= rec.key.opaque ? bit : 0;
+		}
+		group.surface_count = uint16_t(m - group.surface_begin);
+	}
+	r_record.surface_count = uint16_t(count);
+}
+
+void RTTlasBuilder::_apply_mesh_instance(const Instance &p_inst, const RTPlanArena &p_arena, const RTPlanInstance &p_record) {
+	pending_surface_count += p_record.pending_surfaces;
+	if (p_record.surface_count == 0) {
+		return;
+	}
+	const int32_t motion_index = _moved(p_inst) ? _push_motion_transform(_prev_transform(p_inst)) : -1;
+	const RTPlanSurface *surfaces = p_arena.surfaces.ptr() + p_record.range_begin;
+	for (uint32_t g = 0; g < p_record.group_count; g++) {
+		const RTPlanGroup &group = p_arena.groups[p_record.range_begin + g];
+		_apply_surface_group(p_inst, group, Span<const RTPlanSurface>(surfaces + group.surface_begin, group.surface_count), motion_index);
+	}
+}
+
+// Adds one TLAS instance on the group's shared multi-geometry BLAS, or one per member.
+void RTTlasBuilder::_apply_surface_group(const Instance &p_inst, const RTPlanGroup &p_group, Span<const RTPlanSurface> p_members, int32_t p_motion_index) {
 	// Group members share the key, so one billboard transform covers the whole group.
-	const RenderingBillboard::Settings &billboard = records[p_leader].key.billboard;
+	const RenderingBillboard::Settings &billboard = p_group.key.billboard;
 	Transform3D tlas_transform = p_inst.transform;
 	int32_t motion_index = p_motion_index;
 	if (billboard.is_camera_dependent()) {
@@ -3963,60 +4787,77 @@ void RTTlasBuilder::_add_surface_group(const Instance &p_inst, uint32_t p_leader
 		motion_index = prev_tlas_transform != tlas_transform ? _push_motion_transform(prev_tlas_transform) : -1;
 	}
 
-	members.clear();
-	RTMeshGroupKey group_key;
-	group_key.mesh_id = p_inst.data->base.get_id();
-	for (uint32_t s = p_leader; s < records.size(); s++) {
-		if (rt.surface_group_leaders[s] == p_leader) {
-			members.push_back(s);
-			const uint64_t bit = 1ULL << records[s].surface_index;
-			group_key.surface_mask |= bit;
-			group_key.opaque_mask |= records[s].key.opaque ? bit : 0;
-		}
-	}
-
 	const DirtyMark mark = _dirty_mark();
 	const uint32_t uniforms_ofs = uint32_t(p_inst.shader_uniforms_offset);
-	RTMeshGroupEntry *group = members.size() > 1 ? rt._process_mesh_group(group_key, members, dirty_blas_list) : nullptr;
+	const float instance_alpha = _instance_alpha(p_inst);
+	RTMeshGroupEntry *group = nullptr;
+	if (p_members.size() > 1) {
+		RTMeshGroupKey group_key;
+		group_key.mesh_id = p_inst.data->base.get_id();
+		group_key.surface_mask = p_group.surface_mask;
+		group_key.opaque_mask = p_group.opaque_mask;
+		group = rt._process_mesh_group(group_key, p_members, dirty_blas_list);
+	}
 	if (group) {
 		// Any-hit runs only on members without the opaque geometry flag.
-		RTSurfaceGroupKey instance_key = records[p_leader].key;
-		instance_key.opaque = group_key.opaque_mask == group_key.surface_mask;
-		const uint32_t facing_flags = _push_tlas_instance(tlas_transform, group->blas, instance_key, records[p_leader].transparent, p_inst.mirror);
-		for (uint32_t m = 0; m < members.size(); m++) {
-			const RTSurfaceRecord &rec = records[members[m]];
-			_push_tlas_entry(group->geometries[m], group->sources[m], facing_flags, rec.mat_data, rec.material_flags, p_inst.layer_mask, uniforms_ofs, _instance_alpha(p_inst), motion_index);
+		RTSurfaceGroupKey instance_key = p_group.key;
+		instance_key.opaque = p_group.opaque_mask == p_group.surface_mask;
+		const uint32_t facing_flags = _push_tlas_instance(tlas_transform, group->blas, instance_key, p_group.transparent, p_inst.mirror);
+		for (uint32_t m = 0; m < p_members.size(); m++) {
+			const RTPlanSurface &member = p_members[m];
+			_push_tlas_entry(group->geometries[m], group->sources[m], facing_flags, rt.touch_material(member.material_slot), member.material_flags, p_inst.layer_mask, uniforms_ofs, instance_alpha, motion_index);
 		}
 	} else {
-		for (uint32_t s : members) {
-			const RTSurfaceRecord &rec = records[s];
-			RTSurfaceData *surf_data = nullptr;
-			if (rec.deformed.is_deformed()) {
-				surf_data = rt.process_deformed_surface(rec.mesh_surface, rec.deformed, dirty_blas_list, dirty_blas_update_list);
-			}
-			if (!surf_data) {
-				surf_data = rt.process_surface(rec.surf, rec.mesh_surface, rec.surface_counter, p_inst.transform, dirty_blas_list);
-			}
+		for (const RTPlanSurface &member : p_members) {
+			const RTMaterialData *mat_data = rt.touch_material(member.material_slot);
+			RTSurfaceData *surf_data = _process_plan_surface(p_inst, member);
 			if (!surf_data || !surf_data->blas.is_valid()) {
 				continue;
 			}
-			const uint32_t facing_flags = _push_tlas_instance(tlas_transform, surf_data->blas, rec.key, rec.transparent, p_inst.mirror);
-			_push_tlas_entry(surf_data->geometry, surf_data->sources, facing_flags, rec.mat_data, rec.material_flags, p_inst.layer_mask, uniforms_ofs, _instance_alpha(p_inst), motion_index);
+			const bool transparent = member.flags & RT_PLAN_SURFACE_TRANSPARENT;
+			const uint32_t facing_flags = _push_tlas_instance(tlas_transform, surf_data->blas, _rt_member_key(p_group, member), transparent, p_inst.mirror);
+			_push_tlas_entry(surf_data->geometry, surf_data->sources, facing_flags, mat_data, member.material_flags, p_inst.layer_mask, uniforms_ofs, instance_alpha, motion_index);
 		}
 	}
 
 	if (collect_render_info) {
 		uint32_t prim_count = 0;
-		for (uint32_t s : members) {
-			const SurfaceCache *surf = static_cast<const SurfaceCache *>(records[s].surf);
+		for (const RTPlanSurface &member : p_members) {
+			const SurfaceCache *surf = static_cast<const SurfaceCache *>(member.surf);
 			prim_count += _rt_indices_to_primitives(surf->primitive, mesh_storage->mesh_surface_get_vertices_drawn_count(surf->surface));
 		}
-		_record_stats(mark, group ? 1 : members.size(), prim_count, prim_count);
+		_record_stats(mark, group ? 1 : uint32_t(p_members.size()), prim_count, prim_count);
 	}
 }
 
+// Deformed geometry of the surface when it has any, else its cached static BLAS.
+RTSurfaceData *RTTlasBuilder::_process_plan_surface(const Instance &p_inst, const RTPlanSurface &p_surface) {
+	const SurfaceCache *surf = static_cast<const SurfaceCache *>(p_surface.surf);
+	RTSurfaceData *surf_data = nullptr;
+	if (p_surface.deformed_kind != RT_PLAN_DEFORMED_NONE) {
+		const RTDeformedGeometrySource source = _deformed_source(p_inst, p_surface);
+		if (source.is_deformed()) {
+			surf_data = rt.process_deformed_surface(surf->surface, source, dirty_blas_list, dirty_blas_update_list);
+		}
+	}
+	return surf_data ? surf_data : rt.process_surface_cached(surf, p_surface.cache_key, p_surface.mesh_rid_version, p_surface.surface_counter, p_inst.transform, dirty_blas_list);
+}
+
+// Commits the surface's capture, or reads the skeleton or blend shape output of its mesh instance.
+RTDeformedGeometrySource RTTlasBuilder::_deformed_source(const Instance &p_inst, const RTPlanSurface &p_surface) {
+	const SurfaceCache *surf = static_cast<const SurfaceCache *>(p_surface.surf);
+	RTDeformedGeometrySource source;
+	const bool captured = p_surface.deformed_kind == RT_PLAN_DEFORMED_CAPTURED && rt._resolve_captured_source(surf, captures, source);
+	if (!captured && p_inst.mesh_instance.is_valid()) {
+		source = _rt_mesh_instance_source(p_inst.mesh_instance, surf->surface_index);
+		source.cache_handle = &surf->rt_deformed_handle;
+	}
+	source.surface_counter = p_surface.surface_counter;
+	return source;
+}
+
 void RTTlasBuilder::_upload_merge_billboards() {
-	_rt_prune_handle_map(state->billboard_mm_entries, rt.merged_mm_pool);
+	_rt_prune_handle_map(state->billboard_mm_entries, state->billboard_mm_prune, rt.merged_mm_pool);
 	// The merge shader always binds the billboard buffer, so keep one entry even when unused.
 	if (state->merge_billboards.is_empty() && !state->merge_billboard_buffer.is_valid()) {
 		state->merge_billboards.push_back(RTMergeBillboardParams());
@@ -4125,7 +4966,7 @@ void RTTlasBuilder::_add_expanded_mm_surface(const PendingMMSurface &p_pending, 
 	}
 
 	const DirtyMark mark = _dirty_mark();
-	RTSurfaceData *surf_data = rt.process_surface(p_pending.mm_surf, p_pending.mesh_surface, p_pending.surface_counter, p_pending.instance_transform, dirty_blas_list);
+	RTSurfaceData *surf_data = rt.process_surface(p_pending.mm_surf, p_pending.surface_counter, p_pending.instance_transform, dirty_blas_list);
 	if (!surf_data || !surf_data->blas.is_valid()) {
 		return;
 	}
@@ -4163,7 +5004,7 @@ void RTTlasBuilder::_add_expanded_mm_surface(const PendingMMSurface &p_pending, 
 
 // Custom hit groups are traced once they are live in the pipeline bundle.
 bool RTTlasBuilder::_hit_group_ready(const RTMaterialData *p_mat_data) const {
-	return p_mat_data->rt_sbt_offset == 0 || rt_shader->is_hg_ready_in_bundle(p_mat_data->rt_sbt_offset, rt_flags);
+	return p_mat_data->rt_sbt_offset == 0 || ctx.rt_shader->is_hg_ready_in_bundle(p_mat_data->rt_sbt_offset, ctx.rt_flags);
 }
 
 void RTTlasBuilder::_fill_surface_key(const ShaderData *p_shader, const RTMaterialData *p_mat_data, ShaderData::RTBlendClass p_blend_class, uint8_t p_tlas_mask,
@@ -4252,8 +5093,10 @@ RTViewportState *RenderRaytracing::build_tlas(const RenderDataRD *p_render_data,
 	// Builds bundle if needed; live_ready_mask drives TLAS inclusion below.
 	SceneShaderRaytracing::get_singleton()->ensure_pipeline_bundle(p_rt_flags);
 
-	RTTlasBuilder builder(*this, p_render_data, p_rt_flags, r_captures, state);
-	builder.gather_instances();
+	_refresh_custom_shader_slots();
+	const RTPlanContext ctx = _make_plan_context(p_render_data, p_rt_flags, &r_captures);
+	RTTlasBuilder builder(*this, p_render_data, ctx, r_captures, state);
+	builder.gather_instances(_open_plan_arena(state, p_render_data, ctx));
 	builder.add_multimesh_surfaces();
 	builder.finish();
 

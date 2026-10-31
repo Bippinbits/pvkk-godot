@@ -1869,6 +1869,7 @@ int32_t MaterialStorage::global_shader_parameters_instance_allocate(RID p_instan
 	ERR_FAIL_COND_V(global_shader_uniforms.instance_buffer_pos.has(p_instance), -1);
 	int32_t pos = _global_shader_uniform_allocate(ShaderLanguage::MAX_INSTANCE_UNIFORM_INDICES);
 	global_shader_uniforms.instance_buffer_pos[p_instance] = pos; //save anyway
+	global_shader_uniforms.instance_version++;
 	ERR_FAIL_COND_V_MSG(pos < 0, -1, "Too many instances using shader instance variables. Increase buffer size in Project Settings.");
 	global_shader_uniforms.buffer_usage[pos].elements = ShaderLanguage::MAX_INSTANCE_UNIFORM_INDICES;
 	return pos;
@@ -1881,6 +1882,7 @@ void MaterialStorage::global_shader_parameters_instance_free(RID p_instance) {
 		global_shader_uniforms.buffer_usage[pos].elements = 0;
 	}
 	global_shader_uniforms.instance_buffer_pos.erase(p_instance);
+	global_shader_uniforms.instance_version++;
 }
 
 void MaterialStorage::global_shader_parameters_instance_update(RID p_instance, int p_index, const Variant &p_value, int p_flags_count) {
@@ -1943,6 +1945,7 @@ void MaterialStorage::global_shader_parameters_instance_update(RID p_instance, i
 
 	_fill_std140_variant_ubo_value(datatype, 0, p_value, (uint8_t *)&global_shader_uniforms.buffer_values[pos], true); //instances always use linear color in this renderer
 	_global_shader_uniform_mark_buffer_dirty(pos, 1);
+	global_shader_uniforms.instance_version++;
 }
 
 void MaterialStorage::_update_global_shader_uniforms() {
@@ -2128,7 +2131,7 @@ void MaterialStorage::shader_set_code(RID p_shader, const String &p_code) {
 
 	for (Material *E : shader->owners) {
 		Material *material = E;
-		material->rt_invalidation_counter++; // RT caches shader-derived state per material.
+		_material_rt_invalidate(material); // RT caches shader-derived state per material.
 		material->dependency.changed_notify(Dependency::DEPENDENCY_CHANGED_MATERIAL);
 		_material_queue_update(material, true, true);
 	}
@@ -2152,7 +2155,7 @@ void MaterialStorage::shader_set_code_rt(RID p_shader, const String &p_code_rt) 
 	if (changed) {
 		for (Material *E : shader->owners) {
 			Material *material = E;
-			material->rt_invalidation_counter++;
+			_material_rt_invalidate(material);
 			material->dependency.changed_notify(Dependency::DEPENDENCY_CHANGED_MATERIAL);
 			_material_queue_update(material, false, false);
 		}
@@ -2269,16 +2272,22 @@ void MaterialStorage::shader_embedded_set_unlock() {
 
 /* MATERIAL API */
 
+void MaterialStorage::_material_rt_invalidate(Material *p_material) {
+	p_material->rt_invalidation_counter++;
+	material_rt_version++;
+}
+
 void MaterialStorage::_material_uniform_set_erased(void *p_material) {
 	RID rid = *(RID *)p_material;
-	Material *material = MaterialStorage::get_singleton()->get_material(rid);
+	MaterialStorage *material_storage = MaterialStorage::get_singleton();
+	Material *material = material_storage->get_material(rid);
 	if (material) {
 		if (material->data) {
 			// Uniform set may be gone because a dependency was erased. This happens
 			// if a texture is deleted, so re-create it.
-			MaterialStorage::get_singleton()->_material_queue_update(material, false, true);
+			material_storage->_material_queue_update(material, false, true);
 		}
-		material->rt_invalidation_counter++;
+		material_storage->_material_rt_invalidate(material);
 		material->dependency.changed_notify(Dependency::DEPENDENCY_CHANGED_MATERIAL);
 	}
 }
@@ -2358,7 +2367,7 @@ void MaterialStorage::material_set_shader(RID p_material, RID p_shader) {
 	ERR_FAIL_NULL(material);
 
 	// Invalidate RT cache for this material (shader change).
-	material->rt_invalidation_counter++;
+	_material_rt_invalidate(material);
 
 	if (material->data) {
 		memdelete(material->data);
@@ -2452,7 +2461,7 @@ void MaterialStorage::material_set_param(RID p_material, const StringName &p_par
 
 	// Invalidate RT cache for this material. Scripts often set unchanged values every frame, which must not recapture.
 	if (changed) {
-		material->rt_invalidation_counter++;
+		_material_rt_invalidate(material);
 	}
 
 	if (material->shader && material->shader->data) { //shader is valid
