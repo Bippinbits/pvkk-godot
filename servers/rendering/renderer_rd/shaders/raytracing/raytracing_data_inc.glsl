@@ -12,7 +12,7 @@ layout(buffer_reference, std430) readonly buffer Uint32Buffer {
 };
 
 // ============================================================================
-// GEOMETRY DATA (matches C++ RT_GeometryData, 144 bytes, 8-byte alignment)
+// GEOMETRY DATA (matches C++ RT_GeometryData, 152 bytes, 8-byte alignment)
 // ============================================================================
 struct GeometryData {
 	uint64_t vertex_address;
@@ -56,6 +56,8 @@ struct GeometryData {
 	uint64_t instance_data_address; // First float of the instance record; 0 without instance data.
 	uint instance_data_layout; // Bits 0-7 stride, 8-15 color offset, 16-23 custom offset, in floats; 0xff = absent.
 	uint debug_state; // Dynamic Geometry debug view only: RT_DYNAMIC_GEOMETRY_* category, rest category above RT_DYNAMIC_GEOMETRY_REST_SHIFT, age above RT_DYNAMIC_GEOMETRY_AGE_SHIFT.
+	uint material_index; // materials[] index in RT_MATERIAL_INDEX_MASK, instance transparency above it. Read through rt_entry_material().
+	uint material_flags; // RT_MAT_FLAG_* of the entry, OR-ed into its material's.
 };
 
 // ============================================================================
@@ -111,9 +113,11 @@ struct InstanceMotionData {
 // (RT_MaterialData::TEXTURE_INDEX_BITS), channel or albedo instance transparency in bits 24-31.
 #define RT_TEXTURE_INDEX_BITS 24u
 #define RT_TEXTURE_INDEX_MASK 0xFFFFFFu
+// GeometryData::material_index keeps the instance transparency where albedo_texture does (C++ RT_MATERIAL_INDEX_MASK).
+#define RT_MATERIAL_INDEX_MASK RT_TEXTURE_INDEX_MASK
 
 struct MaterialData {
-	uint albedo_texture; // Bits 24-31: transparency of the TLAS entry's instance, see rt_instance_alpha().
+	uint albedo_texture; // Bits 24-31: transparency of the TLAS entry's instance (set by rt_entry_material()), see rt_instance_alpha().
 	uint normal_texture;
 	uint roughness_texture; // texture_roughness, or texture_orm for ORMMaterial3D.
 	uint emission_texture;

@@ -1,5 +1,5 @@
-// Requires raytracing_inc.glsl and raytracing_hit_inc.glsl. The includer declares tlas, geometries[], materials[],
-// bindless_textures[] and SAMPLER_LINEAR_WITH_MIPMAPS_REPEAT.
+// Requires raytracing_inc.glsl, raytracing_hit_inc.glsl and raytracing_entry_material_inc.glsl. The includer
+// declares tlas, geometries[], materials[], bindless_textures[] and SAMPLER_LINEAR_WITH_MIPMAPS_REPEAT.
 
 vec4 ray_query_surface(uint geometry_idx, uint primitive_id, vec2 candidate_bary, float lod) {
 	vec3 bary = vec3(1.0 - candidate_bary.x - candidate_bary.y, candidate_bary.x, candidate_bary.y);
@@ -9,7 +9,7 @@ vec4 ray_query_surface(uint geometry_idx, uint primitive_id, vec2 candidate_bary
 	get_triangle_indices_ex(geom, primitive_id, i0, i1, i2);
 	vec2 uv = fetch_uv(geom, i0, i1, i2, bary);
 
-	MaterialData mat = materials[geometry_idx];
+	MaterialData mat = rt_entry_material(geometry_idx);
 	uv = uv * mat.uv1_scale.xy + mat.uv1_offset.xy;
 	vec4 albedo = textureLod(sampler2D(bindless_textures[nonuniformEXT(rt_texture_index(mat.albedo_texture))], SAMPLER_LINEAR_WITH_MIPMAPS_REPEAT), uv, lod);
 	albedo *= mat.albedo_color;
@@ -41,7 +41,7 @@ vec3 ray_query_shadow_transmittance(vec3 origin, vec3 direction, float t_min, fl
 			continue;
 		}
 		uint geometry_idx = RT_RQ_GEOMETRY_IDX(shadow_rq, false);
-		uint mat_flags = materials[geometry_idx].flags;
+		uint mat_flags = rt_entry_material_flags(geometry_idx);
 		if ((mat_flags & (RT_MAT_FLAG_TRANSPARENT | RT_MAT_FLAG_ALPHA_SCISSOR)) == 0u) {
 			rayQueryConfirmIntersectionEXT(shadow_rq);
 			continue;

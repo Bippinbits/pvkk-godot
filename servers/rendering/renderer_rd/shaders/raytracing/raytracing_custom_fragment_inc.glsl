@@ -12,9 +12,9 @@
 //   bool  rt_front_face     -- raster FRONT_FACING of the hit
 //
 // Required bindings/types:
-//   materials[], CustomMaterialUniforms, scene_data_block
+//   rt_entry_material(), CustomMaterialUniforms, scene_data_block
 
-rt_mat = materials[rt_geometry_idx];
+rt_mat = rt_entry_material(rt_geometry_idx);
 material = CustomMaterialUniforms(rt_mat.uniform_address);
 
 // Matrices.

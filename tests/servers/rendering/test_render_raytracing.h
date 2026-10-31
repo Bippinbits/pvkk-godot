@@ -75,6 +75,56 @@ TEST_CASE("[RenderRaytracing] Emission flags carry the operator and UV2 addressi
 			uint32_t(RT_MAT_FLAG_EMISSION_ADD | RT_MAT_FLAG_EMISSION_UV2 | RT_MAT_FLAG_UV2_TRIPLANAR | RT_MAT_FLAG_UV2_TRIPLANAR_WORLD));
 }
 
+TEST_CASE("[RenderRaytracing] Material index keeps the instance transparency where albedo_texture does") {
+	RT_MaterialData albedo = {};
+	albedo.albedo_texture.instance_transparency = 0xAB;
+	uint32_t albedo_bits = 0;
+	memcpy(&albedo_bits, &albedo.albedo_texture, sizeof(uint32_t));
+
+	const uint32_t packed = rt_pack_material_index(12345, 0xAB);
+	CHECK((packed & RT_MATERIAL_INDEX_MASK) == 12345u);
+	CHECK((packed & ~RT_MATERIAL_INDEX_MASK) == albedo_bits);
+	CHECK(rt_pack_material_index(7, rt_instance_transparency(1.0f)) == 7u);
+}
+
+TEST_CASE("[RenderRaytracing] Material table merges dirty entries into upload ranges") {
+	LocalVector<uint32_t> dirty;
+	LocalVector<RTMaterialTable::Range> ranges;
+	RTMaterialTable::merge_ranges(dirty, 2, ranges);
+	CHECK(ranges.is_empty());
+
+	for (uint32_t index : { 9u, 1u, 3u, 3u, 20u, 2u }) {
+		dirty.push_back(index);
+	}
+	RTMaterialTable::merge_ranges(dirty, 2, ranges);
+	REQUIRE(ranges.size() == 3);
+	CHECK(ranges[0].begin == 1);
+	CHECK(ranges[0].end == 4);
+	CHECK(ranges[1].begin == 9);
+	CHECK(ranges[1].end == 10);
+	CHECK(ranges[2].begin == 20);
+
+	dirty.push_back(6);
+	RTMaterialTable::merge_ranges(dirty, 2, ranges);
+	REQUIRE(ranges.size() == 2);
+	CHECK(ranges[0].end == 10);
+	CHECK(ranges[1].begin == 20);
+}
+
+TEST_CASE("[RenderRaytracing] Material table grows with default materials and keeps entry 0 the default") {
+	RTMaterialTable table;
+	RT_MaterialData red = rt_material_data_default();
+	red.albedo_color[1] = 0.0f;
+	table.set(3, red);
+
+	const Span<RT_MaterialData> entries = table.get_entries();
+	REQUIRE(entries.size() == 4);
+	CHECK(memcmp(&entries[0], &entries[1], sizeof(RT_MaterialData)) == 0);
+	CHECK(entries[0].albedo_color[1] == 1.0f);
+	CHECK(entries[3].albedo_color[1] == 0.0f);
+	CHECK_FALSE(table.get_buffer().is_valid());
+}
+
 TEST_CASE("[RenderRaytracing] BaseMaterial3D state survives the material parameter round trip") {
 	CHECK(RTBaseMaterialState().encode() == 0);
 

@@ -97,7 +97,7 @@ struct RTGeometrySources;
 struct RTValidationView {
 	Span<RT_GeometryData> geometries;
 	Span<RTGeometrySources> geometry_sources; // Parallel to `geometries`.
-	Span<RT_MaterialData> materials;
+	Span<RT_MaterialData> materials; // Material table, indexed by RT_GeometryData::material_index.
 	Span<RID> material_sources; // Parallel to `materials`: the buffer each uniform_address was taken from.
 	uint32_t bindless_texture_count = 0;
 	Span<RD::BufferAddressRange> buffers; // From RD::buffer_get_device_address_ranges().

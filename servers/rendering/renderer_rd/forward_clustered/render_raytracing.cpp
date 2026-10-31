@@ -432,6 +432,11 @@ static void _rt_update_or_grow_storage(RID &r_buffer, uint32_t &r_capacity, cons
 	}
 }
 
+static void _rt_set_entry_material(RT_GeometryData &r_geometry, const RTMaterialData *p_mat_data, uint32_t p_material_flags, float p_instance_alpha) {
+	r_geometry.material_index = rt_pack_material_index(p_mat_data->table_index, rt_instance_transparency(p_instance_alpha));
+	r_geometry.material_flags = p_material_flags;
+}
+
 static uint32_t _rt_tlas_flags(const RTSurfaceGroupKey &p_key, const RTTriangleFacing &p_facing) {
 	return p_facing.instance_flags | (p_key.opaque ? uint32_t(RD::ACCELERATION_STRUCTURE_INSTANCE_FORCE_OPAQUE_BIT) : 0u);
 }
@@ -569,9 +574,6 @@ void RenderRaytracing::_free_viewport_state_internal(RTViewportState *p_state) {
 	}
 	if (p_state->geometry_buffer.is_valid()) {
 		RD::get_singleton()->free_rid(p_state->geometry_buffer);
-	}
-	if (p_state->material_buffer.is_valid()) {
-		RD::get_singleton()->free_rid(p_state->material_buffer);
 	}
 	if (p_state->motion_index_buffer.is_valid()) {
 		RD::get_singleton()->free_rid(p_state->motion_index_buffer);
@@ -1141,7 +1143,6 @@ void RenderRaytracing::prepare_frame() {
 	tlas_instances.clear();
 	tlas_transparent_instances.clear();
 	geometry_data.clear();
-	material_data.clear();
 	motion_indices.clear();
 	motion_transforms.clear();
 
@@ -2408,6 +2409,7 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 	// Cache miss - need to rebuild material
 	if (!entry->ptr) {
 		entry->ptr = memnew(RTMaterialData);
+		entry->ptr->table_index = mat_idx + 1;
 	}
 
 	RTMaterialData *mat_data = entry->ptr;
@@ -2842,12 +2844,76 @@ void RenderRaytracing::finalize_buffers(RTViewportState *p_state) {
 	// Grow-only uploads. Callers must not free these in prepare_frame().
 	_rt_update_or_grow_storage(p_state->geometry_buffer, p_state->geometry_buffer_capacity,
 			geometry_data.ptr(), geometry_data.size() * sizeof(RT_GeometryData), "RT Geometry Buffer");
-	_rt_update_or_grow_storage(p_state->material_buffer, p_state->material_buffer_capacity,
-			material_data.ptr(), material_data.size() * sizeof(RT_MaterialData), "RT Material Buffer");
+	material_table.upload();
 	_rt_update_or_grow_storage(p_state->motion_index_buffer, p_state->motion_index_buffer_capacity,
 			motion_indices.ptr(), motion_indices.size() * sizeof(int32_t), "RT Motion Index Buffer");
 	_rt_update_or_grow_storage(p_state->motion_transform_buffer, p_state->motion_transform_buffer_capacity,
 			motion_transforms.ptr(), motion_transforms.size() * sizeof(RT_InstanceMotionData), "RT Motion Transform Buffer");
+}
+
+// ---------------------------------------------------------------------------
+// Material table
+// ---------------------------------------------------------------------------
+
+void RTMaterialTable::merge_ranges(LocalVector<uint32_t> &r_dirty, uint32_t p_max_gap, LocalVector<Range> &r_ranges) {
+	r_ranges.clear();
+	r_dirty.sort();
+	for (uint32_t index : r_dirty) {
+		if (!r_ranges.is_empty() && index <= r_ranges[r_ranges.size() - 1].end + p_max_gap) {
+			Range &last = r_ranges[r_ranges.size() - 1];
+			last.end = MAX(last.end, index + 1);
+		} else {
+			r_ranges.push_back({ index, index + 1 });
+		}
+	}
+}
+
+void RTMaterialTable::_grow(uint32_t p_size) {
+	if (entries.is_empty() && p_size > 0) {
+		entries.push_back(rt_material_data_default());
+		dirty.push_back(0);
+	}
+	const RT_MaterialData default_data = rt_material_data_default();
+	while (entries.size() < p_size) {
+		entries.push_back(default_data);
+	}
+}
+
+void RTMaterialTable::set(uint32_t p_index, const RT_MaterialData &p_data) {
+	ERR_FAIL_COND(p_index == 0 || p_index > RT_MATERIAL_INDEX_MASK);
+	_grow(p_index + 1);
+	entries[p_index] = p_data;
+	dirty.push_back(p_index);
+}
+
+void RTMaterialTable::upload() {
+	_grow(1);
+	RenderingDevice *rd = RD::get_singleton();
+	if (entries.size() > capacity) {
+		_free_rid_if_valid(buffer);
+		capacity = MAX(entries.size(), capacity + capacity / 2);
+		Vector<uint8_t> init;
+		init.resize(capacity * sizeof(RT_MaterialData));
+		memset(init.ptrw(), 0, init.size());
+		memcpy(init.ptrw(), entries.ptr(), entries.size() * sizeof(RT_MaterialData));
+		buffer = rd->storage_buffer_create(init.size(), init);
+		rd->set_resource_name(buffer, "RT Material Table");
+		dirty.clear();
+		return;
+	}
+	merge_ranges(dirty, MERGE_GAP, ranges);
+	for (const Range &range : ranges) {
+		rd->buffer_update(buffer, range.begin * sizeof(RT_MaterialData), (range.end - range.begin) * sizeof(RT_MaterialData), &entries[range.begin]);
+	}
+	dirty.clear();
+}
+
+void RTMaterialTable::reset() {
+	_free_rid_if_valid(buffer);
+	capacity = 0;
+	entries.reset();
+	dirty.reset();
+	ranges.reset();
 }
 
 // ---------------------------------------------------------------------------
@@ -3721,14 +3787,12 @@ void RTTlasBuilder::_add_procedural_instance(const Instance &p_inst, const Insta
 	geom.aabb_size_z = (float)ps->culling_aabb.size.z;
 	geom.layers = p_inst.layer_mask;
 	geom.instance_uniforms_ofs = uint32_t(p_inst.shader_uniforms_offset);
+	const RTMaterialData *mat_data = rt.process_material(material_rid, material_storage->material_get_rt_invalidation_counter(material_rid));
+	_rt_set_entry_material(geom, mat_data, 0, 1.0f);
 	rt.geometry_data.push_back(geom);
 	RT_VALIDATE(rt.geometry_sources.push_back({ ps->gpu_buffer }));
 	rt.tlas_instances.custom_indices.push_back(rt.geometry_data.size() - 1);
 	rt.motion_indices.push_back(_moved(p_inst) ? _push_motion_transform(_prev_transform(p_inst)) : -1);
-
-	RTMaterialData *mat_data = rt.process_material(material_rid, material_storage->material_get_rt_invalidation_counter(material_rid));
-	rt.material_data.push_back(mat_data->data);
-	RT_VALIDATE(rt.material_sources.push_back(rt._rtv_material_source(mat_data)));
 
 	// Procedural instances disable triangle culling and are opaque.
 	const uint32_t inst_flags = RD::ACCELERATION_STRUCTURE_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT |
@@ -4138,16 +4202,12 @@ uint32_t RTTlasBuilder::_push_tlas_instance(const Transform3D &p_transform, RID 
 void RTTlasBuilder::_push_tlas_entry(const RT_GeometryData &p_geometry, const RTGeometrySources &p_sources, uint32_t p_facing_flags, const RTMaterialData *p_mat_data,
 		uint32_t p_material_flags, uint32_t p_layers, uint32_t p_uniforms_ofs, float p_instance_alpha, int32_t p_motion_index) {
 	RT_VALIDATE(rt.geometry_sources.push_back(p_sources));
-	RT_VALIDATE(rt.material_sources.push_back(rt._rtv_material_source(p_mat_data)));
 	rt.geometry_data.push_back(p_geometry);
 	RT_GeometryData &geometry = rt.geometry_data[rt.geometry_data.size() - 1];
 	geometry.flags |= p_facing_flags;
 	geometry.layers = p_layers;
 	geometry.instance_uniforms_ofs = p_uniforms_ofs;
-	rt.material_data.push_back(p_mat_data->data);
-	RT_MaterialData &material = rt.material_data[rt.material_data.size() - 1];
-	material.flags |= p_material_flags;
-	material.albedo_texture.instance_transparency = rt_instance_transparency(p_instance_alpha);
+	_rt_set_entry_material(geometry, p_mat_data, p_material_flags, p_instance_alpha);
 	rt.motion_indices.push_back(p_motion_index);
 }
 
@@ -4740,8 +4800,8 @@ RID RenderRaytracing::update_uniform_set(RTViewportState *p_state, const RenderD
 		RD::Uniform u;
 		u.binding = 5;
 		u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
-		if (p_state->material_buffer.is_valid()) {
-			u.append_id(p_state->material_buffer);
+		if (material_table.get_buffer().is_valid()) {
+			u.append_id(material_table.get_buffer());
 		} else {
 			u.append_id(RendererRD::MeshStorage::get_singleton()->get_default_rd_storage_buffer());
 		}

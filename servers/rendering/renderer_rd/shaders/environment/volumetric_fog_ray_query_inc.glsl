@@ -19,6 +19,8 @@ layout(set = 1, binding = 2, std430) readonly buffer MaterialBuffer {
 	MaterialData materials[];
 };
 
+#include "../raytracing/raytracing_entry_material_inc.glsl"
+
 layout(set = 1, binding = 3) uniform sampler SAMPLER_LINEAR_WITH_MIPMAPS_REPEAT;
 
 layout(set = 1, binding = 4, std140) uniform FogRayQueryParams {

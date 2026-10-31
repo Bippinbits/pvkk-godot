@@ -1,8 +1,8 @@
 // Common closest_hit utilities shared by all hit groups.
 //
 // Required includes (before this file):
-//   raytracing_inc.glsl, brdf_inc.glsl, raytracing_hit_inc.glsl, raytracing_lights_inc.glsl,
-//   raytracing_material_eval_inc.glsl
+//   raytracing_inc.glsl, brdf_inc.glsl, raytracing_hit_inc.glsl, raytracing_entry_material_inc.glsl,
+//   raytracing_lights_inc.glsl, raytracing_material_eval_inc.glsl
 //
 // Required bindings (before this file):
 //   tlas, payload, scene_data_block, geometries[], motion_indices[], materials[], motion_transforms[], bindless_textures[],
@@ -37,7 +37,7 @@ HitData compute_hit_data() {
 #ifdef RT_CUSTOM_HIT_GROUP
 	VertexAttributes attrs = fetch_vertex_attributes(geom, attribs, FETCH_ALL);
 #else
-	uint uv2_fetch = (materials[h.geometry_idx].flags & RT_MAT_FLAG_EMISSION_UV2) != 0u ? FETCH_UV2 : 0u;
+	uint uv2_fetch = (rt_entry_material_flags(h.geometry_idx) & RT_MAT_FLAG_EMISSION_UV2) != 0u ? FETCH_UV2 : 0u;
 	VertexAttributes attrs = fetch_vertex_attributes(geom, attribs, FETCH_UV | FETCH_TBN | uv2_fetch);
 #endif
 	h.uv = attrs.uv;
@@ -300,7 +300,7 @@ MaterialProperties material_properties(vec3 p_albedo, float p_metallic, float p_
 
 MaterialProperties material_properties_from_result(HitData h, MaterialResult m, vec3 N, vec3 V) {
 	MaterialProperties material = material_properties(m.albedo, m.metalness, m.roughness, m.specular, m.backlight,
-			materials[h.geometry_idx].flags, dot(N, V));
+			rt_entry_material_flags(h.geometry_idx), dot(N, V));
 	material.emissive = m.emissive;
 	return material;
 }
@@ -357,7 +357,7 @@ vec3 debug_directional_shadow_blocker(vec3 p_geometry_normal, uint p_receiver_sh
 	rayQueryInitializeEXT(rq, tlas, gl_RayFlagsNoOpaqueEXT, RT_SHADOW_GROUPS_MASK & p_receiver_shadow_mask, origin, 0.001, to_sun, 10000.0);
 	while (rayQueryProceedEXT(rq)) {
 		uint geometry_idx = RT_RQ_GEOMETRY_IDX(rq, false);
-		uint mat_flags = materials[geometry_idx].flags;
+		uint mat_flags = rt_entry_material_flags(geometry_idx);
 		if ((mat_flags & (RT_MAT_FLAG_TRANSPARENT | RT_MAT_FLAG_ALPHA_SCISSOR)) == 0u) {
 			rayQueryConfirmIntersectionEXT(rq);
 			continue;
@@ -526,7 +526,7 @@ void debug_visualize(int vis_mode, MaterialDebugInputs dbg, float alpha) {
 		vec3 final_normal = dbg.normal;
 		vec3 geometry_normal = dbg.geometry_normal;
 		MaterialProperties dbg_mat = material_properties(dbg.albedo, dbg.metallic, dbg.roughness, dbg.specular,
-				vec3(0.0), materials[RT_HIT_GEOMETRY_IDX].flags, dbg.NdotV);
+				vec3(0.0), rt_entry_material_flags(RT_HIT_GEOMETRY_IDX), dbg.NdotV);
 
 		vec3 dbg_dir;
 		vec3 dbg_weight;
@@ -572,7 +572,7 @@ bool surface_is_unshaded(uint geometry_idx) {
 #ifdef MODE_UNSHADED
 	return true;
 #else
-	return (materials[geometry_idx].flags & RT_MAT_FLAG_UNSHADED) != 0u;
+	return (rt_entry_material_flags(geometry_idx) & RT_MAT_FLAG_UNSHADED) != 0u;
 #endif
 }
 
@@ -756,7 +756,7 @@ void dlss_rr_composite_peel_guides(HitData h, MaterialResult m, vec3 N, vec3 V, 
 // Also handles DLSS-RR G-buffer output on primary ray.
 void shade_and_bounce(HitData h, MaterialResult m) {
 	// Any-hit already rejected alpha-scissored texels.
-	m.alpha = rt_entry_alpha(materials[h.geometry_idx], m.alpha, 0.0);
+	m.alpha = rt_entry_alpha(rt_entry_material(h.geometry_idx), m.alpha, 0.0);
 	PathState ps = path_unpack(payload);
 	// Every surface bounds this ray segment, even if it cannot continue the path.
 	ps.hit_t = gl_HitTEXT;
@@ -771,7 +771,7 @@ void shade_and_bounce(HitData h, MaterialResult m) {
 		// Peel layer: shade like an opaque hit, apply its blend operation, no bounce.
 		// Raygen pre-scales throughput by the running transmittance and owns
 		// path continuation; this only reports (t, alpha) and its own light.
-		uint mat_flags = materials[h.geometry_idx].flags;
+		uint mat_flags = rt_entry_material_flags(h.geometry_idx);
 		uint bclass = (mat_flags & RT_MAT_BLEND_CLASS_MASK) >> RT_MAT_BLEND_CLASS_SHIFT;
 		bool depth_barrier = (mat_flags & RT_MAT_FLAG_DEPTH_DRAW_ALWAYS) != 0u;
 		float material_alpha = clamp(m.alpha, 0.0, 1.0);
@@ -845,7 +845,7 @@ void shade_and_bounce(HitData h, MaterialResult m) {
 	uint diffuse_bounces = get_diffuse_bounces(ps.packed_bounces_flags);
 
 	// Environment fog for this ray segment (before surface contribution).
-	apply_segment_fog(gl_HitTEXT, materials[h.geometry_idx].flags, total_bounces == 0u, ps.radiance, ps.throughput);
+	apply_segment_fog(gl_HitTEXT, rt_entry_material_flags(h.geometry_idx), total_bounces == 0u, ps.radiance, ps.throughput);
 
 	path_pack(payload, ps);
 	ps.radiance += ps.throughput * shade_local_surface(h, m, N, V, diffuse_bounces > 0u, ps.rng_state);

@@ -102,9 +102,37 @@ void RTValidation::check_view(const RTValidationView &p_view, LocalVector<String
 		}
 	};
 
+	const auto check_material = [&](uint32_t p_index) {
+		const RT_MaterialData &material = p_view.materials[p_index];
+		check_address(material.uniform_address, sizeof(uint32_t), p_view.material_sources[p_index], "materials", p_index, "uniform_address");
+		if (p_view.bindless_texture_count == 0) {
+			return;
+		}
+		constexpr uint32_t TEXTURE_FIELDS = 6;
+		const uint32_t indices[TEXTURE_FIELDS] = { material.albedo_texture.index, material.normal_texture.index, material.roughness_texture.index,
+			material.metallic_texture.index, material.ao_texture.index, material.emission_texture.index };
+		const char *names[TEXTURE_FIELDS] = { "albedo_texture", "normal_texture", "roughness_texture",
+			"metallic_texture", "ao_texture", "emission_texture" };
+		for (uint32_t t = 0; t < TEXTURE_FIELDS; t++) {
+			if (indices[t] >= p_view.bindless_texture_count) {
+				r_issues.push_back(vformat("materials[%d].%s = %d is outside the %d bindless textures.", p_index, names[t], indices[t], p_view.bindless_texture_count));
+			}
+		}
+	};
+
+	// Only referenced entries: the table keeps entries of materials no geometry uses anymore.
+	LocalVector<uint8_t> material_checked;
+	material_checked.resize_initialized(p_view.materials.size());
 	for (uint32_t i = 0; i < p_view.geometries.size(); i++) {
 		const RT_GeometryData &geometry = p_view.geometries[i];
 		const RTGeometrySources &sources = p_view.geometry_sources[i];
+		const uint32_t material_index = geometry.material_index & RT_MATERIAL_INDEX_MASK;
+		if (material_index >= p_view.materials.size()) {
+			r_issues.push_back(vformat("geometries[%d].material_index = %d is outside the %d materials.", i, material_index, p_view.materials.size()));
+		} else if (!material_checked[material_index]) {
+			material_checked[material_index] = 1;
+			check_material(material_index);
+		}
 		const uint64_t vertices = geometry.vertex_count;
 		uint64_t vertex_extent = (geometry.flags & RT_GEOM_FLAG_PROCEDURAL) ? MAX(geometry.primitive_count, 1u) * 24ull : vertices * geometry.position_stride;
 		if (geometry.normal_byte_offset != RT_OFFSET_NONE) {
@@ -125,24 +153,6 @@ void RTValidation::check_view(const RTValidationView &p_view, LocalVector<String
 			const uint64_t stride_bytes = uint64_t(geometry.instance_data_layout & 0xFF) * sizeof(float);
 			const uint64_t records = geometry.instance_data_primitive_divisor ? geometry.primitive_count / geometry.instance_data_primitive_divisor : 1;
 			check_address(geometry.instance_data_address, records * stride_bytes, sources.instance_data, "geometries", i, "instance_data_address");
-		}
-	}
-
-	for (uint32_t i = 0; i < p_view.materials.size(); i++) {
-		const RT_MaterialData &material = p_view.materials[i];
-		check_address(material.uniform_address, sizeof(uint32_t), p_view.material_sources[i], "materials", i, "uniform_address");
-		if (p_view.bindless_texture_count == 0) {
-			continue;
-		}
-		constexpr uint32_t TEXTURE_FIELDS = 6;
-		const uint32_t indices[TEXTURE_FIELDS] = { material.albedo_texture.index, material.normal_texture.index, material.roughness_texture.index,
-			material.metallic_texture.index, material.ao_texture.index, material.emission_texture.index };
-		const char *names[TEXTURE_FIELDS] = { "albedo_texture", "normal_texture", "roughness_texture",
-			"metallic_texture", "ao_texture", "emission_texture" };
-		for (uint32_t t = 0; t < TEXTURE_FIELDS; t++) {
-			if (indices[t] >= p_view.bindless_texture_count) {
-				r_issues.push_back(vformat("materials[%d].%s = %d is outside the %d bindless textures.", i, names[t], indices[t], p_view.bindless_texture_count));
-			}
 		}
 	}
 
@@ -201,7 +211,6 @@ void RenderRaytracing::_rtv_begin_view() {
 	validation.strict = GLOBAL_GET_CACHED(bool, "rendering/pathtracing/debug/strict_validation");
 	validation.begin_view();
 	geometry_sources.clear();
-	material_sources.clear();
 }
 
 RID RenderRaytracing::_rtv_material_source(const RTMaterialData *p_mat_data) const {
@@ -217,10 +226,20 @@ bool RenderRaytracing::_rtv_validate_view(const RTViewportState *p_state) {
 	LocalVector<RD::BufferAddressRange> buffers;
 	RD::get_singleton()->buffer_get_device_address_ranges(buffers);
 
+	const Span<RT_MaterialData> materials = material_table.get_entries();
+	LocalVector<RID> material_sources;
+	material_sources.resize_initialized(materials.size());
+	for (uint32_t i = 1; i < materials.size(); i++) {
+		const RTMaterialCacheEntry *entry = _find_material_cache_entry(i - 1);
+		if (entry && entry->ptr) {
+			material_sources[i] = _rtv_material_source(entry->ptr);
+		}
+	}
+
 	RTValidationView view;
 	view.geometries = geometry_data;
 	view.geometry_sources = geometry_sources;
-	view.materials = material_data;
+	view.materials = materials;
 	view.material_sources = material_sources;
 	view.bindless_texture_count = bindless_block ? bindless_block->get_texture_count() : 0;
 	view.buffers = buffers;

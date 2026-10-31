@@ -590,6 +590,7 @@ layout(set = 0, binding = 5, std430) readonly buffer MaterialBuffer {
 };
 // clang-format on
 
+#include "raytracing_entry_material_inc.glsl"
 #include "raytracing_lights_inc.glsl"
 
 // clang-format off
@@ -714,7 +715,7 @@ void main() {
 	shade_and_bounce(h, m);
 #else
 	// HG0: StandardMaterial3D evaluation.
-	MaterialData mat = materials[h.geometry_idx];
+	MaterialData mat = rt_entry_material(h.geometry_idx);
 	MaterialUV muv = material_uv_from_world(mat, geometries[h.geometry_idx], h.uv, h.hit_pos, h.geometry_normal);
 
 	// Triplanar mapping derives its own tangent frame from the blend normal.
@@ -837,6 +838,8 @@ layout(set = 0, binding = 5, std430) readonly buffer MaterialBuffer {
 };
 // clang-format on
 
+#include "raytracing_entry_material_inc.glsl"
+
 layout(set = 1, binding = 0) uniform texture2D bindless_textures[];
 
 #include "raytracing_samplers_inc.glsl"
@@ -859,7 +862,7 @@ layout(set = 0, binding = 32, std430) readonly buffer MotionTransforms {
 void main() {
 	uint geometry_idx = RT_HIT_GEOMETRY_IDX;
 	GeometryData geom = geometries[geometry_idx];
-	MaterialData mat = materials[geometry_idx];
+	MaterialData mat = rt_entry_material(geometry_idx);
 	bool transparent = (mat.flags & RT_MAT_FLAG_TRANSPARENT) != 0u;
 	bool alpha_scissor = (mat.flags & RT_MAT_FLAG_ALPHA_SCISSOR) != 0u;
 	if (!transparent && !alpha_scissor) {
@@ -1014,6 +1017,8 @@ layout(set = 0, binding = 5, std430) readonly buffer MaterialBuffer {
 };
 // clang-format on
 
+#include "raytracing_entry_material_inc.glsl"
+
 layout(set = 1, binding = 0) uniform texture2D bindless_textures[];
 
 #include "raytracing_samplers_inc.glsl"
@@ -1064,7 +1069,7 @@ void main() {
 
 	// Resolve custom material uniforms via BDA (assigns file-scope address).
 	uint rt_geometry_idx = RT_HIT_GEOMETRY_IDX;
-	MaterialData rt_mat = materials[rt_geometry_idx];
+	MaterialData rt_mat = rt_entry_material(rt_geometry_idx);
 	_rt_material_address = rt_mat.uniform_address;
 
 	// Per-primitive AABB bounds (available when expose_aabb_bounds is enabled).

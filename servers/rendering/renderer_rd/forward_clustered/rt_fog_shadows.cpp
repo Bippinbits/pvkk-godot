@@ -124,7 +124,8 @@ bool RTFogShadows::prepare(RenderRaytracing *p_raytracing, RTViewportState *p_st
 	Vector<RD::Uniform> uniforms;
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_ACCELERATION_STRUCTURE, 0, p_state->tlas));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, p_state->geometry_buffer.is_valid() ? p_state->geometry_buffer : default_buffer));
-	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, p_state->material_buffer.is_valid() ? p_state->material_buffer : default_buffer));
+	const RID material_buffer = p_raytracing->get_material_buffer();
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, material_buffer.is_valid() ? material_buffer : default_buffer));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 3, RendererRD::MaterialStorage::get_singleton()->sampler_rd_get_default(RS::CANVAS_ITEM_TEXTURE_FILTER_LINEAR_WITH_MIPMAPS, RS::CANVAS_ITEM_TEXTURE_REPEAT_ENABLED)));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 4, p_state->fog_shadows_ubo));
 	p_state->fog_shadows_uniform_set = RD::get_singleton()->uniform_set_create(uniforms, _get_shader_rd(), 1, true);

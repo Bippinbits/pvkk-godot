@@ -104,8 +104,10 @@ struct alignas(8) RT_GeometryData {
 	uint64_t instance_data_address; // First float of the instance record; 0 without instance data.
 	uint32_t instance_data_layout; // See rt_pack_instance_data_layout().
 	uint32_t debug_state; // RTDynamicGeometryDebug::pack() while the Dynamic Geometry debug view is active, else 0.
+	uint32_t material_index; // See rt_pack_material_index().
+	uint32_t material_flags; // RT_MAT_FLAG_* of the entry, OR-ed into its material's.
 };
-static_assert(sizeof(RT_GeometryData) == 144, "RT_GeometryData must be 144 bytes for std430");
+static_assert(sizeof(RT_GeometryData) == 152, "RT_GeometryData must be 152 bytes for std430");
 
 // Marks an absent field in RT_GeometryData::instance_data_layout.
 static constexpr uint32_t RT_INSTANCE_DATA_FIELD_NONE = 0xFF;
@@ -147,7 +149,7 @@ struct alignas(16) RT_MaterialData {
 
 	struct {
 		uint32_t index : TEXTURE_INDEX_BITS;
-		uint32_t instance_transparency : 8; // Fade of the TLAS entry's instance (GLSL rt_instance_alpha()), see rt_instance_transparency().
+		uint32_t instance_transparency : 8; // 0 in RTMaterialTable; GLSL rt_entry_material() fills it from RT_GeometryData::material_index.
 	} albedo_texture;
 	struct {
 		uint32_t index : TEXTURE_INDEX_BITS;
@@ -279,6 +281,53 @@ inline RT_MaterialData rt_material_data_default() {
 	rt_material_set_packed_uv(d, 1.0f, Vector3(1, 1, 1), Vector3(), 1.0f);
 	return d;
 }
+
+// Low bits of RT_GeometryData::material_index holding the RTMaterialTable index.
+static constexpr uint32_t RT_MATERIAL_INDEX_MASK = (1u << RT_MaterialData::TEXTURE_INDEX_BITS) - 1;
+
+// RT_GeometryData::material_index: the RTMaterialTable index, with the instance transparency (see
+// rt_instance_transparency()) in the bits it occupies in RT_MaterialData::albedo_texture. Must match rt_entry_material().
+constexpr uint32_t rt_pack_material_index(uint32_t p_table_index, uint32_t p_instance_transparency) {
+	return (p_table_index & RT_MATERIAL_INDEX_MASK) | (p_instance_transparency << RT_MaterialData::TEXTURE_INDEX_BITS);
+}
+
+// Persistent GPU copy of the material cache, indexed by RT_GeometryData::material_index and shared by every view.
+// Entry 0 is the default material. Only entries set since the last upload are uploaded.
+class RTMaterialTable {
+public:
+	// Entries [begin, end) uploaded with one buffer update.
+	struct Range {
+		uint32_t begin = 0;
+		uint32_t end = 0;
+	};
+	// Dirty runs separated by at most this many clean entries are uploaded as one range.
+	static constexpr uint32_t MERGE_GAP = 8;
+
+	// Sorts r_dirty (duplicates allowed) into r_ranges, merging runs at most p_max_gap entries apart.
+	static void merge_ranges(LocalVector<uint32_t> &r_dirty, uint32_t p_max_gap, LocalVector<Range> &r_ranges);
+
+	// Stores p_data in entry p_index for the next upload(), growing the table with default materials.
+	void set(uint32_t p_index, const RT_MaterialData &p_data);
+	// Uploads the entries set since the last upload; recreates the buffer when the table outgrew it.
+	void upload();
+	// Frees the buffer and drops every entry.
+	void reset();
+	// Storage buffer of the table; null before the first upload().
+	RID get_buffer() const { return buffer; }
+	// Entries by table index, as last set.
+	Span<RT_MaterialData> get_entries() const { return Span<RT_MaterialData>(entries.ptr(), entries.size()); }
+
+	~RTMaterialTable() { reset(); }
+
+private:
+	LocalVector<RT_MaterialData> entries;
+	LocalVector<uint32_t> dirty;
+	LocalVector<Range> ranges;
+	RID buffer;
+	uint32_t capacity = 0; // In entries.
+
+	void _grow(uint32_t p_size);
+};
 
 // Light types for raytracing (matches GLSL RT_LIGHT_TYPE_* defines).
 enum RTLightType : uint32_t {
@@ -643,6 +692,7 @@ struct RTDeformedGeometrySource {
 
 struct RTMaterialData {
 	alignas(16) RT_MaterialData data = {};
+	uint32_t table_index = 0; // Entry in RTMaterialTable; 0 is the default material.
 	uint32_t global_buffer_index = UINT32_MAX;
 	uint32_t rt_sbt_offset = 0;
 	bool is_custom_shader = false;
@@ -977,8 +1027,6 @@ struct RTViewportState {
 
 	RID geometry_buffer;
 	uint32_t geometry_buffer_capacity = 0;
-	RID material_buffer;
-	uint32_t material_buffer_capacity = 0;
 	RID motion_index_buffer;
 	uint32_t motion_index_buffer_capacity = 0;
 	RID motion_transform_buffer;
@@ -1181,11 +1229,11 @@ class RenderRaytracing {
 	uint32_t cache_misses = 0;
 
 	// Per-frame scratch arrays. Each unified-TLAS instance records its index
-	// into geometry_data/material_data via gl_InstanceCustomIndexEXT.
+	// into geometry_data via gl_InstanceCustomIndexEXT.
 	LocalVector<RT_GeometryData> geometry_data;
-	LocalVector<RT_MaterialData> material_data;
-	LocalVector<int32_t> motion_indices; ///< Per-instance: index into motion_transforms[], or -1.
-	LocalVector<RT_InstanceMotionData> motion_transforms; ///< Compact: only moving instances.
+	RTMaterialTable material_table;
+	LocalVector<int32_t> motion_indices; // Per-instance: index into motion_transforms[], or -1.
+	LocalVector<RT_InstanceMotionData> motion_transforms; // Compact: only moving instances.
 
 	struct RTInstanceArrays {
 		LocalVector<RID> blass;
@@ -1338,7 +1386,7 @@ class RenderRaytracing {
 	// Runs the strict checks on the tables of the view just built; false when the view must not be traced.
 	bool _rtv_validate_view(const RTViewportState *p_state);
 
-	// Strict validation only: parallel to geometry_data and material_data.
+	// Strict validation only: parallel to geometry_data.
 	LocalVector<RTGeometrySources> geometry_sources;
 	LocalVector<RID> material_sources;
 #endif
@@ -1413,6 +1461,8 @@ public:
 	RID get_bindless_uniform_set() const { return bindless_uniform_set; }
 	BindlessBlock *get_bindless_block() const { return bindless_block; }
 	RID get_mat_ubo_pool_buffer() const { return mat_ubo_pool_buffer; }
+	// Storage buffer of RTMaterialTable; null before the first view was finalized.
+	RID get_material_buffer() const { return material_table.get_buffer(); }
 
 	~RenderRaytracing();
 };
