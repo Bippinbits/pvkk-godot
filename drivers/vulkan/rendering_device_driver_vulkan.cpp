@@ -7527,9 +7527,16 @@ uint64_t RenderingDeviceDriverVulkan::get_resource_native_handle(DriverResource 
 }
 
 uint64_t RenderingDeviceDriverVulkan::get_total_memory_used() {
-	VmaTotalStatistics stats = {};
-	vmaCalculateStatistics(allocator, &stats);
-	return stats.total.statistics.allocationBytes;
+	// Budgets are atomic counters; vmaCalculateStatistics walks every block and costs ms per frame.
+	const VkPhysicalDeviceMemoryProperties *memory_properties = nullptr;
+	vmaGetMemoryProperties(allocator, &memory_properties);
+	VmaBudget budgets[VK_MAX_MEMORY_HEAPS];
+	vmaGetHeapBudgets(allocator, budgets);
+	uint64_t total = 0;
+	for (uint32_t i = 0; i < memory_properties->memoryHeapCount; i++) {
+		total += budgets[i].statistics.allocationBytes;
+	}
+	return total;
 }
 
 uint64_t RenderingDeviceDriverVulkan::get_lazily_memory_used() {
