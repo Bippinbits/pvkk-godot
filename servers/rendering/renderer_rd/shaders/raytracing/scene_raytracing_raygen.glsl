@@ -677,6 +677,7 @@ void main() {
 	m.metalness = metallic;
 	m.specular = specular;
 	m.emissive = emission * scene_data_block.data.emissive_exposure_normalization;
+	m.emission_indirect = emission_indirect;
 	m.backlight = backlight;
 	// view space -> world space
 	mat3 view_to_world = mat3(inv_view_matrix);
@@ -750,6 +751,7 @@ void main() {
 	m.metalness = metalness;
 	m.specular = rt_material_surface_params(mat).z;
 	m.emissive = emissive;
+	m.emission_indirect = mat.emission_indirect;
 	m.normal = final_normal;
 	m.backlight = vec3(0.0); // TODO: wire up BaseMaterial3D's "Back Lighting" for RT (raster-only today).
 

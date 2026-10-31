@@ -618,11 +618,13 @@ vec3 ambient_approx(vec3 N, vec3 V, MaterialResult m, MaterialProperties materia
 	return baseColorToDiffuseReflectance(material.baseColor, material.metalness) * ambient + specular;
 }
 
+// p_is_indirect: the path made a diffuse bounce, scaling lights by indirect_energy and emission by emission_indirect.
 vec3 shade_local_surface(HitData h, MaterialResult m, vec3 N, vec3 V, bool p_is_indirect, inout uint rng_state) {
+	float emission_weight = p_is_indirect ? m.emission_indirect : 1.0;
 	if (surface_is_unshaded(h.geometry_idx)) {
-		return m.albedo + m.emissive;
+		return (m.albedo + m.emissive) * emission_weight;
 	}
-	vec3 lit = m.emissive;
+	vec3 lit = m.emissive * emission_weight;
 	MaterialProperties material = material_properties_from_result(h, m, N, V);
 	uint light_count = uint(get_rt_param(RT_PARAM_LIGHT_COUNT));
 	vec3 hit_pos_offset = offset_ray_origin(h.hit_pos, h.geometry_normal);

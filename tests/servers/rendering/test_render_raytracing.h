@@ -163,6 +163,7 @@ TEST_CASE("[RenderRaytracing] The default material is a non-emissive dielectric 
 	const RT_MaterialData d = rt_material_data_default();
 	CHECK(d.flags == 0u);
 	CHECK(d.emission_strength == 0.0f);
+	CHECK(d.emission_indirect == 1.0f);
 	CHECK(d.emission_texture.index == 0u);
 	CHECK(d.albedo_color[3] == 1.0f);
 	CHECK(d.albedo_texture.index == 0u);

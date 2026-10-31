@@ -214,7 +214,7 @@ struct alignas(16) RT_MaterialData {
 		uint32_t index : TEXTURE_INDEX_BITS;
 		uint32_t channel : 8; // RTTextureChannel (GLSL rt_texture_channel()).
 	} ao_texture;
-	uint32_t pad;
+	float emission_indirect; // BaseMaterial3D emission_indirect_energy: emission weight on indirect paths.
 };
 static_assert(sizeof(RT_MaterialData) == 128, "RT_MaterialData must be 128 bytes for std430, with every bitfield struct in one uint");
 static_assert(BindlessBlock::MAX_BINDLESS_TEXTURES <= (1u << RT_MaterialData::TEXTURE_INDEX_BITS), "Bindless texture indices must fit RT_MaterialData textures");
@@ -284,6 +284,7 @@ inline RT_MaterialData rt_material_data_default() {
 		d.uv1_scale[i] = 1.0f;
 	}
 	d.normal_map_depth = 1.0f;
+	d.emission_indirect = 1.0f;
 	rt_material_set_surface_params(d, 1.0f, 0.0f, 0.5f);
 	rt_material_set_packed_uv(d, 1.0f, Vector3(1, 1, 1), Vector3(), 1.0f);
 	return d;

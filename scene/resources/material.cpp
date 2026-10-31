@@ -596,6 +596,7 @@ void BaseMaterial3D::init_shaders() {
 	shader_names->metallic = "metallic";
 	shader_names->emission = "emission";
 	shader_names->emission_energy = "emission_energy";
+	shader_names->emission_indirect_energy = "emission_indirect_energy";
 	shader_names->normal_scale = "normal_scale";
 	shader_names->rim = "rim";
 	shader_names->rim_tint = "rim_tint";
@@ -1111,6 +1112,7 @@ uniform bool particles_anim_loop;
 uniform sampler2D texture_emission : source_color, hint_default_black, %s;
 uniform vec4 emission : source_color;
 uniform float emission_energy : hint_range(0.0, 100.0, 0.01);
+uniform float emission_indirect_energy : hint_range(0.0, 100.0, 0.01);
 )",
 				texfilter_str);
 	}
@@ -1729,6 +1731,7 @@ void fragment() {)";
 	EMISSION = (emission.rgb * emission_tex) * emission_energy;
 )";
 		}
+		code += "	EMISSION_INDIRECT = emission_indirect_energy;\n";
 	}
 
 	if (features[FEATURE_REFRACTION]) {
@@ -2154,6 +2157,15 @@ void BaseMaterial3D::set_emission_intensity(float p_emission_intensity) {
 
 float BaseMaterial3D::get_emission_intensity() const {
 	return emission_intensity;
+}
+
+void BaseMaterial3D::set_emission_indirect_energy(float p_emission_indirect_energy) {
+	emission_indirect_energy = p_emission_indirect_energy;
+	_material_set_param(shader_names->emission_indirect_energy, p_emission_indirect_energy);
+}
+
+float BaseMaterial3D::get_emission_indirect_energy() const {
+	return emission_indirect_energy;
 }
 
 void BaseMaterial3D::set_normal_scale(float p_normal_scale) {
@@ -3325,6 +3337,9 @@ void BaseMaterial3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_emission_intensity", "emission_energy_multiplier"), &BaseMaterial3D::set_emission_intensity);
 	ClassDB::bind_method(D_METHOD("get_emission_intensity"), &BaseMaterial3D::get_emission_intensity);
 
+	ClassDB::bind_method(D_METHOD("set_emission_indirect_energy", "emission_indirect_energy"), &BaseMaterial3D::set_emission_indirect_energy);
+	ClassDB::bind_method(D_METHOD("get_emission_indirect_energy"), &BaseMaterial3D::get_emission_indirect_energy);
+
 	ClassDB::bind_method(D_METHOD("set_normal_scale", "normal_scale"), &BaseMaterial3D::set_normal_scale);
 	ClassDB::bind_method(D_METHOD("get_normal_scale"), &BaseMaterial3D::get_normal_scale);
 
@@ -3572,6 +3587,7 @@ void BaseMaterial3D::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::COLOR, "emission", PROPERTY_HINT_COLOR_NO_ALPHA), "set_emission", "get_emission");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "emission_energy_multiplier", PROPERTY_HINT_RANGE, "0,16,0.01,or_greater"), "set_emission_energy_multiplier", "get_emission_energy_multiplier");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "emission_intensity", PROPERTY_HINT_RANGE, "0,100000.0,0.01,or_greater,suffix:nt"), "set_emission_intensity", "get_emission_intensity");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "emission_indirect_energy", PROPERTY_HINT_RANGE, "0,16,0.01,or_greater"), "set_emission_indirect_energy", "get_emission_indirect_energy");
 
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "emission_operator", PROPERTY_HINT_ENUM, "Add,Multiply"), "set_emission_operator", "get_emission_operator");
 	ADD_PROPERTYI(PropertyInfo(Variant::BOOL, "emission_on_uv2"), "set_flag", "get_flag", FLAG_EMISSION_ON_UV2);
@@ -3883,6 +3899,7 @@ BaseMaterial3D::BaseMaterial3D(bool p_orm) :
 	set_metallic(0.0);
 	set_emission(Color(0, 0, 0));
 	set_emission_energy_multiplier(1.0);
+	set_emission_indirect_energy(1.0);
 	set_normal_scale(1);
 	set_rim(1.0);
 	set_rim_tint(0.5);

@@ -1227,6 +1227,7 @@ void fragment_shader(in SceneData scene_data) {
 	float metallic_highp = 0.0;
 	float specular = 0.5;
 	vec3 emission = vec3(0.0);
+	float emission_indirect = 1.0;
 	float roughness_highp = 1.0;
 	float rim = 0.0;
 	float rim_tint = 0.0;
@@ -2854,6 +2855,7 @@ void fragment_shader(in SceneData scene_data) {
 		imageAtomicOr(geom_facing_grid, grid_pos, facing_bits); //store facing bits
 #endif
 
+		emission *= emission_indirect;
 		if (length(emission) > 0.001) {
 			float lumas[6];
 			vec3 light_total = vec3(0);

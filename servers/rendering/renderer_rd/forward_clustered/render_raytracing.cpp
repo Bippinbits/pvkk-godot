@@ -3282,6 +3282,8 @@ RTMaterialData *RenderRaytracing::process_material(RID p_material_rid, uint16_t 
 	// ORMMaterial3D uses the texture values directly, without the scalar multipliers.
 	rt_material_set_surface_params(mat, rt_state.orm ? 1.0f : get_float("roughness", 1.0f),
 			rt_state.orm ? 1.0f : get_float("metallic", 0.0f), get_float("specular", 0.5f));
+	// Also weights unshaded albedo, so it is read with the emission feature disabled.
+	mat.emission_indirect = get_float("emission_indirect_energy", 1.0f);
 
 	// Addressing stored in fp16 slots, packed once below.
 	float uv1_blend_sharpness = 1.0f;

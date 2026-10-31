@@ -142,7 +142,7 @@ struct MaterialData {
 	uint uv2_scale_offset_z; // fp16x2: scale.z, offset.z (modulo 1).
 	uint metallic_texture; // texture_metallic, or texture_orm for ORMMaterial3D.
 	uint ao_texture; // AO texture when AO is enabled; 0 (white) otherwise.
-	uint pad;
+	float emission_indirect; // BaseMaterial3D emission_indirect_energy, see MaterialResult::emission_indirect.
 };
 
 // Bindless index of a MaterialData *_texture.

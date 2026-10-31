@@ -2027,6 +2027,7 @@ void main() {
 	float metallic = 0.0;
 	float specular = 0.5;
 	vec3 emission = vec3(0.0);
+	float emission_indirect = 1.0; // Written by EMISSION_INDIRECT; no indirect emission here.
 	float roughness = 1.0;
 	float rim = 0.0;
 	float rim_tint = 0.0;
