@@ -1141,29 +1141,34 @@ void AnimationMixer::blend_capture(double p_delta) {
 	}
 
 	// Build capture animation instance.
-	AnimationData ad;
-	ad.animation = capture_cache.animation;
-
-	PlaybackInfo pi;
-	pi.weight = weight;
-
 	AnimationInstance ai;
-	ai.animation_data = ad;
-	ai.playback_info = pi;
+	ai.animation = capture_cache.animation;
+	ai.playback_info.weight = weight;
 
-	animation_instances.push_back(ai);
+	animation_instances.push_back(std::move(ai));
 }
 
 void AnimationMixer::_blend_calc_total_weight() {
 	for (const AnimationInstance &ai : animation_instances) {
-		Ref<Animation> a = ai.animation_data.animation;
+		const Ref<Animation> &a = ai.animation;
 		real_t weight = ai.playback_info.weight;
 		const real_t *track_weights_ptr = ai.playback_info.track_weights.ptr();
 		int track_weights_count = ai.playback_info.track_weights.size();
-		ERR_CONTINUE_EDMSG(!animation_track_num_to_track_cache.has(a), "No animation in cache.");
-		LocalVector<TrackCache *> &track_num_to_track_cache = animation_track_num_to_track_cache[a];
-		thread_local HashSet<Animation::TypeHash, HashHasher> processed_hashes;
-		processed_hashes.clear();
+		LocalVector<TrackCache *> *t_cache = animation_track_num_to_track_cache.getptr(a);
+		ERR_CONTINUE_EDMSG(!t_cache, "No animation in cache.");
+		LocalVector<TrackCache *> &track_num_to_track_cache = *t_cache;
+
+		uint64_t pass_id = ++animation_instance_weight_pass_counter;
+		if (unlikely(pass_id == 0)) {
+			for (KeyValue<Animation::TypeHash, TrackCache *> &kv : track_cache) {
+				if (kv.value) {
+					kv.value->animation_instance_weight_applied_at = 0;
+				}
+			}
+			animation_instance_weight_pass_counter = 1;
+			pass_id = 1;
+		}
+
 		const LocalVector<Animation::Track *> &tracks = a->get_tracks();
 		Animation::Track *const *tracks_ptr = tracks.ptr();
 		int count = tracks.size();
@@ -1172,18 +1177,16 @@ void AnimationMixer::_blend_calc_total_weight() {
 			if (!animation_track->enabled) {
 				continue;
 			}
-			Animation::TypeHash thash = animation_track->thash;
 			TrackCache *track = track_num_to_track_cache[i];
-			if (track == nullptr || processed_hashes.has(thash)) {
+			if (track == nullptr || track->animation_instance_weight_applied_at == pass_id) {
 				// No path, but avoid error spamming.
-				// Or, there is the case different track type with same path; These can be distinguished by hash. So don't add the weight doubly.
 				continue;
 			}
 			int blend_idx = track->blend_idx;
 			ERR_CONTINUE(blend_idx < 0 || blend_idx >= track_count);
 			real_t blend = blend_idx < track_weights_count ? track_weights_ptr[blend_idx] * weight : weight;
 			track->total_weight += blend;
-			processed_hashes.insert(thash);
+			track->animation_instance_weight_applied_at = pass_id;
 		}
 	}
 }
@@ -1194,7 +1197,7 @@ void AnimationMixer::_blend_process(double p_delta, bool p_update_only) {
 	bool can_call = is_inside_tree() && !Engine::get_singleton()->is_editor_hint();
 #endif // TOOLS_ENABLED
 	for (const AnimationInstance &ai : animation_instances) {
-		Ref<Animation> a = ai.animation_data.animation;
+		const Ref<Animation> &a = ai.animation;
 		double time = ai.playback_info.time;
 		double delta = ai.playback_info.delta;
 		double start = ai.playback_info.start;
@@ -1210,8 +1213,9 @@ void AnimationMixer::_blend_process(double p_delta, bool p_update_only) {
 #ifndef _3D_DISABLED
 		bool calc_root = !seeked || is_external_seeking;
 #endif // _3D_DISABLED
-		ERR_CONTINUE_EDMSG(!animation_track_num_to_track_cache.has(a), "No animation in cache.");
-		LocalVector<TrackCache *> &track_num_to_track_cache = animation_track_num_to_track_cache[a];
+		LocalVector<TrackCache *> *t_cache = animation_track_num_to_track_cache.getptr(a);
+		ERR_CONTINUE_EDMSG(!t_cache, "No animation in cache.");
+		LocalVector<TrackCache *> &track_num_to_track_cache = *t_cache;
 		const LocalVector<Animation::Track *> &tracks = a->get_tracks();
 		Animation::Track *const *tracks_ptr = tracks.ptr();
 		real_t a_length = a->get_length();
@@ -2046,19 +2050,15 @@ void AnimationMixer::_call_object(ObjectID p_object_id, const StringName &p_meth
 	}
 }
 
-void AnimationMixer::make_animation_instance(const StringName &p_name, const PlaybackInfo p_playback_info) {
-	ERR_FAIL_COND(!has_animation(p_name));
-
-	AnimationData ad;
-	ad.name = p_name;
-	ad.animation = get_animation(p_name);
-	ad.animation_library = find_animation_library(ad.animation);
+void AnimationMixer::make_animation_instance(const StringName &p_name, const PlaybackInfo &p_playback_info) {
+	const AnimationData *ad = animation_set.getptr(p_name);
+	ERR_FAIL_NULL(ad);
 
 	AnimationInstance ai;
-	ai.animation_data = ad;
+	ai.animation = ad->animation;
 	ai.playback_info = p_playback_info;
 
-	animation_instances.push_back(ai);
+	animation_instances.push_back(std::move(ai));
 }
 
 void AnimationMixer::clear_animation_instances() {

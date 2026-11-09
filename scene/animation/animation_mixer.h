@@ -76,7 +76,7 @@ public:
 	};
 
 	struct AnimationData {
-		String name;
+		StringName name;
 		Ref<Animation> animation;
 		StringName animation_library;
 		uint64_t last_update = 0;
@@ -95,7 +95,7 @@ public:
 	};
 
 	struct AnimationInstance {
-		AnimationData animation_data;
+		Ref<Animation> animation;
 		PlaybackInfo playback_info;
 	};
 
@@ -151,6 +151,7 @@ protected:
 		int blend_idx = -1;
 		ObjectID object_id;
 		real_t total_weight = 0.0;
+		uint64_t animation_instance_weight_applied_at = 0;
 
 		TrackCache() = default;
 		TrackCache(const TrackCache &p_other) :
@@ -158,7 +159,8 @@ protected:
 				setup_pass(p_other.setup_pass),
 				type(p_other.type),
 				object_id(p_other.object_id),
-				total_weight(p_other.total_weight) {}
+				total_weight(p_other.total_weight),
+				animation_instance_weight_applied_at(p_other.animation_instance_weight_applied_at) {}
 
 		virtual ~TrackCache() {}
 	};
@@ -322,6 +324,7 @@ protected:
 
 	/* ---- Blending processor ---- */
 	LocalVector<AnimationInstance> animation_instances;
+	uint64_t animation_instance_weight_pass_counter = 0;
 	AHashMap<NodePath, int> track_map;
 	int track_count = 0;
 	bool deterministic = false;
@@ -452,7 +455,7 @@ public:
 	Vector3 get_root_motion_scale_accumulator() const;
 
 	/* ---- Blending processor ---- */
-	void make_animation_instance(const StringName &p_name, const PlaybackInfo p_playback_info);
+	void make_animation_instance(const StringName &p_name, const PlaybackInfo &p_playback_info);
 	void clear_animation_instances();
 	virtual void advance(double p_time);
 	virtual void clear_caches(); // Must be called by hand if an animation was modified after added.

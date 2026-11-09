@@ -474,12 +474,12 @@ void AnimationPlayer::play_section(const StringName &p_name, double p_start_time
 		} else if (blend_times.has(bk)) {
 			blend_time = blend_times[bk];
 		} else {
-			bk.from = "*";
+			bk.from = SNAME("*");
 			if (blend_times.has(bk)) {
 				blend_time = blend_times[bk];
 			} else {
 				bk.from = c.current.from->name;
-				bk.to = "*";
+				bk.to = SNAME("*");
 
 				if (blend_times.has(bk)) {
 					blend_time = blend_times[bk];

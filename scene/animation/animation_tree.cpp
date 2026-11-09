@@ -184,6 +184,7 @@ AnimationNode::NodeTimeInfo AnimationNode::blend_input(int p_input, AnimationMix
 	Ref<AnimationNode> node = blend_tree->get_node(node_name);
 	ERR_FAIL_COND_V(node.is_null(), NodeTimeInfo());
 
+#ifdef TOOLS_ENABLED
 	real_t activity = 0.0;
 	LocalVector<AnimationTree::Activity> *activity_ptr = process_state->tree->input_activity_map.getptr(node_state.base_path);
 	NodeTimeInfo nti = _blend_node(node, node_name, nullptr, p_playback_info, p_filter, p_sync, p_test_only, &activity);
@@ -193,6 +194,9 @@ AnimationNode::NodeTimeInfo AnimationNode::blend_input(int p_input, AnimationMix
 		(*activity_ptr)[p_input].activity = activity;
 	}
 	return nti;
+#else
+	return _blend_node(node, node_name, nullptr, p_playback_info, p_filter, p_sync, p_test_only, nullptr);
+#endif // TOOLS_ENABLED
 }
 
 AnimationNode::NodeTimeInfo AnimationNode::blend_node(Ref<AnimationNode> p_node, const StringName &p_subpath, AnimationMixer::PlaybackInfo p_playback_info, FilterAction p_filter, bool p_sync, bool p_test_only) {
