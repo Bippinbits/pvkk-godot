@@ -39,6 +39,7 @@
 #include "core/io/marshalls.h"
 #include "core/io/resource_uid.h"
 #include "core/object/script_language.h"
+#include "core/templates/hash_set.h"
 #include "core/templates/rb_set.h"
 #include "core/variant/typed_array.h"
 #include "core/variant/variant_parser.h"
@@ -1425,15 +1426,36 @@ bool ProjectSettings::check_changed_settings_in_group(const String &p_setting_pr
 
 void ProjectSettings::refresh_global_class_list() {
 	// This is called after mounting a new PCK file to pick up class changes.
+	Array previous = get_global_class_list().duplicate();
 	is_global_class_list_loaded = false; // Make sure we read from the freshly mounted PCK.
 	Array script_classes = get_global_class_list();
+	HashSet<StringName> declared;
 	for (int i = 0; i < script_classes.size(); i++) {
 		Dictionary c = script_classes[i];
 		if (!c.has("class") || !c.has("language") || !c.has("path") || !c.has("base") || !c.has("is_abstract") || !c.has("is_tool")) {
 			continue;
 		}
+		declared.insert(c["class"]);
 		ScriptServer::add_global_class(c["class"], c["base"], c["language"], c["path"], c["is_abstract"], c["is_tool"]);
 	}
+	for (const Variant &v : previous) {
+		Dictionary c = v;
+		if (!declared.has(c.get("class", StringName()))) {
+			global_class_list.push_back(c);
+		}
+	}
+}
+
+void ProjectSettings::add_global_class(const Dictionary &p_class) {
+	ERR_FAIL_COND(!p_class.has("class") || !p_class.has("language") || !p_class.has("path") || !p_class.has("base") || !p_class.has("is_abstract") || !p_class.has("is_tool"));
+	get_global_class_list();
+	for (int i = global_class_list.size() - 1; i >= 0; i--) {
+		if (Dictionary(global_class_list[i]).get("class", StringName()) == p_class["class"]) {
+			global_class_list.remove_at(i);
+		}
+	}
+	global_class_list.push_back(p_class);
+	ScriptServer::add_global_class(p_class["class"], p_class["base"], p_class["language"], p_class["path"], p_class["is_abstract"], p_class["is_tool"]);
 }
 
 TypedArray<Dictionary> ProjectSettings::get_global_class_list() {
@@ -1616,6 +1638,7 @@ void ProjectSettings::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_setting", "name", "default_value"), &ProjectSettings::get_setting, DEFVAL(Variant()));
 	ClassDB::bind_method(D_METHOD("get_setting_with_override", "name"), &ProjectSettings::get_setting_with_override);
 	ClassDB::bind_method(D_METHOD("get_global_class_list"), &ProjectSettings::get_global_class_list);
+	ClassDB::bind_method(D_METHOD("add_global_class", "class"), &ProjectSettings::add_global_class);
 	ClassDB::bind_method(D_METHOD("get_setting_with_override_and_custom_features", "name", "features"), &ProjectSettings::get_setting_with_override_and_custom_features);
 	ClassDB::bind_method(D_METHOD("set_order", "name", "position"), &ProjectSettings::set_order);
 	ClassDB::bind_method(D_METHOD("get_order", "name"), &ProjectSettings::get_order);

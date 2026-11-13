@@ -16,6 +16,13 @@
 		<link title="Operating System Testing Demo">https://godotengine.org/asset-library/asset/2789</link>
 	</tutorials>
 	<methods>
+		<method name="add_global_class">
+			<return type="void" />
+			<param index="0" name="class" type="Dictionary" />
+			<description>
+				Registers a global class at runtime, for example from a resource pack mounted with [method load_resource_pack]. [param class] has the same entries as the dictionaries returned by [method get_global_class_list]. A class with the same name is replaced.
+			</description>
+		</method>
 		<method name="add_property_info">
 			<return type="void" />
 			<param index="0" name="hint" type="Dictionary" />
