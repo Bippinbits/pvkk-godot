@@ -3188,6 +3188,9 @@ void RendererSceneCull::_scene_cull(CullData &cull_data, InstanceCullResult &cul
 }
 
 void RendererSceneCull::_scene_particles_set_view_axis(RID p_particles, const Vector3 &p_axis, const Vector3 &p_up_axis) {
+	if (RSG::utilities->get_base_type(p_particles) != RS::INSTANCE_PARTICLES) {
+		return;
+	}
 	RSG::particles_storage->particles_set_view_axis(p_particles, p_axis, p_up_axis);
 }
 
