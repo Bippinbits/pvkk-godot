@@ -37,9 +37,11 @@
 #include "core/config/project_settings.h"
 #include "core/io/dir_access.h"
 #include "core/io/file_access.h"
+#include "core/object/callable_method_pointer.h"
 #include "core/profiling/profiling.h"
 #include "core/templates/fixed_vector.h"
 #include "modules/modules_enabled.gen.h"
+#include "servers/rendering/rendering_server.h"
 #include "servers/rendering/rendering_shader_container.h"
 
 #ifdef MODULE_GLSLANG_ENABLED
@@ -6299,6 +6301,11 @@ bool RenderingDevice::_dependencies_make_mutable(RID p_id, RDG::ResourceTracker 
 /**************************/
 
 void RenderingDevice::free_rid(RID p_rid) {
+	if (is_main_instance && render_thread_id != Thread::get_caller_id() && RenderingServer::get_singleton() && !RenderingServer::get_singleton()->is_on_render_thread()) {
+		RenderingServer::get_singleton()->call_on_render_thread(callable_mp(this, &RenderingDevice::free_rid).bind(p_rid));
+		return;
+	}
+
 	ERR_RENDER_THREAD_GUARD();
 
 	_free_dependencies(p_rid); // Recursively erase dependencies first, to avoid potential API problems.
