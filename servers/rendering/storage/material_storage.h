@@ -75,6 +75,7 @@ public:
 
 	/* MATERIAL API */
 
+	virtual bool owns_material(RID p_rid) = 0;
 	virtual RID material_allocate() = 0;
 	virtual void material_initialize(RID p_rid) = 0;
 	virtual void material_free(RID p_rid) = 0;

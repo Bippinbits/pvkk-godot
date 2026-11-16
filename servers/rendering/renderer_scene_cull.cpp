@@ -31,6 +31,7 @@
 #include "renderer_scene_cull.h"
 
 #include "core/config/project_settings.h"
+#include "core/object/message_queue.h"
 #include "core/object/worker_thread_pool.h"
 #include "core/profiling/profiling.h"
 #include "rendering_light_culler.h"
@@ -4033,6 +4034,53 @@ void RendererSceneCull::render_particle_colliders() {
 	}
 }
 
+static void _report_stale_material(uint64_t p_object, uint64_t p_mesh, int p_surface, uint64_t p_material, const String &p_source) {
+	Object *obj = ObjectDB::get_instance(ObjectID(p_object));
+	if (!obj) {
+		ERR_PRINT(vformat("Freed %s surface material %d read on mesh %d surface %d of an already freed object %d.", p_source, p_material, p_mesh, p_surface, p_object));
+		return;
+	}
+
+	String path;
+	if (obj->has_method("is_inside_tree")) {
+		path = bool(obj->call("is_inside_tree")) ? String(obj->call("get_path")) : String(obj->get("name"));
+	}
+
+	Object *mesh_res = obj->get("mesh").get_validated_object();
+	if (!mesh_res) {
+		Object *multimesh = obj->get("multimesh").get_validated_object();
+		if (multimesh) {
+			mesh_res = multimesh->get("mesh").get_validated_object();
+		}
+	}
+
+	String mesh_path = "<unknown>";
+	String held = "<unknown>";
+	if (mesh_res) {
+		mesh_path = mesh_res->get("resource_path");
+		if (p_surface < int(mesh_res->call("get_surface_count"))) {
+			Object *held_mat = mesh_res->call("surface_get_material", p_surface).get_validated_object();
+			held = held_mat ? vformat("'%s' (rid %d)", String(held_mat->get("resource_path")), RID(held_mat->call("get_rid")).get_id()) : String("<none>");
+		}
+	}
+
+	ERR_PRINT(vformat("Freed %s surface material %d read for %s '%s', mesh '%s' (rid %d) surface %d; mesh resource now holds %s.", p_source, p_material, obj->get_class(), path, mesh_path, p_mesh, p_surface, held));
+}
+
+static void _queue_stale_material_report(ObjectID p_object, RID p_mesh, int p_surface, RID p_material, const String &p_source) {
+	static HashSet<uint64_t> reported;
+	if (reported.has(p_material.get_id())) {
+		return;
+	}
+	reported.insert(p_material.get_id());
+
+	if (Thread::is_main_thread()) {
+		_report_stale_material(uint64_t(p_object), p_mesh.get_id(), p_surface, p_material.get_id(), p_source);
+	} else {
+		MessageQueue::get_main_singleton()->push_callable(callable_mp_static(&_report_stale_material), uint64_t(p_object), p_mesh.get_id(), p_surface, p_material.get_id(), p_source);
+	}
+}
+
 void RendererSceneCull::_update_dirty_instance(Instance *p_instance) const {
 	if (p_instance->update_aabb) {
 		_update_instance_aabb(p_instance);
@@ -4099,6 +4147,10 @@ void RendererSceneCull::_update_dirty_instance(Instance *p_instance) const {
 						for (int i = 0; i < p_instance->materials.size(); i++) {
 							RID mat = p_instance->materials[i].is_valid() ? p_instance->materials[i] : RSG::mesh_storage->mesh_surface_get_material(mesh, i);
 
+							if (mat.is_valid() && !RSG::material_storage->owns_material(mat)) {
+								_queue_stale_material_report(p_instance->object_id, mesh, i, mat, p_instance->materials[i].is_valid() ? "instance" : "mesh");
+							}
+
 							if (!mat.is_valid()) {
 								cast_shadows = true;
 							} else {
@@ -4129,6 +4181,10 @@ void RendererSceneCull::_update_dirty_instance(Instance *p_instance) const {
 						int sc = RSG::mesh_storage->mesh_get_surface_count(mesh);
 						for (int i = 0; i < sc; i++) {
 							RID mat = RSG::mesh_storage->mesh_surface_get_material(mesh, i);
+
+							if (mat.is_valid() && !RSG::material_storage->owns_material(mat)) {
+								_queue_stale_material_report(p_instance->object_id, mesh, i, mat, "multimesh");
+							}
 
 							if (!mat.is_valid()) {
 								cast_shadows = true;
@@ -4167,6 +4223,10 @@ void RendererSceneCull::_update_dirty_instance(Instance *p_instance) const {
 						int sc = RSG::mesh_storage->mesh_get_surface_count(mesh);
 						for (int j = 0; j < sc; j++) {
 							RID mat = RSG::mesh_storage->mesh_surface_get_material(mesh, j);
+
+							if (mat.is_valid() && !RSG::material_storage->owns_material(mat)) {
+								_queue_stale_material_report(p_instance->object_id, mesh, j, mat, "particles");
+							}
 
 							if (!mat.is_valid()) {
 								cast_shadows = true;

@@ -108,7 +108,7 @@ public:
 
 	/* MATERIAL API */
 
-	bool owns_material(RID p_rid) { return material_owner.owns(p_rid); }
+	virtual bool owns_material(RID p_rid) override { return material_owner.owns(p_rid); }
 
 	virtual RID material_allocate() override;
 	virtual void material_initialize(RID p_rid) override;
