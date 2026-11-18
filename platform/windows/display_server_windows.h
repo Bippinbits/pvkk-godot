@@ -262,6 +262,14 @@ class DisplayServerWindows : public DisplayServer {
 	int old_x, old_y;
 	Point2i center;
 
+	// CAPTURED with raw input keeps the hidden cursor pinned where it was instead of parking it at the window center.
+	bool capture_pinned = false;
+	WindowID capture_pin_window = INVALID_WINDOW_ID;
+	Point2i capture_pin_pos;
+
+	bool warp_echo_pending = false;
+	Point2i warp_echo_pos;
+
 #if defined(GLES3_ENABLED)
 	GLManagerANGLE_Windows *gl_manager_angle = nullptr;
 	GLManagerNative_Windows *gl_manager_native = nullptr;
@@ -502,6 +510,8 @@ class DisplayServerWindows : public DisplayServer {
 	WindowID _get_focused_window_or_popup() const;
 	void _register_raw_input_devices(WindowID p_target_window);
 	bool _has_moving_window() const;
+	void _apply_capture_pin();
+	void _send_mouse_position_event(WindowID p_window, const Point2i &p_position);
 
 	void _process_activate_event(WindowID p_window_id);
 	void _process_key_events();

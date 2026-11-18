@@ -240,13 +240,28 @@ void DisplayServerWindows::_set_mouse_mode_impl(MouseMode p_mode) {
 		ClientToScreen(wd.hWnd, (POINT *)&clipRect.right);
 		ClipCursor(&clipRect);
 		if (p_mode == MOUSE_MODE_CAPTURED) {
-			center = window_get_size() / 2;
-			POINT pos = { (int)center.x, (int)center.y };
-			ClientToScreen(wd.hWnd, &pos);
-			SetCursorPos(pos.x, pos.y);
 			SetCapture(wd.hWnd);
-
 			_register_raw_input_devices(window_id);
+
+			if (use_raw_input) {
+				// Raw input reports device motion regardless of where the cursor is, so the
+				// cursor can stay where the user left it. Leaving CAPTURED then needs no warp.
+				if (!capture_pinned || capture_pin_window != window_id) {
+					POINT cur;
+					GetCursorPos(&cur);
+					ScreenToClient(wd.hWnd, &cur);
+					capture_pin_pos = Point2i(cur.x, cur.y);
+					capture_pin_window = window_id;
+					capture_pinned = true;
+				}
+				_apply_capture_pin();
+			} else {
+				capture_pinned = false;
+				center = window_get_size() / 2;
+				POINT pos = { (int)center.x, (int)center.y };
+				ClientToScreen(wd.hWnd, &pos);
+				SetCursorPos(pos.x, pos.y);
+			}
 		}
 	} else {
 		// Mouse is free to move around (not captured or confined).
@@ -285,6 +300,57 @@ bool DisplayServerWindows::_has_moving_window() const {
 		}
 	}
 	return false;
+}
+
+void DisplayServerWindows::_apply_capture_pin() {
+	if (!capture_pinned || !windows.has(capture_pin_window)) {
+		return;
+	}
+	WindowData &wd = windows[capture_pin_window];
+
+	Vector2i off = (wd.multiwindow_fs || (!wd.fullscreen && wd.borderless && wd.maximized)) ? _get_screen_expand_offset(window_get_current_screen(capture_pin_window)) : Vector2i();
+	RECT client;
+	GetClientRect(wd.hWnd, &client);
+	capture_pin_pos.x = CLAMP(capture_pin_pos.x, 0, MAX(0, (int)client.right - off.x - 1));
+	capture_pin_pos.y = CLAMP(capture_pin_pos.y, 0, MAX(0, (int)client.bottom - off.y - 1));
+
+	POINT pos = { capture_pin_pos.x, capture_pin_pos.y };
+	ClientToScreen(wd.hWnd, &pos);
+	SetCursorPos(pos.x, pos.y);
+	RECT pin = { pos.x, pos.y, pos.x + 1, pos.y + 1 };
+	ClipCursor(&pin);
+}
+
+void DisplayServerWindows::_send_mouse_position_event(WindowID p_window, const Point2i &p_position) {
+	if (!windows.has(p_window)) {
+		return;
+	}
+	if (!windows[p_window].window_focused && window_get_active_popup() != p_window) {
+		return;
+	}
+
+	Ref<InputEventMouseMotion> mm;
+	mm.instantiate();
+	mm->set_window_id(p_window);
+
+	const BitField<WinKeyModifierMask> &mods = _get_mods();
+	mm->set_ctrl_pressed(mods.has_flag(WinKeyModifierMask::CTRL));
+	mm->set_shift_pressed(mods.has_flag(WinKeyModifierMask::SHIFT));
+	mm->set_alt_pressed(mods.has_flag(WinKeyModifierMask::ALT));
+	mm->set_meta_pressed(mods.has_flag(WinKeyModifierMask::META));
+
+	BitField<MouseButtonMask> button_state = mouse_get_button_state();
+	mm->set_button_mask(button_state);
+	mm->set_pressure(button_state.has_flag(MouseButtonMask::LEFT) ? 1.0f : 0.0f);
+
+	mm->set_position(Vector2(p_position));
+	mm->set_global_position(Vector2(p_position));
+	mm->set_velocity(Vector2());
+	mm->set_screen_velocity(Vector2());
+	mm->set_relative(Vector2());
+	mm->set_relative_screen_position(Vector2());
+
+	Input::get_singleton()->parse_input_event(mm);
 }
 
 void DisplayServerWindows::_register_raw_input_devices(WindowID p_target_window) {
@@ -900,9 +966,23 @@ void DisplayServerWindows::_mouse_update_mode() {
 		return;
 	}
 
+	const bool release_pin = capture_pinned && wanted_mouse_mode != MOUSE_MODE_CAPTURED;
+	if (release_pin) {
+		capture_pinned = false;
+	}
+
 	mouse_mode = wanted_mouse_mode;
 
 	_set_mouse_mode_impl(wanted_mouse_mode);
+
+	if (release_pin) {
+		// The cursor is already where it should be. Report that position right away so viewports
+		// that track the last mouse event do not keep a stale one until the next OS motion.
+		old_x = capture_pin_pos.x;
+		old_y = capture_pin_pos.y;
+		old_invalid = false;
+		_send_mouse_position_event(capture_pin_window, capture_pin_pos);
+	}
 }
 
 void DisplayServerWindows::mouse_set_mode(MouseMode p_mode) {
@@ -955,6 +1035,12 @@ void DisplayServerWindows::warp_mouse(const Point2i &p_position) {
 	if (mouse_mode == MOUSE_MODE_CAPTURED) {
 		old_x = p_position.x;
 		old_y = p_position.y;
+		if (capture_pinned) {
+			// Move the pin: the cursor reappears here when CAPTURED ends.
+			capture_pin_pos = p_position;
+			_apply_capture_pin();
+			_send_mouse_position_event(capture_pin_window, capture_pin_pos);
+		}
 	} else {
 		POINT p;
 		p.x = p_position.x;
@@ -962,6 +1048,15 @@ void DisplayServerWindows::warp_mouse(const Point2i &p_position) {
 		ClientToScreen(windows[window_id].hWnd, &p);
 
 		SetCursorPos(p.x, p.y);
+
+		// Report the new position now instead of waiting for the OS motion message, which is
+		// not sent at all when the cursor was already there. The OS echo is then skipped.
+		old_x = p_position.x;
+		old_y = p_position.y;
+		old_invalid = false;
+		warp_echo_pending = true;
+		warp_echo_pos = p_position;
+		_send_mouse_position_event(window_id, p_position);
 	}
 }
 
@@ -5069,10 +5164,23 @@ LRESULT DisplayServerWindows::WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
 
 				Point2i c(windows[window_id].width / 2, windows[window_id].height / 2);
 
-				// Centering just so it works as before.
-				POINT pos = { (int)c.x, (int)c.y };
-				ClientToScreen(windows[window_id].hWnd, &pos);
-				SetCursorPos(pos.x, pos.y);
+				if (capture_pinned && windows.has(capture_pin_window)) {
+					c = capture_pin_pos;
+					// Windows drops the clip on some focus and desktop changes; put the cursor back if it drifted.
+					POINT cur;
+					GetCursorPos(&cur);
+					POINT pin = { c.x, c.y };
+					ClientToScreen(windows[capture_pin_window].hWnd, &pin);
+					if (cur.x != pin.x || cur.y != pin.y) {
+						_apply_capture_pin();
+						c = capture_pin_pos;
+					}
+				} else {
+					// Centering just so it works as before.
+					POINT pos = { (int)c.x, (int)c.y };
+					ClientToScreen(windows[window_id].hWnd, &pos);
+					SetCursorPos(pos.x, pos.y);
+				}
 
 				mm->set_position(c);
 				mm->set_global_position(c);
@@ -5543,6 +5651,14 @@ LRESULT DisplayServerWindows::WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
 				break;
 			}
 
+			if (warp_echo_pending) {
+				// warp_mouse already reported this position.
+				warp_echo_pending = false;
+				if (GET_X_LPARAM(lParam) == warp_echo_pos.x && GET_Y_LPARAM(lParam) == warp_echo_pos.y) {
+					break;
+				}
+			}
+
 			DisplayServer::WindowID receiving_window_id = window_id;
 			if (!windows[window_id].no_focus) {
 				receiving_window_id = _get_focused_window_or_popup();
@@ -5913,7 +6029,9 @@ LRESULT DisplayServerWindows::WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
 				}
 
 				// Update cursor clip region after window rect has changed.
-				if (mouse_mode == MOUSE_MODE_CAPTURED || mouse_mode == MOUSE_MODE_CONFINED || mouse_mode == MOUSE_MODE_CONFINED_HIDDEN) {
+				if (mouse_mode == MOUSE_MODE_CAPTURED && capture_pinned) {
+					_apply_capture_pin();
+				} else if (mouse_mode == MOUSE_MODE_CAPTURED || mouse_mode == MOUSE_MODE_CONFINED || mouse_mode == MOUSE_MODE_CONFINED_HIDDEN) {
 					RECT crect;
 					GetClientRect(window.hWnd, &crect);
 					crect.right -= off.x;
