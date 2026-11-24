@@ -23,6 +23,11 @@
 				Loads the texture from the specified [param path].
 			</description>
 		</method>
+		<method name="update_all_mipmap_skip" qualifiers="static">
+			<return type="void" />
+			<description>
+			</description>
+		</method>
 	</methods>
 	<members>
 		<member name="load_path" type="String" setter="load" getter="get_load_path" default="&quot;&quot;">

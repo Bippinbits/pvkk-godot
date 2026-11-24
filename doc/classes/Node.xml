@@ -1323,6 +1323,8 @@
 		<constant name="NOTIFICATION_TEXT_SERVER_CHANGED" value="2018">
 			Notification received when the [TextServer] is changed.
 		</constant>
+		<constant name="NOTIFICATION_SCRIPTS_RELOADED" value="2019">
+		</constant>
 		<constant name="NOTIFICATION_ACCESSIBILITY_UPDATE" value="3000">
 			Notification received when an accessibility information update is required.
 		</constant>

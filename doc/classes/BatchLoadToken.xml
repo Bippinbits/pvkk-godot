@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="BatchLoadToken" inherits="RefCounted" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../class.xsd">
+	<brief_description>
+	</brief_description>
+	<description>
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="get_progress" qualifiers="const">
+			<return type="float" />
+			<description>
+			</description>
+		</method>
+		<method name="get_results" qualifiers="const">
+			<return type="Dictionary" />
+			<description>
+			</description>
+		</method>
+		<method name="get_status" qualifiers="const">
+			<return type="int" enum="BatchLoadToken.Status" />
+			<description>
+			</description>
+		</method>
+	</methods>
+	<signals>
+		<signal name="completed">
+			<description>
+			</description>
+		</signal>
+	</signals>
+	<constants>
+		<constant name="STATUS_QUEUED" value="0" enum="Status">
+		</constant>
+		<constant name="STATUS_SCANNING" value="1" enum="Status">
+		</constant>
+		<constant name="STATUS_LOADING" value="2" enum="Status">
+		</constant>
+		<constant name="STATUS_DONE" value="3" enum="Status">
+		</constant>
+		<constant name="STATUS_FAILED" value="4" enum="Status">
+		</constant>
+	</constants>
+</class>

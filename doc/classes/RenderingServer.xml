@@ -3519,6 +3519,12 @@
 				[b]Note:[/b] Rendering on a separate thread is experimental. Only switch at a point where no other thread is using the [RenderingServer], such as right after a loading screen finishes.
 			</description>
 		</method>
+		<method name="set_skip_mesh_pipeline_wait">
+			<return type="void" />
+			<param index="0" name="skip" type="bool" />
+			<description>
+			</description>
+		</method>
 		<method name="shader_create">
 			<return type="RID" />
 			<description>

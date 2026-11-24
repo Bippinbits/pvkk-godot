@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="AudioStreamBusTap" inherits="AudioStream" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../class.xsd">
+	<brief_description>
+	</brief_description>
+	<description>
+	</description>
+	<tutorials>
+	</tutorials>
+	<members>
+		<member name="bitcrush" type="int" setter="set_bitcrush" getter="get_bitcrush" default="1">
+		</member>
+		<member name="extra_latency_frames" type="int" setter="set_extra_latency_frames" getter="get_extra_latency_frames" default="0">
+		</member>
+		<member name="ring_mod_hz" type="float" setter="set_ring_mod_hz" getter="get_ring_mod_hz" default="0.0">
+		</member>
+		<member name="tap" type="AudioEffectBusTap" setter="set_tap" getter="get_tap">
+		</member>
+	</members>
+</class>
