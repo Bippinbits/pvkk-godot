@@ -184,6 +184,14 @@ void JoypadSDL::process_events() {
 					joypad_info["steam_input_index"] = itos(steam_handle);
 				}
 
+				if (gamepad) {
+					// "xboxone", "ps5", ... The physical pad, even under Steam Input.
+					const char *sdl_type = SDL_GetGamepadStringForType(SDL_GetGamepadType(gamepad));
+					if (sdl_type) {
+						joypad_info["sdl_type"] = String(sdl_type);
+					}
+				}
+
 				const int player_index = SDL_GetJoystickPlayerIndex(joy);
 				if (player_index >= 0) {
 					// For XInput controllers SDL_GetJoystickPlayerIndex returns the XInput user index.

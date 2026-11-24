@@ -34,6 +34,7 @@
 #include "core/object/object.h"
 #include "core/os/keyboard.h"
 #include "core/os/thread_safe.h"
+#include "core/templates/local_vector.h"
 #include "core/templates/rb_map.h"
 #include "core/templates/rb_set.h"
 #include "core/variant/typed_array.h"
@@ -85,6 +86,18 @@ public:
 
 		virtual bool has_joy_light() const { return false; }
 		virtual void set_joy_light(const Color &p_color) {}
+	};
+
+	// C++ only. Owns the frame's input while set: every event stays buffered and flushes are
+	// no-ops. Once per Main::iteration, before physics, the filter takes the batch with
+	// take_buffered_events() and hands back what Godot should see with parse_filtered_events().
+	class FrameFilter {
+	public:
+		virtual ~FrameFilter() {}
+
+		virtual void input_poll_process_flip() = 0; // Main::iteration, before physics. Main thread, no lock.
+		virtual void pressed_events_released() {} // Focus loss, window move. Main thread, no lock.
+		virtual void joy_connection_changed(int p_device, bool p_connected) {} // Any thread, lock held: queue only.
 	};
 
 	static constexpr int32_t JOYPADS_MAX = 16;
@@ -288,6 +301,7 @@ private:
 	static void (*set_custom_mouse_cursor_func)(const Ref<Resource> &, CursorShape, const Vector2 &);
 
 	EventDispatchFunc event_dispatch_function = nullptr;
+	FrameFilter *frame_filter = nullptr;
 
 #ifndef DISABLE_DEPRECATED
 	void _vibrate_handheld_bind_compat_91143(int p_duration_ms = 500);
@@ -412,6 +426,12 @@ public:
 	void release_pressed_events();
 
 	void set_event_dispatch_function(EventDispatchFunc p_function);
+
+	void set_frame_filter(FrameFilter *p_filter); // Main thread. Refuses to replace another filter.
+	void clear_frame_filter(FrameFilter *p_expected); // Only if p_expected is still installed.
+	FrameFilter *get_frame_filter() const { return frame_filter; } // Main thread.
+	void take_buffered_events(LocalVector<Ref<InputEvent>> &r_events); // Frame filter: appends, oldest first.
+	void parse_filtered_events(const LocalVector<Ref<InputEvent>> &p_events); // Frame filter, main thread.
 
 	void set_disable_input(bool p_disable);
 	bool is_input_disabled() const;

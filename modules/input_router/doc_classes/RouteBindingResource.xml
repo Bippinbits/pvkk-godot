@@ -1,0 +1,174 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="RouteBindingResource" inherits="Resource" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../doc/class.xsd">
+	<brief_description>
+		One gamepad input routed to an action or a callback by [InputRouter].
+	</brief_description>
+	<description>
+		A binding names one physical pad input (a button, half or all of an axis, or a stick), an optional [member gate] button that makes it a chord, a [member trigger] that decides when it fires, the response that shapes analog values, and what it drives: an [member action], a callback, the virtual pointer, or all of these.
+		Attach it with [method InputRouter.attach], or list it in a [GamepadMap]. The router copies each placement from the compiled template in its route map ([GamepadBakedMaps]), keyed by [member id] and [member scheme]; a binding the map lacks is compiled into a new map at the next frame, with a warning to rebake. The first binding to claim an input owns it until the input is released.
+		In the editor, the inspector shows a summary from [method describe], the input and gate as each pad family labels them, a [b]Listen[/b] button that sets the input from a connected pad (hold a button first to make it the gate), response presets, and a live preview that shapes the selected pad's input with the router's own functions. Properties the current [member source] and [member trigger] do not use are hidden but still saved.
+		In editor builds, a placed binding whose properties change while the game runs is recompiled, and its rows retune from the next frame.
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="describe" qualifiers="const">
+			<return type="String" />
+			<description>
+				Returns a one-line summary with generic labels, such as [code]"LB + RT (analog)"[/code] or [code]"X &gt; Y &gt; A (sequence)"[/code]. For logs and tools.
+			</description>
+		</method>
+		<method name="make_response_curve" qualifiers="static">
+			<return type="Curve" />
+			<param index="0" name="preset" type="int" enum="RouteBindingResource.ResponsePreset" />
+			<description>
+				Returns a new editable [Curve] for [param preset]: five points with matching tangents, from (0, 0) to (1, 1). Assign it to [member response].
+			</description>
+		</method>
+	</methods>
+	<members>
+		<member name="action" type="StringName" setter="set_action" getter="get_action" default="&amp;&quot;&quot;">
+			An [InputMap] action this binding drives through [Input], so [method Input.is_action_pressed] and [method Node._input] see it. [constant TRIGGER_PRESS] and [constant TRIGGER_REPEAT] hold the action while the input is down, with the shaped value at the press as its strength; [constant TRIGGER_ANALOG] follows the shaped value. [constant TRIGGER_RELEASE], [constant TRIGGER_HOLD], [constant TRIGGER_TAP] and [constant TRIGGER_SEQUENCE] press it for one frame each time they fire. Empty: no action.
+		</member>
+		<member name="anti_deadzone" type="float" setter="set_anti_deadzone" getter="get_anti_deadzone" default="0.0">
+			The output just past [member deadzone]. Raise it when the game applies a deadzone of its own downstream, so small movements still register.
+		</member>
+		<member name="axis" type="int" setter="set_axis" getter="get_axis" enum="JoyAxis" default="5">
+			The axis read when [member source] is [constant SOURCE_AXIS].
+		</member>
+		<member name="axis_direction" type="int" setter="set_axis_direction" getter="get_axis_direction" default="1">
+			Which part of [member axis] is the input: [code]-1[/code] the negative half, [code]0[/code] the full axis from [code]-1[/code] to [code]1[/code], [code]1[/code] the positive half. Triggers only use the positive half. Each half is its own input slot, so one stick axis can carry two bindings.
+		</member>
+		<member name="button" type="int" setter="set_button" getter="get_button" enum="JoyButton" default="0">
+			The button read when [member source] is [constant SOURCE_BUTTON]. Buttons are positional: [constant JOY_BUTTON_A] is the bottom face button on every pad.
+		</member>
+		<member name="context" type="GamepadContext" setter="set_context" getter="get_context">
+			The context this binding goes into when [method InputRouter.attach] names none. Registered with the router on attach.
+		</member>
+		<member name="deadzone" type="float" setter="set_deadzone" getter="get_deadzone" default="0.2">
+			Raw magnitude below which the output is [code]0[/code]. Between [member deadzone] and [member saturation] the output rescales from [member anti_deadzone] to [code]1[/code].
+		</member>
+		<member name="deadzone_shape" type="int" setter="set_deadzone_shape" getter="get_deadzone_shape" enum="RouteBindingResource.DeadzoneShape" default="0">
+			How a stick's deadzone applies. See [enum DeadzoneShape].
+		</member>
+		<member name="gate" type="int" setter="set_gate" getter="get_gate" enum="JoyButton" default="-1">
+			A modifier button that must be held for this binding to fire, making it a chord such as [code]LB + A[/code]. An input pressed shortly before its gate still counts, within [method InputRouter.get_chord_window]. A button used as a gate fires its own ungated binding on release only, and only if no chord used it. [constant JOY_BUTTON_INVALID]: no gate.
+		</member>
+		<member name="hold_time" type="float" setter="set_hold_time" getter="get_hold_time" default="0.4">
+			Seconds the input must stay pressed before [constant TRIGGER_HOLD] fires.
+		</member>
+		<member name="id" type="StringName" setter="set_id" getter="get_id" default="&amp;&quot;&quot;">
+			The binding's name: the key of its template in the route map, of player rebinds ([method InputRouter.set_override]) and of named callbacks ([method InputRouter.set_callback]). Required; the router refuses a binding without one. One id may have one binding per [member scheme].
+		</member>
+		<member name="label" type="String" setter="set_label" getter="get_label" default="&quot;&quot;">
+			A display name for prompts and tools. Baked with the template.
+		</member>
+		<member name="lock_axis" type="bool" setter="set_lock_axis" getter="is_lock_axis" default="false">
+			For a stick axis: if [code]true[/code], the input reads [code]0[/code] while the stick's other axis is pushed further, so diagonal movement drives only the dominant direction.
+		</member>
+		<member name="pointer" type="bool" setter="set_pointer" getter="is_pointer" default="false">
+			For a stick: if [code]true[/code], the shaped stick also moves the virtual pointer at [member pointer_speed]. Read it with [method InputRouter.take_pointer_delta] and [method InputRouter.get_pointer_velocity].
+		</member>
+		<member name="pointer_speed" type="float" setter="set_pointer_speed" getter="get_pointer_speed" default="900.0">
+			Virtual pointer speed in pixels per second at full deflection.
+		</member>
+		<member name="press_threshold" type="float" setter="set_press_threshold" getter="get_press_threshold" default="0.5">
+			Shaped value at which an analog input counts as pressed.
+		</member>
+		<member name="priority" type="int" setter="set_priority" getter="get_priority" default="0">
+			Order among bindings for the same input in the same context, highest first, after gated bindings. Two bindings with the same input, gate, context and priority are a clash that [method InputRouter.check_maps] reports.
+		</member>
+		<member name="release_threshold" type="float" setter="set_release_threshold" getter="get_release_threshold" default="0.4">
+			Shaped value below which a pressed analog input counts as released. Kept at or below [member press_threshold], so the gap between them is hysteresis.
+		</member>
+		<member name="repeat_delay" type="float" setter="set_repeat_delay" getter="get_repeat_delay" default="0.4">
+			Seconds from the press to the first [constant InputRouter.PHASE_REPEATED] for [constant TRIGGER_REPEAT].
+		</member>
+		<member name="repeat_interval" type="float" setter="set_repeat_interval" getter="get_repeat_interval" default="0.08">
+			Seconds between repeats after the first. A late frame fires one repeat, not a burst.
+		</member>
+		<member name="response" type="Curve" setter="set_response" getter="get_response">
+			Maps the deadzoned magnitude, [code]0[/code] to [code]1[/code], to the output. Sampled into a table when compiled; bindings with the same curve share one table. Editing the curve's points emits [signal Resource.changed]. Null: linear.
+		</member>
+		<member name="saturation" type="float" setter="set_saturation" getter="get_saturation" default="0.95">
+			Raw magnitude at which the output reaches [code]1[/code].
+		</member>
+		<member name="scheme" type="StringName" setter="set_scheme" getter="get_scheme" default="&amp;&quot;&quot;">
+			The control scheme this binding belongs to. Empty: it applies under every scheme. Otherwise it applies only while [method InputRouter.set_scheme] selects this scheme.
+		</member>
+		<member name="sequence" type="PackedInt32Array" setter="set_sequence" getter="get_sequence" default="PackedInt32Array()">
+			For [constant TRIGGER_SEQUENCE]: up to four [enum JoyButton]s to press, in order, after the input.
+		</member>
+		<member name="source" type="int" setter="set_source" getter="get_source" enum="RouteBindingResource.Source" default="0">
+			The kind of physical input.
+		</member>
+		<member name="stick" type="int" setter="set_stick" getter="get_stick" enum="RouteBindingResource.Stick" default="0">
+			The stick read when [member source] is [constant SOURCE_STICK].
+		</member>
+		<member name="tap_time" type="float" setter="set_tap_time" getter="get_tap_time" default="0.25">
+			Longest press, in seconds, that [constant TRIGGER_TAP] counts as a tap.
+		</member>
+		<member name="trigger" type="int" setter="set_trigger" getter="get_trigger" enum="RouteBindingResource.Trigger" default="0">
+			When the binding fires, and which [enum InputRouter.Phase]s its callback receives.
+		</member>
+	</members>
+	<constants>
+		<constant name="SOURCE_BUTTON" value="0" enum="Source">
+			A digital button, [member button].
+		</constant>
+		<constant name="SOURCE_AXIS" value="1" enum="Source">
+			An axis or half of one, [member axis] and [member axis_direction]. The callback value is a [float].
+		</constant>
+		<constant name="SOURCE_STICK" value="2" enum="Source">
+			A whole stick, [member stick]. The callback value is a [Vector2].
+		</constant>
+		<constant name="STICK_LEFT" value="0" enum="Stick">
+			The left stick.
+		</constant>
+		<constant name="STICK_RIGHT" value="1" enum="Stick">
+			The right stick.
+		</constant>
+		<constant name="TRIGGER_PRESS" value="0" enum="Trigger">
+			[constant InputRouter.PHASE_PRESSED] when the input crosses [member press_threshold], [constant InputRouter.PHASE_RELEASED] when it falls below [member release_threshold].
+		</constant>
+		<constant name="TRIGGER_RELEASE" value="1" enum="Trigger">
+			[constant InputRouter.PHASE_RELEASED] on release only.
+		</constant>
+		<constant name="TRIGGER_HOLD" value="2" enum="Trigger">
+			[constant InputRouter.PHASE_HELD] once the input has been held for [member hold_time], then [constant InputRouter.PHASE_RELEASED].
+		</constant>
+		<constant name="TRIGGER_TAP" value="3" enum="Trigger">
+			[constant InputRouter.PHASE_TAPPED] on a release within [member tap_time] of the press. A longer press fires nothing.
+		</constant>
+		<constant name="TRIGGER_REPEAT" value="4" enum="Trigger">
+			[constant InputRouter.PHASE_PRESSED], then [constant InputRouter.PHASE_REPEATED] after [member repeat_delay] and every [member repeat_interval] while held. For menus.
+		</constant>
+		<constant name="TRIGGER_ANALOG" value="5" enum="Trigger">
+			[constant InputRouter.PHASE_CHANGED] on every change of the shaped value, including the return to zero.
+		</constant>
+		<constant name="TRIGGER_SEQUENCE" value="6" enum="Trigger">
+			[constant InputRouter.PHASE_PRESSED] when the input and then each button of [member sequence] are pressed in order within [method InputRouter.get_sequence_timeout]. A wrong button restarts it. Sequences watch presses without claiming them.
+		</constant>
+		<constant name="DEADZONE_RADIAL" value="0" enum="DeadzoneShape">
+			The deadzone applies to the stick's magnitude and keeps its direction.
+		</constant>
+		<constant name="DEADZONE_AXIAL" value="1" enum="DeadzoneShape">
+			The deadzone applies to each axis on its own, which snaps toward the axes.
+		</constant>
+		<constant name="DEADZONE_HYBRID" value="2" enum="DeadzoneShape">
+			Radial, then an axis under half the deadzone is zeroed, so straight pushes stay straight.
+		</constant>
+		<constant name="RESPONSE_LINEAR" value="0" enum="ResponsePreset">
+			Output equals input.
+		</constant>
+		<constant name="RESPONSE_SMOOTH" value="1" enum="ResponsePreset">
+			A gentle curve, [code]x^1.6[/code]: finer control near the center.
+		</constant>
+		<constant name="RESPONSE_PRECISE" value="2" enum="ResponsePreset">
+			A steep curve, [code]x^2.5[/code]: much finer control near the center, for aiming.
+		</constant>
+		<constant name="RESPONSE_AGGRESSIVE" value="3" enum="ResponsePreset">
+			Fast off the center, [code]1 - (1 - x)^2[/code].
+		</constant>
+	</constants>
+</class>

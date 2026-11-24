@@ -1,0 +1,588 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="InputRouter" inherits="Object" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../doc/class.xsd">
+	<brief_description>
+		A singleton that owns the input device each frame and routes gamepad input through a path of contexts.
+	</brief_description>
+	<description>
+		Once enabled ([member ProjectSettings.input_devices/router/enabled] or [method set_enabled]), the router installs itself as [Input]'s frame filter. Once per frame, before physics and before any game code sees input, it takes the frame's buffered events and:
+		- picks the device that owns the frame, keyboard and mouse or one gamepad ([method get_device]);
+		- routes pad input through the gamepad context path to [RouteBindingResource] bindings, which drive [InputMap] actions, callbacks and a virtual pointer;
+		- passes everything else on to [Input] unchanged;
+		- seals the frame, so getters see it;
+		- runs binding callbacks, then signals.
+		[b]Device ownership:[/b] keyboard and mouse ([constant DEVICE_KBM]) and gamepad ([constant DEVICE_PAD]) never share a frame. A device takes over when it [i]wakes[/i]: a new button or key press, a mouse click, or a trigger pulled past [method get_trigger_wake_threshold]. Stick and mouse motion never wake a device, so stick drift cannot steal the frame. On a switch the frame's batch is dropped, whatever the old device held is released, and whatever the batch pressed stays suppressed until released; [method is_switch_frame] is [code]true[/code] for that frame. [method set_device_policy] can lock the device.
+		[b]Context path:[/b] contexts ([GamepadContext]) stack outer to inner: base contexts from [method set_gamepad_base_contexts], then pushed ones. For each pad input the innermost context with a binding for it wins. A context with none decides by its fallback; at the bottom of the path the raw event passes to Godot, so GUI focus and [code]ui_*[/code] actions keep working where nothing is bound.
+		[b]Bindings:[/b] [method attach] places one [RouteBindingResource], [method load_map] a whole [GamepadMap]. Rows come from the route map ([GamepadBakedMaps]) that the export bakes. A callback receives [code](phase: int, value)[/code], where [code]phase[/code] is a [enum Phase] and [code]value[/code] is a [float], or a [Vector2] for a stick:
+		[codeblock]
+		func _ready():
+			InputRouter.set_gamepad_base_contexts(["cockpit"])
+			InputRouter.attach(preload("res://input/fire.tres"), &amp;"cockpit", _on_fire)
+
+		func _on_fire(phase, value):
+			if phase == InputRouter.PHASE_PRESSED:
+				fire()
+		[/codeblock]
+		[b]Timing and threads:[/b] getters read the newest sealed frame. Mutators write the next frame and take effect at its flip, so a value set this frame reads back from the next one. Getters marked thread-safe below cost one atomic load and may be called from any thread; they never block. Everything else runs on the main thread: mutators called from another thread are deferred to it, and getters return an empty value with an error. Signal connections are main thread only.
+		The router never runs inside the editor; the inspector preview reads pads directly.
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="attach">
+			<return type="int" />
+			<param index="0" name="binding" type="RouteBindingResource" />
+			<param index="1" name="context" type="StringName" default="&amp;&quot;&quot;" />
+			<param index="2" name="target" type="Callable" default="Callable()" />
+			<description>
+				Places [param binding] in [param context], or in the binding's own [member RouteBindingResource.context] if [param context] is empty, and returns a handle for [method detach]. [param target] is called as [code]target.call(phase, value)[/code] each time the binding fires. Handles are never [code]0[/code] and never reused; returns [code]0[/code] if the binding has no id or no context.
+				A binding the route map lacks is compiled into a new map and placed at the next frame, with a warning to rebake. From another thread, the handle is reserved at once and the attach runs on the main thread.
+			</description>
+		</method>
+		<method name="axis_input" qualifiers="static">
+			<return type="int" />
+			<param index="0" name="axis" type="int" enum="JoyAxis" />
+			<param index="1" name="direction" type="int" />
+			<description>
+				Returns the input slot of [param axis]: its negative half for a negative [param direction], the full axis for [code]0[/code], its positive half for a positive one. Returns [code]-1[/code] for an invalid axis. Use the slot with [method set_override], [method get_input_label] and [method get_input_glyph].
+			</description>
+		</method>
+		<method name="button_input" qualifiers="static">
+			<return type="int" />
+			<param index="0" name="button" type="int" enum="JoyButton" />
+			<description>
+				Returns the input slot of [param button], or [code]-1[/code] for a button the router does not track. Button slots are [code]0[/code] to [code]20[/code], the [enum JoyButton] values.
+			</description>
+		</method>
+		<method name="check_maps" qualifiers="static">
+			<return type="Dictionary[]" />
+			<param index="0" name="contexts" type="GamepadContext[]" />
+			<param index="1" name="maps" type="GamepadMap[]" />
+			<param index="2" name="placements" type="Array" />
+			<param index="3" name="paths" type="PackedStringArray[]" />
+			<description>
+				Checks gamepad data against the router's routing rules without running it. [param placements] holds [RouteBindingResource]s or [code]{context, binding, source}[/code] dictionaries for bindings attached from code. [param paths] lists context paths the game uses, outer to inner. Returns one dictionary per finding: [code]{rule, severity, context, a, b, message}[/code], where [code]rule[/code] is one of [code]missing_id[/code], [code]compile_error[/code], [code]duplicate_id[/code], [code]unknown_context[/code], [code]clash[/code], [code]gate_bound_alone[/code], [code]shadowed[/code] or [code]cap[/code], and [code]a[/code] and [code]b[/code] are the binding ids involved.
+				[b]Note:[/b] Only available in editor builds.
+			</description>
+		</method>
+		<method name="clear">
+			<return type="void" />
+			<description>
+				Detaches every binding, clears every named callback and pops every pushed context. Base contexts stay.
+			</description>
+		</method>
+		<method name="clear_callback">
+			<return type="void" />
+			<param index="0" name="handle" type="int" />
+			<description>
+				Removes a named callback added with [method set_callback]. Unknown handles are ignored.
+			</description>
+		</method>
+		<method name="clear_override">
+			<return type="void" />
+			<param index="0" name="binding_id" type="StringName" />
+			<description>
+				Restores the authored input and gate of every binding with id [param binding_id].
+			</description>
+		</method>
+		<method name="clear_overrides">
+			<return type="void" />
+			<description>
+				Restores every binding's authored input and gate.
+			</description>
+		</method>
+		<method name="detach">
+			<return type="void" />
+			<param index="0" name="handle" type="int" />
+			<description>
+				Removes the binding placed by [method attach]. A press it holds is canceled: its callback receives [constant PHASE_CANCELED] and its action is released. Unknown handles are ignored.
+			</description>
+		</method>
+		<method name="get_active_pad" qualifiers="const">
+			<return type="int" />
+			<description>
+				Returns the device id of the pad that owns gamepad input, or [code]-1[/code] if none has yet. Thread-safe.
+			</description>
+		</method>
+		<method name="get_chord_window" qualifiers="const">
+			<return type="float" />
+			<description>
+				Returns how long, in seconds, an input pressed just before its chord's gate still completes the chord. See [method set_chord_window].
+			</description>
+		</method>
+		<method name="get_connected_pads" qualifiers="const">
+			<return type="PackedInt32Array" />
+			<description>
+				Returns the device ids of connected pads, lowest first. Thread-safe.
+			</description>
+		</method>
+		<method name="get_device" qualifiers="const">
+			<return type="int" enum="InputRouter.Device" />
+			<description>
+				Returns the device that owns input this frame. Thread-safe.
+			</description>
+		</method>
+		<method name="get_device_policy" qualifiers="const">
+			<return type="int" enum="InputRouter.DevicePolicy" />
+			<description>
+				Returns the current device policy. Thread-safe.
+			</description>
+		</method>
+		<method name="get_frame" qualifiers="const">
+			<return type="int" />
+			<description>
+				Returns the number of frames the router has routed, the newest sealed one included. Thread-safe.
+			</description>
+		</method>
+		<method name="get_gamepad_context" qualifiers="const">
+			<return type="StringName" />
+			<description>
+				Returns the innermost context of the path, or an empty [StringName] if the path is empty.
+			</description>
+		</method>
+		<method name="get_gamepad_context_path" qualifiers="const">
+			<return type="PackedStringArray" />
+			<description>
+				Returns the context path, outer to inner: base contexts, then pushed ones.
+			</description>
+		</method>
+		<method name="get_input_glyph">
+			<return type="Texture2D" />
+			<param index="0" name="input" type="int" />
+			<param index="1" name="family" type="int" enum="InputRouter.PadFamily" />
+			<description>
+				Returns the prompt texture for input slot [param input] in [param family]'s style, from the [GamepadGlyphProvider] at [member ProjectSettings.input_devices/router/glyph_provider]. Returns [code]null[/code] if no provider is set or it has no glyph.
+			</description>
+		</method>
+		<method name="get_input_label" qualifiers="static">
+			<return type="String" />
+			<param index="0" name="input" type="int" />
+			<param index="1" name="family" type="int" enum="InputRouter.PadFamily" />
+			<description>
+				Returns the name [param family] gives input slot [param input]. Labels are positional: the bottom face button is [code]"A"[/code] on Xbox, [code]"Cross"[/code] on PlayStation and [code]"B"[/code] on Nintendo.
+			</description>
+		</method>
+		<method name="get_mouse_in_pad" qualifiers="const">
+			<return type="int" enum="InputRouter.MouseInPad" />
+			<description>
+				Returns what happens to mouse motion while a pad owns the frame.
+			</description>
+		</method>
+		<method name="get_overrides" qualifiers="const">
+			<return type="Dictionary" />
+			<description>
+				Returns the player's rebinds as [code]{binding_id: [input, gate]}[/code], with [code]gate[/code] [code]-1[/code] for none. Save it and replay each entry through [method set_override] to restore them.
+			</description>
+		</method>
+		<method name="get_pad_axis" qualifiers="const">
+			<return type="float" />
+			<param index="0" name="axis" type="int" enum="JoyAxis" />
+			<param index="1" name="pad" type="int" default="-1" />
+			<description>
+				Returns the raw value of [param axis] on [param pad] this frame, or on the active pad for [code]-1[/code]. Pad state is captured whichever device owns the frame. Thread-safe.
+			</description>
+		</method>
+		<method name="get_pad_family" qualifiers="const">
+			<return type="int" enum="InputRouter.PadFamily" />
+			<param index="0" name="pad" type="int" default="-1" />
+			<description>
+				Returns the family of [param pad], or of the active pad for [code]-1[/code]. The family comes from the Steam hardware ids, then the SDL controller type, which names the physical pad even behind Steam Input, then the pad's name. Thread-safe.
+			</description>
+		</method>
+		<method name="get_pad_info" qualifiers="const">
+			<return type="Dictionary" />
+			<param index="0" name="pad" type="int" default="-1" />
+			<description>
+				Returns [code]{device, name, guid, sdl_type, vendor_id, product_id, steam_input, family}[/code] for connected [param pad], or the active pad for [code]-1[/code]. Returns an empty dictionary if that pad is not connected.
+			</description>
+		</method>
+		<method name="get_pad_name" qualifiers="const">
+			<return type="String" />
+			<param index="0" name="pad" type="int" default="-1" />
+			<description>
+				Returns the name of connected [param pad], or of the active pad for [code]-1[/code]. Empty if that pad is not connected.
+			</description>
+		</method>
+		<method name="get_pad_stick" qualifiers="const">
+			<return type="Vector2" />
+			<param index="0" name="stick" type="int" enum="RouteBindingResource.Stick" />
+			<param index="1" name="deadzone" type="float" default="0.2" />
+			<param index="2" name="pad" type="int" default="-1" />
+			<description>
+				Returns [param stick] on [param pad], or on the active pad for [code]-1[/code], with a radial [param deadzone]: zero inside it, rescaled to start from zero past it, direction kept. Thread-safe.
+			</description>
+		</method>
+		<method name="get_pointer_velocity" qualifiers="const">
+			<return type="Vector2" />
+			<description>
+				Returns the virtual pointer's velocity this frame, in pixels per second. Thread-safe.
+			</description>
+		</method>
+		<method name="get_routes" qualifiers="const">
+			<return type="Dictionary[]" />
+			<description>
+				Returns what each physical input reaches on the current path, inner context first, then the sequences being watched. Each entry is [code]{input, label, gate, context, id, action, trigger, handle}[/code], with labels in the active pad's family. For debug overlays and prompts.
+			</description>
+		</method>
+		<method name="get_scheme" qualifiers="const">
+			<return type="StringName" />
+			<description>
+				Returns the selected control scheme, or an empty [StringName] for none.
+			</description>
+		</method>
+		<method name="get_schemes" qualifiers="const">
+			<return type="PackedStringArray" />
+			<description>
+				Returns every scheme named by the route map or by an attached binding.
+			</description>
+		</method>
+		<method name="get_sequence_timeout" qualifiers="const">
+			<return type="float" />
+			<description>
+				Returns the seconds allowed between the steps of a [constant RouteBindingResource.TRIGGER_SEQUENCE] binding.
+			</description>
+		</method>
+		<method name="get_touch_mode" qualifiers="const">
+			<return type="int" enum="InputRouter.TouchMode" />
+			<description>
+				Returns how touch input is treated.
+			</description>
+		</method>
+		<method name="get_trace">
+			<return type="Dictionary[]" />
+			<description>
+				Returns the trace records since the last call, oldest first, and empties the trace. Each record is [code]{usec, frame, path, context, id, pad, input, label, phase, outcome, value}[/code]. [code]outcome[/code] is one of [code]"routed"[/code], [code]"passed"[/code], [code]"swallowed"[/code], [code]"suppressed"[/code], [code]"dropped_switch"[/code], [code]"sequence_abandoned"[/code], [code]"switch"[/code] or [code]"canceled"[/code]. [code]path[/code] is the context path at the time, while it is still among the last 32 paths. See [method set_trace_enabled].
+			</description>
+		</method>
+		<method name="get_trigger_wake_threshold" qualifiers="const">
+			<return type="float" />
+			<description>
+				Returns how far a trigger must be pulled to wake the pad.
+			</description>
+		</method>
+		<method name="is_enabled" qualifiers="const">
+			<return type="bool" />
+			<description>
+				Returns [code]true[/code] if the router filtered the newest sealed frame. Thread-safe.
+			</description>
+		</method>
+		<method name="is_gamepad_context_active" qualifiers="const">
+			<return type="bool" />
+			<param index="0" name="context" type="StringName" />
+			<description>
+				Returns [code]true[/code] if [param context] is in the path and pad input can reach it: no [member GamepadContext.modal] context sits above it.
+			</description>
+		</method>
+		<method name="is_pad_button_down" qualifiers="const">
+			<return type="bool" />
+			<param index="0" name="button" type="int" enum="JoyButton" />
+			<param index="1" name="pad" type="int" default="-1" />
+			<description>
+				Returns [code]true[/code] if [param button] is held on [param pad] this frame, or on the active pad for [code]-1[/code]. Pad state is captured whichever device owns the frame and whatever the button is bound to. Thread-safe.
+			</description>
+		</method>
+		<method name="is_switch_frame" qualifiers="const">
+			<return type="bool" />
+			<description>
+				Returns [code]true[/code] if the device changed this frame. That frame's input was dropped. Thread-safe.
+			</description>
+		</method>
+		<method name="is_trace_enabled" qualifiers="const">
+			<return type="bool" />
+			<description>
+				Returns [code]true[/code] if the router is recording a trace.
+			</description>
+		</method>
+		<method name="load_map">
+			<return type="int" />
+			<param index="0" name="map" type="GamepadMap" />
+			<description>
+				Attaches every binding of [param map] under one handle and returns it for [method unload_map]. Each binding goes into its own context, else the map's. The map's context is registered first.
+			</description>
+		</method>
+		<method name="pop_gamepad_context">
+			<return type="void" />
+			<param index="0" name="handle" type="int" />
+			<description>
+				Removes the context pushed with [param handle], wherever it is in the path; the rest keep their order. Claims held by bindings that are no longer reachable are canceled. Unknown handles are ignored.
+			</description>
+		</method>
+		<method name="push_gamepad_context">
+			<return type="int" />
+			<param index="0" name="context" type="StringName" />
+			<description>
+				Pushes [param context] on top of the path and returns a handle for [method pop_gamepad_context]. Claims held by bindings that are no longer reachable are canceled. The path holds 16 contexts.
+			</description>
+		</method>
+		<method name="register_gamepad_context">
+			<return type="void" />
+			<param index="0" name="context" type="GamepadContext" />
+			<description>
+				Adds [param context], or updates the context with the same id. A change to the fallback or modal flag of a context in the path takes effect at the next frame.
+			</description>
+		</method>
+		<method name="set_callback">
+			<return type="int" />
+			<param index="0" name="context" type="StringName" />
+			<param index="1" name="binding_id" type="StringName" />
+			<param index="2" name="target" type="Callable" />
+			<description>
+				Calls [param target] for bindings with id [param binding_id] in [param context], including bindings loaded by [method load_map] without a target, and those placed later. Called as [code]target.call(phase, value)[/code], after the binding's own target. Returns a handle for [method clear_callback].
+			</description>
+		</method>
+		<method name="set_chord_window">
+			<return type="void" />
+			<param index="0" name="seconds" type="float" />
+			<description>
+				Sets how long an input pressed just before its chord's gate is held back to complete the chord. Clamped to [code]0[/code]–[code]0.12[/code] s; default [code]0.05[/code] s.
+			</description>
+		</method>
+		<method name="set_device">
+			<return type="void" />
+			<param index="0" name="device" type="int" enum="InputRouter.Device" />
+			<param index="1" name="pad" type="int" default="-1" />
+			<description>
+				Hands the frame to [param device], and to [param pad] for [constant DEVICE_PAD], the way a wake would: claims cancel, input the old device passed is released, and input it holds stays suppressed until released.
+			</description>
+		</method>
+		<method name="set_device_policy">
+			<return type="void" />
+			<param index="0" name="policy" type="int" enum="InputRouter.DevicePolicy" />
+			<description>
+				Sets which devices may own the frame. If the device in charge is no longer allowed, it hands over at once.
+			</description>
+		</method>
+		<method name="set_enabled">
+			<return type="void" />
+			<param index="0" name="enabled" type="bool" />
+			<description>
+				Installs or removes the router as [Input]'s frame filter. Takes effect at the next frame, like every mutator: [method is_enabled] changes after it. Disabling releases every action and passed input the router holds; the frame's queued callbacks and signals are dropped. Fails in the editor, and if another frame filter is installed.
+			</description>
+		</method>
+		<method name="set_gamepad_base_contexts">
+			<return type="void" />
+			<param index="0" name="contexts" type="PackedStringArray" />
+			<description>
+				Replaces the base of the path, outer to inner, to mirror the game's own state stack. Pushed contexts stay above them.
+			</description>
+		</method>
+		<method name="set_mouse_in_pad">
+			<return type="void" />
+			<param index="0" name="mode" type="int" enum="InputRouter.MouseInPad" />
+			<description>
+				Sets what happens to mouse motion while a pad owns the frame.
+			</description>
+		</method>
+		<method name="set_override">
+			<return type="bool" />
+			<param index="0" name="binding_id" type="StringName" />
+			<param index="1" name="input" type="int" />
+			<param index="2" name="gate" type="int" default="-1" />
+			<description>
+				Rebinds every binding with id [param binding_id], now and when placed later, to input slot [param input] with button slot [param gate], or no gate for [code]-1[/code]. A stick binding only takes a stick and the reverse. Returns [code]false[/code] if the slots are invalid or the kinds differ. Persist the result of [method get_overrides].
+			</description>
+		</method>
+		<method name="set_route_map">
+			<return type="void" />
+			<param index="0" name="map" type="GamepadBakedMaps" />
+			<description>
+				Replaces the route map. The map is checked now and refused with an error if it does not match this build. The next frame releases every claim and rebuilds every row from the new templates, keeping placements, contexts and the scheme; a placement the new map lacks is dropped with an error. Before anything is placed, the map applies at once.
+			</description>
+		</method>
+		<method name="set_scheme">
+			<return type="void" />
+			<param index="0" name="scheme" type="StringName" />
+			<description>
+				Selects the control scheme. Bindings with an empty [member RouteBindingResource.scheme] always apply; others only under their scheme. Cancels every claim. An empty [param scheme] selects none.
+			</description>
+		</method>
+		<method name="set_sequence_timeout">
+			<return type="void" />
+			<param index="0" name="seconds" type="float" />
+			<description>
+				Sets the seconds allowed between the steps of a sequence. Clamped to [code]0.3[/code]–[code]2.0[/code] s; default [code]0.8[/code] s.
+			</description>
+		</method>
+		<method name="set_touch_mode">
+			<return type="void" />
+			<param index="0" name="mode" type="int" enum="InputRouter.TouchMode" />
+			<description>
+				Sets how touch input is treated. Touches live under the old mode end first: passed ones release, routed ones cancel.
+			</description>
+		</method>
+		<method name="set_trace_enabled">
+			<return type="void" />
+			<param index="0" name="enabled" type="bool" />
+			<param index="1" name="capacity" type="int" default="4096" />
+			<description>
+				Starts or stops recording what happens to each input: routed, passed, swallowed, suppressed, dropped by a device switch. The trace is a ring of [param capacity] records, [code]64[/code] to [code]65536[/code]; the oldest are overwritten. Read it with [method get_trace].
+			</description>
+		</method>
+		<method name="set_trigger_wake_threshold">
+			<return type="void" />
+			<param index="0" name="threshold" type="float" />
+			<description>
+				Sets how far a trigger must be pulled to wake the pad, [code]0.05[/code] to [code]1.0[/code]. Default [code]0.5[/code].
+			</description>
+		</method>
+		<method name="stick_input" qualifiers="static">
+			<return type="int" />
+			<param index="0" name="stick" type="int" enum="RouteBindingResource.Stick" />
+			<description>
+				Returns the input slot of [param stick], or [code]-1[/code] for an invalid stick.
+			</description>
+		</method>
+		<method name="take_pointer_delta">
+			<return type="Vector2" />
+			<description>
+				Returns the virtual pointer's movement in pixels since the last call, and resets it. Pointer bindings ([member RouteBindingResource.pointer]) feed it, and so does mouse motion in pad frames with [constant MOUSE_IN_PAD_POINTER].
+			</description>
+		</method>
+		<method name="unload_map">
+			<return type="void" />
+			<param index="0" name="handle" type="int" />
+			<description>
+				Detaches every binding [method load_map] placed under [param handle].
+			</description>
+		</method>
+		<method name="was_pad_button_pressed" qualifiers="const">
+			<return type="bool" />
+			<param index="0" name="button" type="int" enum="JoyButton" />
+			<param index="1" name="pad" type="int" default="-1" />
+			<description>
+				Returns [code]true[/code] if [param button] went down on [param pad] this frame, or on the active pad for [code]-1[/code]. Thread-safe.
+			</description>
+		</method>
+	</methods>
+	<signals>
+		<signal name="active_pad_lost">
+			<param index="0" name="pad" type="int" />
+			<description>
+				Emitted when the active pad disconnects, after [signal pad_disconnected]. Its claims were canceled and [method get_active_pad] is [code]-1[/code]. The device stays [constant DEVICE_PAD] until another device wakes.
+			</description>
+		</signal>
+		<signal name="device_changed">
+			<param index="0" name="device" type="int" />
+			<param index="1" name="pad" type="int" />
+			<param index="2" name="previous_device" type="int" />
+			<param index="3" name="previous_pad" type="int" />
+			<description>
+				Emitted when the device or the active pad changes. [param device] and [param previous_device] are [enum Device] values.
+			</description>
+		</signal>
+		<signal name="gamepad_context_changed">
+			<param index="0" name="path" type="PackedStringArray" />
+			<description>
+				Emitted when the context path changes, at most once per frame. [param path] is outer to inner.
+			</description>
+		</signal>
+		<signal name="pad_connected">
+			<param index="0" name="pad" type="int" />
+			<description>
+				Emitted when a pad connects while the router is enabled. Pads already connected when it is enabled do not emit it.
+			</description>
+		</signal>
+		<signal name="pad_disconnected">
+			<param index="0" name="pad" type="int" />
+			<description>
+				Emitted when a pad disconnects.
+			</description>
+		</signal>
+		<signal name="routes_changed">
+			<description>
+				Emitted when what an input reaches may have changed: a binding was placed or removed, or the path or scheme changed. At most once per frame. Refresh prompts from [method get_routes].
+			</description>
+		</signal>
+		<signal name="scheme_changed">
+			<param index="0" name="scheme" type="StringName" />
+			<description>
+				Emitted when [method set_scheme] selects another scheme.
+			</description>
+		</signal>
+		<signal name="touch_routed">
+			<param index="0" name="index" type="int" />
+			<param index="1" name="phase" type="int" />
+			<param index="2" name="position" type="Vector2" />
+			<param index="3" name="pressure" type="float" />
+			<description>
+				Emitted for each touch event in pad frames with [constant TOUCH_AS_PAD], in place of passing it to Godot. [param phase] is [constant PHASE_PRESSED], [constant PHASE_CHANGED] for a drag, [constant PHASE_RELEASED] or [constant PHASE_CANCELED].
+			</description>
+		</signal>
+	</signals>
+	<constants>
+		<constant name="INPUT_COUNT" value="41">
+			Number of input slots: 21 buttons, then three per axis (negative half, full, positive half) for six axes, then the two sticks.
+		</constant>
+		<constant name="DEVICE_NONE" value="0" enum="Device">
+			No device has woken since the router was enabled.
+		</constant>
+		<constant name="DEVICE_KBM" value="1" enum="Device">
+			Keyboard and mouse own the frame. Pad input is captured but not routed.
+		</constant>
+		<constant name="DEVICE_PAD" value="2" enum="Device">
+			A gamepad owns the frame, [method get_active_pad]. Keyboard and mouse input is dropped.
+		</constant>
+		<constant name="DEVICE_POLICY_AUTO" value="0" enum="DevicePolicy">
+			Whichever device wakes takes the frame.
+		</constant>
+		<constant name="DEVICE_POLICY_PAD" value="1" enum="DevicePolicy">
+			Only a gamepad may own the frame. Keyboard and mouse never wake.
+		</constant>
+		<constant name="DEVICE_POLICY_KBM" value="2" enum="DevicePolicy">
+			Only keyboard and mouse may own the frame. Pads never wake.
+		</constant>
+		<constant name="MOUSE_IN_PAD_DROP" value="0" enum="MouseInPad">
+			Mouse motion in pad frames is dropped.
+		</constant>
+		<constant name="MOUSE_IN_PAD_POINTER" value="1" enum="MouseInPad">
+			Mouse motion in pad frames moves the virtual pointer ([method take_pointer_delta]) without waking keyboard and mouse.
+		</constant>
+		<constant name="TOUCH_AS_POINTER" value="0" enum="TouchMode">
+			Touch belongs to keyboard and mouse: a touch wakes them and passes to Godot, which can emulate the mouse from it.
+		</constant>
+		<constant name="TOUCH_AS_PAD" value="1" enum="TouchMode">
+			Touch belongs to the pad, as on a pad's touchpad or a handheld's screen: a touch wakes the active or first connected pad, and touches in pad frames become [signal touch_routed].
+		</constant>
+		<constant name="TOUCH_IGNORE" value="2" enum="TouchMode">
+			Touch neither wakes a device nor reaches Godot; the router drops it.
+		</constant>
+		<constant name="PAD_FAMILY_GENERIC" value="0" enum="PadFamily">
+			An unrecognized pad. Labels follow Xbox names.
+		</constant>
+		<constant name="PAD_FAMILY_XBOX" value="1" enum="PadFamily">
+			An Xbox pad.
+		</constant>
+		<constant name="PAD_FAMILY_PLAYSTATION" value="2" enum="PadFamily">
+			A PlayStation pad.
+		</constant>
+		<constant name="PAD_FAMILY_NINTENDO" value="3" enum="PadFamily">
+			A Nintendo pad or Joy-Con.
+		</constant>
+		<constant name="PAD_FAMILY_STEAM" value="4" enum="PadFamily">
+			A Steam Deck or Steam Controller.
+		</constant>
+		<constant name="PAD_FAMILY_MAX" value="5" enum="PadFamily">
+			Number of families.
+		</constant>
+		<constant name="PHASE_PRESSED" value="0" enum="Phase">
+			The input was pressed, a repeat binding started, or a sequence completed.
+		</constant>
+		<constant name="PHASE_RELEASED" value="1" enum="Phase">
+			The input was released.
+		</constant>
+		<constant name="PHASE_CANCELED" value="2" enum="Phase">
+			The binding lost its claim without a release: a device switch, a path or scheme change, a detach, or a disconnect. Undo whatever the press started.
+		</constant>
+		<constant name="PHASE_HELD" value="3" enum="Phase">
+			A hold binding's input stayed down for its hold time.
+		</constant>
+		<constant name="PHASE_TAPPED" value="4" enum="Phase">
+			A tap binding's input was released within its tap time.
+		</constant>
+		<constant name="PHASE_REPEATED" value="5" enum="Phase">
+			A repeat binding's input is still held.
+		</constant>
+		<constant name="PHASE_CHANGED" value="6" enum="Phase">
+			An analog binding's value changed.
+		</constant>
+	</constants>
+</class>

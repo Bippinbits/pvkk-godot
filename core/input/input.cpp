@@ -687,6 +687,10 @@ void Input::joy_connection_changed(int p_idx, bool p_connected, const String &p_
 	}
 	joy_names[p_idx] = js;
 
+	if (frame_filter) {
+		frame_filter->joy_connection_changed(p_idx, p_connected);
+	}
+
 	// Ensure this signal is emitted on the main thread, as some platforms (e.g. Linux) call this from a different thread.
 	call_deferred("emit_signal", SNAME("joy_connection_changed"), p_idx, p_connected);
 }
@@ -1263,7 +1267,7 @@ void Input::parse_input_event(RequiredParam<InputEvent> rp_event) {
 		if (buffered_events.is_empty() || !buffered_events.back()->get()->accumulate(p_event)) {
 			buffered_events.push_back(p_event);
 		}
-	} else if (agile_input_event_flushing) {
+	} else if (agile_input_event_flushing || frame_filter) {
 		buffered_events.push_back(p_event);
 	} else {
 		_parse_input_event_impl(p_event, false);
@@ -1281,6 +1285,10 @@ void Input::flush_frame_parsed_events() {
 void Input::flush_buffered_events() {
 	_THREAD_SAFE_METHOD_
 
+	if (frame_filter) {
+		return; // The filter takes the batch in Main::iteration.
+	}
+
 	while (buffered_events.front()) {
 		// The final delivery of the input event involves releasing the lock.
 		// While the lock is released, another thread may lock it and add new events to the back.
@@ -1291,6 +1299,38 @@ void Input::flush_buffered_events() {
 		buffered_events.pop_front();
 
 		_parse_input_event_impl(e, false);
+	}
+}
+
+// The lock is held only while the list moves, so other threads keep queueing.
+void Input::take_buffered_events(LocalVector<Ref<InputEvent>> &r_events) {
+	_THREAD_SAFE_METHOD_
+	while (buffered_events.front()) {
+		r_events.push_back(buffered_events.front()->get());
+		buffered_events.pop_front();
+	}
+}
+
+// Events parsed during delivery are buffered for the filter's next frame.
+void Input::parse_filtered_events(const LocalVector<Ref<InputEvent>> &p_events) {
+	ERR_FAIL_COND_MSG(!Thread::is_main_thread(), "Filtered input events can only be parsed on the main thread.");
+	_THREAD_SAFE_METHOD_
+	for (uint32_t i = 0; i < p_events.size(); i++) {
+		_parse_input_event_impl(p_events[i], false);
+	}
+}
+
+void Input::set_frame_filter(FrameFilter *p_filter) {
+	ERR_FAIL_COND_MSG(!Thread::is_main_thread(), "Input frame filter can only be set on the main thread.");
+	_THREAD_SAFE_METHOD_
+	ERR_FAIL_COND_MSG(p_filter && frame_filter && frame_filter != p_filter, "Another input frame filter is already installed.");
+	frame_filter = p_filter;
+}
+
+void Input::clear_frame_filter(FrameFilter *p_expected) {
+	_THREAD_SAFE_METHOD_
+	if (frame_filter == p_expected) {
+		frame_filter = nullptr;
 	}
 }
 
@@ -1312,6 +1352,15 @@ bool Input::is_using_accumulated_input() {
 
 void Input::release_pressed_events() {
 	flush_buffered_events(); // this is needed to release actions strengths
+
+	FrameFilter *filter = nullptr;
+	{
+		_THREAD_SAFE_METHOD_
+		filter = frame_filter;
+	}
+	if (filter && Thread::is_main_thread()) {
+		filter->pressed_events_released();
+	}
 
 	keys_pressed.clear();
 	physical_keys_pressed.clear();

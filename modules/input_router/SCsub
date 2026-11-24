@@ -1,0 +1,12 @@
+#!/usr/bin/env python
+from misc.utility.scons_hints import *
+
+Import("env")
+Import("env_modules")
+
+env_input_router = env_modules.Clone()
+env_input_router.add_source_files(env.modules_sources, "*.cpp")
+
+# Editor-only: inspector tooling and the export baker. Never in export templates.
+if env.editor_build:
+    env_input_router.add_source_files(env.modules_sources, "editor/*.cpp")

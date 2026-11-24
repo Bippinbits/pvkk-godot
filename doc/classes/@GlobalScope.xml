@@ -1550,6 +1550,8 @@
 		<member name="AudioServer" type="AudioServer" setter="" getter="">
 			The [AudioServer] singleton.
 		</member>
+		<member name="BatchThreadedResourceLoader" type="BatchThreadedResourceLoader" setter="" getter="">
+		</member>
 		<member name="CameraServer" type="CameraServer" setter="" getter="">
 			The [CameraServer] singleton.
 		</member>
@@ -1586,6 +1588,8 @@
 		</member>
 		<member name="InputMap" type="InputMap" setter="" getter="">
 			The [InputMap] singleton.
+		</member>
+		<member name="InputRouter" type="InputRouter" setter="" getter="">
 		</member>
 		<member name="JavaClassWrapper" type="JavaClassWrapper" setter="" getter="">
 			The [JavaClassWrapper] singleton.

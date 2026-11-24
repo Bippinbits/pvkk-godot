@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="GamepadContext" inherits="Resource" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../doc/class.xsd">
+	<brief_description>
+		A named layer of gamepad bindings in [InputRouter]'s context path.
+	</brief_description>
+	<description>
+		A gamepad context groups the bindings that apply while one part of the game has focus: a seat, a menu, a vehicle. [InputRouter] keeps a path of contexts, outer to inner: base contexts set with [method InputRouter.set_gamepad_base_contexts], then contexts pushed with [method InputRouter.push_gamepad_context].
+		For each pad input, the router walks the path from the innermost context outward. The first context with an ungated binding for that input wins it; contexts below are not reached. A context with no binding for the input decides by [member fallback], and a [member modal] context stops the walk either way. If the walk reaches the bottom of the path, the raw pad event passes to Godot.
+		Contexts are identified by [member id]. The router knows a context once a binding, map or path names it; register the resource with [method InputRouter.register_gamepad_context] to apply its [member fallback] and [member modal] settings. An id used before registration inherits and is not modal.
+	</description>
+	<tutorials>
+	</tutorials>
+	<members>
+		<member name="fallback" type="int" setter="set_fallback" getter="get_fallback" enum="GamepadContext.Fallback" default="0">
+			What happens to an input this context has no binding for.
+		</member>
+		<member name="id" type="StringName" setter="set_id" getter="get_id" default="&amp;&quot;&quot;">
+			The name the router, maps and bindings refer to this context by. Must be unique in the project.
+		</member>
+		<member name="label" type="String" setter="set_label" getter="get_label" default="&quot;&quot;">
+			A display name for tools and prompts. The router does not read it.
+		</member>
+		<member name="modal" type="bool" setter="set_modal" getter="is_modal" default="false">
+			If [code]true[/code], contexts below this one in the path never see pad input. An input this context does not bind follows [member fallback], with [constant FALLBACK_INHERIT] treated as [constant FALLBACK_SWALLOW].
+		</member>
+	</members>
+	<constants>
+		<constant name="FALLBACK_INHERIT" value="0" enum="Fallback">
+			Ask the context below. At the bottom of the path the raw event passes to Godot.
+		</constant>
+		<constant name="FALLBACK_SWALLOW" value="1" enum="Fallback">
+			Consume the input. Neither lower contexts nor Godot see it.
+		</constant>
+		<constant name="FALLBACK_PASS" value="2" enum="Fallback">
+			Pass the raw pad event to Godot, so GUI focus, [code]ui_*[/code] actions and the [InputMap] see it.
+		</constant>
+	</constants>
+</class>

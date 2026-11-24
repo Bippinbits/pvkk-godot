@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="GamepadBakedMaps" inherits="Resource" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../doc/class.xsd">
+	<brief_description>
+		[InputRouter]'s compiled route map: every binding template in the project, packed.
+	</brief_description>
+	<description>
+		The route map holds one compiled template per binding id and scheme, the context table and the response curves, as packed arrays. Every row the router places is copied from a template, so a baked map means no binding is compiled at runtime.
+		The editor bakes this resource on export into [member ProjectSettings.input_devices/router/baked_map]. A file saved at that path in the project is never exported. At runtime the router loads the baked map when it is first enabled; a binding the map lacks, or one whose tuning differs in an editor build, is compiled into a new map at the next frame with a warning.
+		Hand the router a map directly with [method InputRouter.set_route_map]. The data is checked against this build's format version and caps; a map that fails the check is refused.
+	</description>
+	<tutorials>
+	</tutorials>
+	<members>
+		<member name="data" type="Dictionary" setter="set_data" getter="get_data" default="{}">
+			The packed route map: format version, caps, schemes, context ids and settings, binding ids, actions, labels, 64-byte rows and curve samples. Written by the baker; not meant to be edited by hand.
+		</member>
+	</members>
+</class>

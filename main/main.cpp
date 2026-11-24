@@ -4888,6 +4888,11 @@ bool Main::iteration() {
 
 	bool exit = false;
 
+	// All of this frame's input is buffered; no game code has run yet.
+	if (Input::FrameFilter *input_filter = Input::get_singleton()->get_frame_filter()) {
+		input_filter->input_poll_process_flip();
+	}
+
 	// process all our active interfaces
 #ifndef XR_DISABLED
 	GodotProfileZoneGrouped(_profile_zone, "xr_server->_process");

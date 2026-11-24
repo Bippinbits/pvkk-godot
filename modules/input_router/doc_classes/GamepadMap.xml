@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="GamepadMap" inherits="Resource" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../doc/class.xsd">
+	<brief_description>
+		A set of gamepad bindings loaded into [InputRouter] together.
+	</brief_description>
+	<description>
+		A list of [RouteBindingResource]s with a default [GamepadContext]. [method InputRouter.load_map] attaches every binding under one handle, and [method InputRouter.unload_map] detaches them all. Each binding goes into its own [member RouteBindingResource.context] if set, otherwise into [member context].
+		In the editor, the inspector lists the map's bindings with the findings of [method InputRouter.check_maps] for this map alone. On export, every map in the project is baked into [member ProjectSettings.input_devices/router/baked_map].
+	</description>
+	<tutorials>
+	</tutorials>
+	<members>
+		<member name="bindings" type="RouteBindingResource[]" setter="set_bindings" getter="get_bindings" default="[]">
+			The bindings this map attaches. Null entries are skipped.
+		</member>
+		<member name="context" type="GamepadContext" setter="set_context" getter="get_context">
+			The context for bindings that name none. Registered with [method InputRouter.register_gamepad_context] when the map loads.
+		</member>
+	</members>
+</class>
