@@ -550,6 +550,7 @@ struct State {
 	uint64_t capture(const InputEvent *p_event, EventKind p_kind);
 	void switch_to(InputRouter::Device p_device, int p_pad);
 	void suppress_dropped();
+	void release_pads(bool p_emit_releases);
 	void release_all(bool p_emit_releases);
 	void route_button(int p_pad, uint8_t p_slot, bool p_pressed, const Ref<InputEvent> &p_event, uint64_t p_eaten);
 	bool press_slot(int p_pad, uint8_t p_slot);
@@ -868,13 +869,30 @@ void State::begin_frame() {
 
 // --- State: FOOT ---
 
+// Element-wise copy instead of NameTable's operator=: FixedVector's copy assignment assigns into
+// slots past the target's size, which hold no constructed element, so a table that grew since the
+// slot was last written unrefs whatever bytes were there (StringName::unref crash, bug 13).
+// clear() destroys and push_back() constructs in place.
+static void copy_names(NameTable &r_to, const NameTable &p_from) {
+	r_to.contexts.clear();
+	for (const ContextInfo &ci : p_from.contexts) {
+		r_to.contexts.push_back(ci);
+	}
+	r_to.schemes.clear();
+	for (const StringName &scheme : p_from.schemes) {
+		r_to.schemes.push_back(scheme);
+	}
+	for (int i = 0; i < Input::JOYPADS_MAX; i++) {
+		r_to.pad_info[i] = p_from.pad_info[i];
+	}
+}
+
 // Copy on write. The write frame shares the read frame's copy until its first edit after a flip,
-// which copies it into the other slot. The copy reuses that slot's storage, so it allocates only
-// past its high-water mark.
+// which copies it into the other slot (fixed capacity, no allocation).
 NameTable &State::edit_names() {
 	Frame &f = *write_state;
 	if (f.foot_names == read_state->foot_names) {
-		name_tables[f.foot_names ^ 1] = name_tables[f.foot_names];
+		copy_names(name_tables[f.foot_names ^ 1], name_tables[f.foot_names]);
 		f.foot_names ^= 1;
 	}
 	return name_tables[f.foot_names];
@@ -1231,9 +1249,9 @@ void State::suppress_dropped() {
 	}
 }
 
-// Ends everything in flight: claims cancel, passed input releases, held input is suppressed.
-// p_emit_releases false: Input already dropped its own state (focus loss).
-void State::release_all(bool p_emit_releases) {
+// Ends the pad side in flight: claims and sequences cancel, passed pad input releases, held pad
+// input is suppressed, the pointer stops. p_emit_releases false: Input already dropped its state.
+void State::release_pads(bool p_emit_releases) {
 	Frame &f = *write_state;
 	if (!p_emit_releases) {
 		for (uint64_t held = f.claimed_slots; held; held &= held - 1) {
@@ -1269,6 +1287,16 @@ void State::release_all(bool p_emit_releases) {
 	if (f.active_pad >= 0 && (f.live_pads & (1u << f.active_pad))) {
 		f.pads[f.active_pad].suppressed |= held_slots(f.pads[f.active_pad]);
 	}
+	f.pointer_velocity = Vector2();
+	f.pointer_delta = Vector2();
+}
+
+// Ends everything in flight: the pad side as release_pads(), then keys and mouse buttons release
+// and stay suppressed until pressed again, and touches cancel.
+// p_emit_releases false: Input already dropped its own state (focus loss).
+void State::release_all(bool p_emit_releases) {
+	Frame &f = *write_state;
+	release_pads(p_emit_releases);
 
 	for (uint32_t i = 0; i < f.key_count; i++) {
 		const HeldKey &k = f.keys_down[i];
@@ -1318,9 +1346,6 @@ void State::release_all(bool p_emit_releases) {
 		t.passed = false;
 		t.suppressed = true;
 	}
-
-	f.pointer_velocity = Vector2();
-	f.pointer_delta = Vector2();
 }
 
 // Drains the ring joy_connection_changed() fills. A quiet frame costs two atomic loads. After an
@@ -2543,7 +2568,8 @@ void State::load_tables(const Dictionary &p_data) {
 }
 
 // _poll(): destroys and recreates what the map owns. Pending bindings merge into the pending (or
-// current) map first. Claims end as on a device switch, every row goes and the tables reload;
+// current) map first. The pad side ends as on a device switch (keyboard, mouse and touch keep
+// their state: the map never routes them), every row goes and the tables reload;
 // then placements, the path, the scheme and contexts the map lacks come back by name. Overrides
 // and named callbacks are keyed by name already. A map that fails validation changes nothing.
 void State::rebuild_from_map() {
@@ -2597,7 +2623,7 @@ void State::rebuild_from_map() {
 
 	// rt and nt are not read again: the edits below move the write frame to its own copies. The
 	// routes stay stale until path_changed() marks them dirty; nothing routes before the rebuild.
-	release_all(true);
+	release_pads(true);
 	clear_rows();
 	f.sequence_count = 0;
 	load_tables(data);

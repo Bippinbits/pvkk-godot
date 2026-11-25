@@ -8,6 +8,8 @@
 #include "modules/input_router/line_vector.h"
 
 #include "core/input/input_map.h"
+#include "scene/main/scene_tree.h"
+#include "scene/main/window.h"
 #include "tests/test_macros.h"
 
 namespace TestInputRouter {
@@ -320,6 +322,148 @@ TEST_CASE("[SceneTree][InputRouter] A binding the route map lacks is merged and 
 	router->detach(handle);
 	router->set_gamepad_base_contexts(PackedStringArray());
 	InputMap::get_singleton()->erase_action("test_late");
+}
+
+// One engine frame with a key, then a left mouse button, queued the way a display server queues them.
+static void frame_key_and_mouse(InputRouter *p_router, Key p_key, bool p_pressed) {
+	Ref<InputEventKey> key;
+	key.instantiate();
+	key->set_keycode(p_key);
+	key->set_physical_keycode(p_key);
+	key->set_pressed(p_pressed);
+	Input::get_singleton()->parse_input_event(key);
+	Ref<InputEventMouseButton> mb;
+	mb.instantiate();
+	mb->set_button_index(MouseButton::LEFT);
+	mb->set_pressed(p_pressed);
+	Input::get_singleton()->parse_input_event(mb);
+	p_router->input_poll_process_flip();
+}
+
+TEST_CASE("[SceneTree][InputRouter] A route map merge mid-play keeps held keys and mouse buttons") {
+	InputRouter *router = InputRouter::get_singleton();
+	REQUIRE(router != nullptr);
+	Input *input = Input::get_singleton();
+	Ref<GamepadBakedMaps> map;
+	map.instantiate();
+	map->set_data(Baked::empty());
+	router->set_route_map(map);
+	router->set_gamepad_base_contexts(PackedStringArray({ "test_context" }));
+	enable_router(router, true);
+	router->set_device(InputRouter::DEVICE_KBM, -1); // Earlier cases may leave the pad in charge.
+	frame_idle(router);
+
+	frame_key_and_mouse(router, Key::W, true);
+	REQUIRE(router->get_device() == InputRouter::DEVICE_KBM);
+	REQUIRE(input->is_key_pressed(Key::W));
+	REQUIRE(input->is_mouse_button_pressed(MouseButton::LEFT));
+
+	ERR_PRINT_OFF; // The rebake warning.
+	const int handle = router->attach(test_binding("test_merge", JoyButton::Y), "test_context");
+	ERR_PRINT_ON;
+	REQUIRE(handle != 0);
+	frame_idle(router); // _poll() merges the binding and rebuilds the rows.
+	CHECK(input->is_key_pressed(Key::W));
+	CHECK(input->is_mouse_button_pressed(MouseButton::LEFT));
+
+	frame_key_and_mouse(router, Key::W, false); // Not suppressed: the releases pass.
+	CHECK_FALSE(input->is_key_pressed(Key::W));
+	CHECK_FALSE(input->is_mouse_button_pressed(MouseButton::LEFT));
+
+	enable_router(router, false);
+	router->detach(handle);
+	router->set_gamepad_base_contexts(PackedStringArray());
+}
+
+static int focus_test_w_events = 0;
+
+static void count_w_event(const Ref<InputEvent> &p_event) {
+	const Ref<InputEventKey> k = p_event;
+	if (k.is_valid() && k->get_physical_keycode() == Key::W) {
+		focus_test_w_events++;
+	}
+}
+
+static void frame_key(InputRouter *p_router, Key p_key, bool p_pressed, bool p_echo) {
+	Ref<InputEventKey> key;
+	key.instantiate();
+	key->set_keycode(p_key);
+	key->set_physical_keycode(p_key);
+	key->set_pressed(p_pressed);
+	key->set_echo(p_echo);
+	Input::get_singleton()->parse_input_event(key);
+	p_router->input_poll_process_flip();
+}
+
+// Divergence D3 (ruled intended): focus loss (Input::release_pressed_events, what a display
+// server calls on focus out) drops Input's held state. What the OS still sends for keys held then,
+// the echo and the late release, never reaches the game; the next press passes.
+TEST_CASE("[SceneTree][InputRouter] Focus loss eats the echo and release of keys held at the time") {
+	InputRouter *router = InputRouter::get_singleton();
+	REQUIRE(router != nullptr);
+	Input *input = Input::get_singleton();
+	Window *root = SceneTree::get_singleton()->get_root();
+	const Callable counter = callable_mp_static(&count_w_event);
+	root->connect(StringName("window_input"), counter);
+	Ref<GamepadBakedMaps> map;
+	map.instantiate();
+	map->set_data(Baked::empty());
+	router->set_route_map(map);
+	enable_router(router, true);
+	router->set_device(InputRouter::DEVICE_KBM, -1);
+	frame_idle(router);
+
+	focus_test_w_events = 0;
+	frame_key(router, Key::W, true, false);
+	REQUIRE(input->is_key_pressed(Key::W));
+	REQUIRE(focus_test_w_events == 1);
+
+	input->release_pressed_events();
+	CHECK_FALSE(input->is_key_pressed(Key::W));
+	frame_key(router, Key::W, true, true); // The OS keeps repeating: eaten.
+	frame_key(router, Key::W, false, false); // The late release: eaten.
+	CHECK(focus_test_w_events == 1);
+	CHECK_FALSE(input->is_key_pressed(Key::W));
+
+	frame_key(router, Key::W, true, false); // A new press passes, and so does its release.
+	CHECK(input->is_key_pressed(Key::W));
+	frame_key(router, Key::W, false, false);
+	CHECK_FALSE(input->is_key_pressed(Key::W));
+	CHECK(focus_test_w_events == 3);
+
+	enable_router(router, false);
+	root->disconnect(StringName("window_input"), counter);
+}
+
+// Bug 13: each new context grows the name table one past the other slot's size, so every
+// copy-on-write lands in a slot that holds no element yet. Before copy_names() that assigned a
+// StringName over raw storage and crashed whenever the storage was not zero.
+TEST_CASE("[SceneTree][InputRouter] The context table grows across flips and keeps its names") {
+	InputRouter *router = InputRouter::get_singleton();
+	REQUIRE(router != nullptr);
+	Ref<GamepadBakedMaps> map;
+	map.instantiate();
+	map->set_data(Baked::empty());
+	router->set_route_map(map);
+	enable_router(router, true);
+
+	PackedStringArray path;
+	for (int i = 0; i < 12; i++) {
+		path.push_back(vformat("test_grow_%d", i));
+		router->set_gamepad_base_contexts(path);
+		frame_idle(router);
+		CHECK(router->get_gamepad_context_path() == path);
+	}
+	for (int i = 0; i < 6; i++) {
+		path.remove_at(path.size() - 1);
+		router->set_gamepad_base_contexts(path);
+		frame_idle(router);
+		frame_idle(router);
+		CHECK(router->get_gamepad_context_path() == path);
+	}
+
+	enable_router(router, false);
+	router->set_gamepad_base_contexts(PackedStringArray());
 }
 
 TEST_CASE("[SceneTree][InputRouter] State carries through the frame ring; edits wait for the flip") {
