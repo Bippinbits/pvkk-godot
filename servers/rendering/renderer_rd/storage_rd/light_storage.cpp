@@ -781,7 +781,8 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 
 				omni_light_sort[omni_light_count].light_instance = light_instance;
 				omni_light_sort[omni_light_count].light = light;
-				omni_light_sort[omni_light_count].depth = distance;
+				omni_light_sort[omni_light_count].nearest_depth = ClusterBuilderRD::get_light_depth_range(ClusterBuilderRD::LIGHT_TYPE_OMNI, inverse_transform * light_transform, light->param[RS::LIGHT_PARAM_RANGE], 0.0).x;
+				omni_light_sort[omni_light_count].center_distance = distance;
 				omni_light_count++;
 			} break;
 			case RS::LIGHT_SPOT: {
@@ -806,7 +807,8 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 
 				spot_light_sort[spot_light_count].light_instance = light_instance;
 				spot_light_sort[spot_light_count].light = light;
-				spot_light_sort[spot_light_count].depth = distance;
+				spot_light_sort[spot_light_count].nearest_depth = ClusterBuilderRD::get_light_depth_range(ClusterBuilderRD::LIGHT_TYPE_SPOT, inverse_transform * light_transform, light->param[RS::LIGHT_PARAM_RANGE], light->param[RS::LIGHT_PARAM_SPOT_ANGLE]).x;
+				spot_light_sort[spot_light_count].center_distance = distance;
 				spot_light_count++;
 			} break;
 		}
@@ -832,7 +834,7 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 		RS::LightType type = (i < omni_light_count) ? RS::LIGHT_OMNI : RS::LIGHT_SPOT;
 		LightInstance *light_instance = (i < omni_light_count) ? omni_light_sort[index].light_instance : spot_light_sort[index].light_instance;
 		Light *light = (i < omni_light_count) ? omni_light_sort[index].light : spot_light_sort[index].light;
-		real_t distance = (i < omni_light_count) ? omni_light_sort[index].depth : spot_light_sort[index].depth;
+		real_t distance = (i < omni_light_count) ? omni_light_sort[index].center_distance : spot_light_sort[index].center_distance;
 
 		if (using_forward_ids) {
 			forward_id_storage->map_forward_id(type == RS::LIGHT_OMNI ? RendererRD::FORWARD_ID_TYPE_OMNI_LIGHT : RendererRD::FORWARD_ID_TYPE_SPOT_LIGHT, light_instance->forward_id, index, light_instance->last_pass);

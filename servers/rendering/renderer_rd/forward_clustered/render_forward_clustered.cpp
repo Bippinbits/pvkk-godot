@@ -710,14 +710,18 @@ void RenderForwardClustered::_setup_environment(const RenderDataRD *p_render_dat
 
 	// now do implementation UBO
 
-	scene_state.ubo.cluster_shift = get_shift_from_power_of_2(p_render_data->cluster_size);
-	scene_state.ubo.max_cluster_element_count_div_32 = p_render_data->cluster_max_elements / 32;
+	scene_state.ubo.tile_shift = get_shift_from_power_of_2(p_render_data->tile_size);
+	scene_state.ubo.bitmasks_per_tile_count = p_render_data->cluster_max_elements / 32;
 	{
-		uint32_t cluster_screen_width = Math::division_round_up((uint32_t)p_screen_size.width, p_render_data->cluster_size);
-		uint32_t cluster_screen_height = Math::division_round_up((uint32_t)p_screen_size.height, p_render_data->cluster_size);
-		scene_state.ubo.cluster_type_size = cluster_screen_width * cluster_screen_height * (scene_state.ubo.max_cluster_element_count_div_32 + 32);
-		scene_state.ubo.cluster_width = cluster_screen_width;
+		uint32_t tiles_per_row = Math::division_round_up((uint32_t)p_screen_size.width, p_render_data->tile_size);
+		uint32_t tiles_per_column = Math::division_round_up((uint32_t)p_screen_size.height, p_render_data->tile_size);
+		scene_state.ubo.bitmasks_per_type_count = tiles_per_row * tiles_per_column * scene_state.ubo.bitmasks_per_tile_count;
+		scene_state.ubo.tiles_per_row = tiles_per_row;
 	}
+
+	scene_state.ubo.cluster_z_bin_offset = scene_state.ubo.bitmasks_per_type_count * ClusterBuilderRD::ELEMENT_TYPE_MAX;
+	scene_state.ubo.cluster_z_bin_count = ClusterBuilderRD::get_z_bin_count(p_render_data->scene_data->z_near, p_render_data->scene_data->z_far);
+	scene_state.ubo.cluster_z_bin_scale = ClusterBuilderRD::get_z_bin_scale(p_render_data->scene_data->z_near, p_render_data->scene_data->z_far);
 
 	memcpy(scene_state.ubo.cluster_type_masks, p_render_data->cluster_type_masks, sizeof(scene_state.ubo.cluster_type_masks));
 
@@ -1354,7 +1358,6 @@ void RenderForwardClustered::_update_volumetric_fog(Ref<RenderSceneBuffersRD> p_
 		settings.rb_size = size;
 		settings.time = time;
 		settings.is_using_radiance_octmap_array = is_using_radiance_octmap_array();
-		settings.max_cluster_elements = RendererRD::LightStorage::get_singleton()->get_max_cluster_elements();
 		settings.volumetric_fog_filter_active = get_volumetric_fog_filter_active();
 
 		settings.shadow_sampler = shadow_sampler;
@@ -1749,7 +1752,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	ERR_FAIL_NULL(current_cluster_builder);
 
 	p_render_data->cluster_buffer = current_cluster_builder->get_cluster_buffer();
-	p_render_data->cluster_size = current_cluster_builder->get_cluster_size();
+	p_render_data->tile_size = current_cluster_builder->get_tile_size();
 	p_render_data->cluster_max_elements = current_cluster_builder->get_max_cluster_elements();
 
 	_update_vrs(rb);
@@ -2806,7 +2809,7 @@ void RenderForwardClustered::_render_shadow_append(RID p_framebuffer, const Page
 
 	RenderDataRD render_data;
 	render_data.scene_data = &scene_data;
-	render_data.cluster_size = 1;
+	render_data.tile_size = 1;
 	render_data.cluster_max_elements = 32;
 	render_data.instances = &p_instances;
 	render_data.render_info = p_render_info;
@@ -2908,7 +2911,7 @@ void RenderForwardClustered::_render_particle_collider_heightfield(RID p_fb, con
 
 	RenderDataRD render_data;
 	render_data.scene_data = &scene_data;
-	render_data.cluster_size = 1;
+	render_data.tile_size = 1;
 	render_data.cluster_max_elements = 32;
 	render_data.instances = &p_instances;
 
@@ -2954,7 +2957,7 @@ void RenderForwardClustered::_render_material(const Transform3D &p_cam_transform
 
 	RenderDataRD render_data;
 	render_data.scene_data = &scene_data;
-	render_data.cluster_size = 1;
+	render_data.tile_size = 1;
 	render_data.cluster_max_elements = 32;
 	render_data.instances = &p_instances;
 
@@ -3010,7 +3013,7 @@ void RenderForwardClustered::_render_uv2(const PagedArray<RenderGeometryInstance
 
 	RenderDataRD render_data;
 	render_data.scene_data = &scene_data;
-	render_data.cluster_size = 1;
+	render_data.tile_size = 1;
 	render_data.cluster_max_elements = 32;
 	render_data.instances = &p_instances;
 
@@ -3086,7 +3089,7 @@ void RenderForwardClustered::_render_sdfgi(Ref<RenderSceneBuffersRD> p_render_bu
 
 	RenderDataRD render_data;
 	render_data.scene_data = &scene_data;
-	render_data.cluster_size = 1;
+	render_data.tile_size = 1;
 	render_data.cluster_max_elements = 32;
 	render_data.instances = &p_instances;
 
