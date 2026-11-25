@@ -1179,9 +1179,8 @@ void RendererSceneRenderRD::positional_soft_shadow_filter_set_quality(RS::Shadow
 		}
 		get_vogel_disk(penumbra_shadow_kernel, penumbra_shadow_samples);
 		get_vogel_disk(soft_shadow_kernel, soft_shadow_samples);
+		_update_shader_quality_settings();
 	}
-
-	_update_shader_quality_settings();
 }
 
 void RendererSceneRenderRD::directional_soft_shadow_filter_set_quality(RS::ShadowQuality p_quality) {
@@ -1226,9 +1225,8 @@ void RendererSceneRenderRD::directional_soft_shadow_filter_set_quality(RS::Shado
 		}
 		get_vogel_disk(directional_penumbra_shadow_kernel, directional_penumbra_shadow_samples);
 		get_vogel_disk(directional_soft_shadow_kernel, directional_soft_shadow_samples);
+		_update_shader_quality_settings();
 	}
-
-	_update_shader_quality_settings();
 }
 
 void RendererSceneRenderRD::decals_set_filter(RenderingServer::DecalFilter p_filter) {

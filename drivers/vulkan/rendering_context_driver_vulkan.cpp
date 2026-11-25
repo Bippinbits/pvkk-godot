@@ -982,6 +982,9 @@ void RenderingContextDriverVulkan::surface_set_size(SurfaceID p_surface, uint32_
 
 void RenderingContextDriverVulkan::surface_set_vsync_mode(SurfaceID p_surface, DisplayServer::VSyncMode p_vsync_mode) {
 	Surface *surface = (Surface *)(p_surface);
+	if (surface->vsync_mode == p_vsync_mode) {
+		return;
+	}
 	surface->vsync_mode = p_vsync_mode;
 	surface->needs_resize = true;
 }
