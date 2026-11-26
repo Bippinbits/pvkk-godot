@@ -10,7 +10,7 @@
 		- passes everything else on to [Input] unchanged;
 		- seals the frame, so getters see it;
 		- runs binding callbacks, then signals.
-		[b]Device ownership:[/b] keyboard and mouse ([constant DEVICE_KBM]) and gamepad ([constant DEVICE_PAD]) never share a frame. A device takes over when it [i]wakes[/i]: a new button or key press, a mouse click, or a trigger pulled past [method get_trigger_wake_threshold]. Stick and mouse motion never wake a device, so stick drift cannot steal the frame. On a switch the frame's batch is dropped, whatever the old device held is released, and whatever the batch pressed stays suppressed until released; [method is_switch_frame] is [code]true[/code] for that frame. [method set_device_policy] can lock the device.
+		[b]Device ownership:[/b] keyboard and mouse ([constant DEVICE_KBM]) and gamepad ([constant DEVICE_PAD]) never share a frame. A device takes over when it [i]wakes[/i]: a new button or key press, a mouse click, or a trigger pulled past [method get_trigger_wake_threshold]. Stick and mouse motion never wake a device, so stick drift cannot steal the frame. On a switch the frame's batch is dropped, whatever the old device held is released, and whatever the batch pressed stays suppressed until released; [method is_switch_frame] is [code]true[/code] for that frame. Every input the newly active pad holds off rest (a button down, a trigger or stick pushed) is [i]engaged[/i]: all its input is eaten until it returns to rest. The same happens whenever an input's meaning changes under it: a gate pressed or released (see [member RouteBindingResource.gate]) or a claim canceled by a context change. [method set_device_policy] can lock the device.
 		[b]Context path:[/b] contexts ([GamepadContext]) stack outer to inner: base contexts from [method set_gamepad_base_contexts], then pushed ones. For each pad input the innermost context with a binding for it wins. A context with none decides by its fallback; at the bottom of the path the raw event passes to Godot, so GUI focus and [code]ui_*[/code] actions keep working where nothing is bound.
 		[b]Bindings:[/b] [method attach] places one [RouteBindingResource], [method load_map] a whole [GamepadMap]. Rows come from the route map ([GamepadBakedMaps]) that the export bakes. A callback receives [code](phase: int, value)[/code], where [code]phase[/code] is a [enum Phase] and [code]value[/code] is a [float], or a [Vector2] for a stick:
 		[codeblock]
@@ -220,7 +220,7 @@
 		<method name="get_routes" qualifiers="const">
 			<return type="Dictionary[]" />
 			<description>
-				Returns what each physical input reaches on the current path, inner context first, then the sequences being watched. Each entry is [code]{input, label, gate, context, id, action, trigger, handle}[/code], with labels in the active pad's family. For debug overlays and prompts.
+				Returns what each physical input reaches on the current path: per input its gated bindings, inner context first, then the ungated binding that wins it, then the sequences being watched. Each entry is [code]{input, label, gate, gate_input, binding_label, context, id, action, trigger, handle, fallback}[/code]: [code]label[/code] and [code]gate[/code] are the input and gate names in the active pad's family, [code]gate_input[/code] is the gate's button slot ([code]-1[/code] for none), [code]binding_label[/code] is [member RouteBindingResource.label], and [code]fallback[/code] is the input's [enum GamepadContext.Fallback] on this path ([code]-1[/code] for a sequence). For debug overlays and prompts.
 			</description>
 		</method>
 		<method name="get_scheme" qualifiers="const">
@@ -327,6 +327,7 @@
 			<param index="2" name="target" type="Callable" />
 			<description>
 				Calls [param target] for bindings with id [param binding_id] in [param context], including bindings loaded by [method load_map] without a target, and those placed later. Called as [code]target.call(phase, value)[/code], after the binding's own target. Returns a handle for [method clear_callback].
+				One named callback per [param context] and [param binding_id]: if several are set, the first one set is called and the others wait until it is cleared. Clearing one from inside a callback is safe; callbacks still queued that frame skip it.
 			</description>
 		</method>
 		<method name="set_chord_window">
@@ -341,7 +342,7 @@
 			<param index="0" name="device" type="int" enum="InputRouter.Device" />
 			<param index="1" name="pad" type="int" default="-1" />
 			<description>
-				Hands the frame to [param device], and to [param pad] for [constant DEVICE_PAD], the way a wake would: claims cancel, input the old device passed is released, and input it holds stays suppressed until released.
+				Hands the frame to [param device], and to [param pad] for [constant DEVICE_PAD], the way a wake would: claims cancel, input the old device passed is released, and every pad input held off rest is engaged until it returns to rest.
 			</description>
 		</method>
 		<method name="set_device_policy">

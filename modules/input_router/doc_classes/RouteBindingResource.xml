@@ -28,7 +28,7 @@
 	</methods>
 	<members>
 		<member name="action" type="StringName" setter="set_action" getter="get_action" default="&amp;&quot;&quot;">
-			An [InputMap] action this binding drives through [Input], so [method Input.is_action_pressed] and [method Node._input] see it. [constant TRIGGER_PRESS] and [constant TRIGGER_REPEAT] hold the action while the input is down, with the shaped value at the press as its strength; [constant TRIGGER_ANALOG] follows the shaped value. [constant TRIGGER_RELEASE], [constant TRIGGER_HOLD], [constant TRIGGER_TAP] and [constant TRIGGER_SEQUENCE] press it for one frame each time they fire. Empty: no action.
+			An [InputMap] action this binding drives through [Input], so [method Input.is_action_pressed] and [method Node._input] see it. [constant TRIGGER_PRESS] and [constant TRIGGER_REPEAT] hold the action while the input is down, with the shaped value at the press as its strength, and [constant TRIGGER_REPEAT] presses it again on every repeat; [constant TRIGGER_ANALOG] follows the shaped value. [constant TRIGGER_RELEASE], [constant TRIGGER_HOLD], [constant TRIGGER_TAP] and [constant TRIGGER_SEQUENCE] press it for one frame each time they fire. Several bindings may drive one action: it stays pressed while any of them holds it, and letting go of one while another holds it sends no event. Empty: no action.
 		</member>
 		<member name="anti_deadzone" type="float" setter="set_anti_deadzone" getter="get_anti_deadzone" default="0.0">
 			The output just past [member deadzone]. Raise it when the game applies a deadzone of its own downstream, so small movements still register.
@@ -52,7 +52,9 @@
 			How a stick's deadzone applies. See [enum DeadzoneShape].
 		</member>
 		<member name="gate" type="int" setter="set_gate" getter="get_gate" enum="JoyButton" default="-1">
-			A modifier button that must be held for this binding to fire, making it a chord such as [code]LB + A[/code]. An input pressed shortly before its gate still counts, within [method InputRouter.get_chord_window]. A button used as a gate fires its own ungated binding on release only, and only if no chord used it. [constant JOY_BUTTON_INVALID]: no gate.
+			A modifier button that must be held for this binding to fire, making it a chord such as [code]LB + A[/code]. While the gate is held its chords form a layer: they win over ungated bindings for the same input in any context on the path (see [GamepadContext]), and inputs the layer does not bind behave as without the gate, except that a stick the layer binds in any direction belongs to the layer whole. An input pressed shortly before its gate still counts, within [method InputRouter.get_chord_window].
+			A button used as a gate fires its own ungated binding on release only, and only if no chord used it; its unbound presses never pass to Godot.
+			Pressing or releasing the gate changes what its inputs mean, so claims on them end: on press, the ungated claims on every input the layer covers (each button and trigger it binds, each stick it binds in any direction); on release, the gate's own chords. An analog or pointer claim stops (its value goes to zero), any other is canceled; neither reads as a release. Any of those inputs still off rest is then [i]engaged[/i]: all its input is eaten until it returns to rest, so a held input never fires a chord or lands on another binding mid-press. [constant JOY_BUTTON_INVALID]: no gate.
 		</member>
 		<member name="hold_time" type="float" setter="set_hold_time" getter="get_hold_time" default="0.4">
 			Seconds the input must stay pressed before [constant TRIGGER_HOLD] fires.

@@ -8,6 +8,7 @@
 #include "modules/input_router/line_vector.h"
 
 #include "core/input/input_map.h"
+#include "core/os/os.h"
 #include "scene/main/scene_tree.h"
 #include "scene/main/window.h"
 #include "tests/test_macros.h"
@@ -515,6 +516,501 @@ TEST_CASE("[SceneTree][InputRouter] State carries through the frame ring; edits 
 	enable_router(router, false);
 	CHECK(Input::get_singleton()->get_frame_filter() == nullptr);
 	router->set_gamepad_base_contexts(PackedStringArray());
+}
+
+// --- Modifier layers, callbacks and action slots ---
+
+static LocalVector<int> phase_log; // tag * 16 + phase.
+
+static void log_phase(int p_phase, const Variant &p_value, int p_tag) {
+	phase_log.push_back(p_tag * 16 + p_phase);
+}
+
+static bool logged(int p_tag, InputRouter::Phase p_phase) {
+	for (int entry : phase_log) {
+		if (entry == p_tag * 16 + (int)p_phase) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool logged_any(int p_tag) {
+	for (int entry : phase_log) {
+		if (entry / 16 == p_tag) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static Callable phase_logger(int p_tag) {
+	return callable_mp_static(&log_phase).bind(p_tag);
+}
+
+static Ref<RouteBindingResource> test_chord(const StringName &p_id, JoyButton p_button, JoyButton p_gate) {
+	Ref<RouteBindingResource> b = test_binding(p_id, p_button);
+	b->set_gate(p_gate);
+	return b;
+}
+
+static Ref<RouteBindingResource> test_stick(const StringName &p_id, JoyButton p_gate) {
+	Ref<RouteBindingResource> b;
+	b.instantiate();
+	b->set_id(p_id);
+	b->set_source(RouteBindingResource::SOURCE_STICK);
+	b->set_stick(RouteBindingResource::STICK_LEFT);
+	b->set_trigger(RouteBindingResource::TRIGGER_ANALOG);
+	b->set_gate(p_gate);
+	return b;
+}
+
+static Ref<RouteBindingResource> test_axis(const StringName &p_id, JoyAxis p_axis, int p_direction, RouteBindingResource::Trigger p_trigger, JoyButton p_gate) {
+	Ref<RouteBindingResource> b;
+	b.instantiate();
+	b->set_id(p_id);
+	b->set_source(RouteBindingResource::SOURCE_AXIS);
+	b->set_axis(p_axis);
+	b->set_axis_direction(p_direction);
+	b->set_trigger(p_trigger);
+	b->set_gate(p_gate);
+	return b;
+}
+
+// A route map holding p_bindings, applied at once while nothing is placed.
+static void set_test_map(InputRouter *p_router, const Vector<Ref<RouteBindingResource>> &p_bindings) {
+	Dictionary data = Baked::empty();
+	for (const Ref<RouteBindingResource> &b : p_bindings) {
+		String error;
+		REQUIRE(Baked::add_binding(data, **b, error) == Baked::ADD_NEW);
+	}
+	Ref<GamepadBakedMaps> map;
+	map.instantiate();
+	map->set_data(data);
+	p_router->set_route_map(map);
+}
+
+// Enabled, pad 0 connected and in charge, so the next press routes instead of waking. No chord
+// window: frames run back to back, so a held-back plain press would wait out real time.
+static void start_pad_case(InputRouter *p_router, const PackedStringArray &p_path) {
+	p_router->set_chord_window(0.0f);
+	p_router->set_gamepad_base_contexts(p_path);
+	enable_router(p_router, true);
+	p_router->joy_connection_changed(0, true);
+	p_router->set_device(InputRouter::DEVICE_PAD, 0);
+	frame_idle(p_router);
+	REQUIRE(p_router->get_device() == InputRouter::DEVICE_PAD);
+	phase_log.clear();
+}
+
+static void end_pad_case(InputRouter *p_router, const LocalVector<int> &p_handles) {
+	enable_router(p_router, false);
+	for (int handle : p_handles) {
+		p_router->detach(handle);
+	}
+	p_router->set_gamepad_base_contexts(PackedStringArray());
+	p_router->set_chord_window(0.05f);
+	phase_log.clear();
+}
+
+static void frame_axis(InputRouter *p_router, JoyAxis p_axis, float p_value) {
+	Ref<InputEventJoypadMotion> ev;
+	ev.instantiate();
+	ev->set_device(0);
+	ev->set_axis(p_axis);
+	ev->set_axis_value(p_value);
+	Input::get_singleton()->parse_input_event(ev);
+	p_router->input_poll_process_flip();
+}
+
+// Bug 5: letting go of the modifier ends its layer at once, and the input still held never drops
+// into the base binding. A bare gate press never reaches Godot.
+TEST_CASE("[SceneTree][InputRouter] Releasing a gate ends its chords; the held input stays eaten until released") {
+	InputRouter *router = InputRouter::get_singleton();
+	REQUIRE(router != nullptr);
+	Input *input = Input::get_singleton();
+	InputMap::get_singleton()->add_action("test_chord");
+	InputMap::get_singleton()->add_action("test_plain");
+	const Ref<RouteBindingResource> chord = test_chord("test_chord", JoyButton::A, JoyButton::LEFT_SHOULDER);
+	const Ref<RouteBindingResource> plain = test_binding("test_plain", JoyButton::A);
+	set_test_map(router, { chord, plain });
+	LocalVector<int> handles;
+	handles.push_back(router->attach(chord, "test_context"));
+	handles.push_back(router->attach(plain, "test_context"));
+	start_pad_case(router, PackedStringArray({ "test_context" }));
+
+	frame_button(router, JoyButton::LEFT_SHOULDER, true);
+	CHECK_FALSE(input->is_joy_button_pressed(0, JoyButton::LEFT_SHOULDER)); // The modifier is the router's.
+	frame_button(router, JoyButton::A, true);
+	CHECK(input->is_action_pressed("test_chord"));
+	CHECK_FALSE(input->is_action_pressed("test_plain"));
+
+	frame_button(router, JoyButton::LEFT_SHOULDER, false);
+	CHECK_FALSE(input->is_action_pressed("test_chord"));
+	frame_button(router, JoyButton::A, true); // A is still down: a repeat of its press is eaten.
+	CHECK_FALSE(input->is_action_pressed("test_plain"));
+	frame_button(router, JoyButton::A, false);
+	frame_button(router, JoyButton::A, true);
+	CHECK(input->is_action_pressed("test_plain"));
+	frame_button(router, JoyButton::A, false);
+	CHECK_FALSE(input->is_action_pressed("test_plain"));
+
+	end_pad_case(router, handles);
+	InputMap::get_singleton()->erase_action("test_chord");
+	InputMap::get_singleton()->erase_action("test_plain");
+}
+
+// The overlay rule: a modifier's chords in an outer context win over an inner context's plain
+// binding while the modifier is held; without it the inner binding still wins.
+TEST_CASE("[SceneTree][InputRouter] A held modifier's layer reaches past an inner context's plain binding") {
+	InputRouter *router = InputRouter::get_singleton();
+	REQUIRE(router != nullptr);
+	Input *input = Input::get_singleton();
+	InputMap::get_singleton()->add_action("test_layer");
+	InputMap::get_singleton()->add_action("test_inner");
+	const Ref<RouteBindingResource> layer = test_chord("test_layer", JoyButton::A, JoyButton::LEFT_SHOULDER);
+	const Ref<RouteBindingResource> inner = test_binding("test_inner", JoyButton::A);
+	set_test_map(router, { layer, inner });
+	LocalVector<int> handles;
+	handles.push_back(router->attach(layer, "test_outer"));
+	handles.push_back(router->attach(inner, "test_inner"));
+	start_pad_case(router, PackedStringArray({ "test_outer", "test_inner" }));
+
+	frame_button(router, JoyButton::LEFT_SHOULDER, true);
+	frame_button(router, JoyButton::A, true);
+	CHECK(input->is_action_pressed("test_layer"));
+	CHECK_FALSE(input->is_action_pressed("test_inner"));
+	frame_button(router, JoyButton::A, false);
+	frame_button(router, JoyButton::LEFT_SHOULDER, false);
+
+	frame_button(router, JoyButton::A, true);
+	CHECK(input->is_action_pressed("test_inner"));
+	CHECK_FALSE(input->is_action_pressed("test_layer"));
+	frame_button(router, JoyButton::A, false);
+
+	end_pad_case(router, handles);
+	InputMap::get_singleton()->erase_action("test_layer");
+	InputMap::get_singleton()->erase_action("test_inner");
+}
+
+TEST_CASE("[SceneTree][InputRouter] A gate's own binding fires on release, only when no chord used it") {
+	InputRouter *router = InputRouter::get_singleton();
+	REQUIRE(router != nullptr);
+	const Ref<RouteBindingResource> own = test_binding("test_gate_own", JoyButton::LEFT_SHOULDER);
+	const Ref<RouteBindingResource> chord = test_chord("test_gate_chord", JoyButton::A, JoyButton::LEFT_SHOULDER);
+	own->set_action(StringName());
+	chord->set_action(StringName());
+	set_test_map(router, { own, chord });
+	LocalVector<int> handles;
+	handles.push_back(router->attach(own, "test_context", phase_logger(1)));
+	handles.push_back(router->attach(chord, "test_context", phase_logger(2)));
+	start_pad_case(router, PackedStringArray({ "test_context" }));
+
+	frame_button(router, JoyButton::LEFT_SHOULDER, true);
+	CHECK_FALSE(logged_any(1)); // Waits for the release.
+	frame_button(router, JoyButton::LEFT_SHOULDER, false);
+	CHECK(logged(1, InputRouter::PHASE_PRESSED));
+	CHECK(logged(1, InputRouter::PHASE_RELEASED));
+
+	phase_log.clear();
+	frame_button(router, JoyButton::LEFT_SHOULDER, true);
+	frame_button(router, JoyButton::A, true);
+	frame_button(router, JoyButton::A, false);
+	frame_button(router, JoyButton::LEFT_SHOULDER, false);
+	CHECK(logged(2, InputRouter::PHASE_PRESSED));
+	CHECK(logged(2, InputRouter::PHASE_RELEASED));
+	CHECK_FALSE(logged_any(1));
+
+	end_pad_case(router, handles);
+}
+
+// Bug 10: a press whose release never arrived ends the old claim with CANCELED first.
+TEST_CASE("[SceneTree][InputRouter] A lost release cancels the old claim before the new press") {
+	InputRouter *router = InputRouter::get_singleton();
+	REQUIRE(router != nullptr);
+	const Ref<RouteBindingResource> b = test_binding("test_lost", JoyButton::A);
+	b->set_action(StringName());
+	set_test_map(router, { b });
+	LocalVector<int> handles;
+	handles.push_back(router->attach(b, "test_context", phase_logger(3)));
+	start_pad_case(router, PackedStringArray({ "test_context" }));
+
+	frame_button(router, JoyButton::A, true);
+	frame_button(router, JoyButton::A, true); // The release was lost.
+	REQUIRE(phase_log.size() == 3);
+	CHECK(phase_log[0] == 3 * 16 + InputRouter::PHASE_PRESSED);
+	CHECK(phase_log[1] == 3 * 16 + InputRouter::PHASE_CANCELED);
+	CHECK(phase_log[2] == 3 * 16 + InputRouter::PHASE_PRESSED);
+	frame_button(router, JoyButton::A, false);
+	CHECK(logged(3, InputRouter::PHASE_RELEASED));
+
+	end_pad_case(router, handles);
+}
+
+static int shared_test_presses = 0;
+
+static void count_shared_press(const Ref<InputEvent> &p_event) {
+	const Ref<InputEventAction> a = p_event;
+	if (a.is_valid() && a->get_action() == StringName("test_shared") && a->is_pressed()) {
+		shared_test_presses++;
+	}
+}
+
+// Bug 2: the action stays down while either binding holds it, and letting go of one while the
+// other holds it dispatches nothing (no extra press for focus navigation to step on).
+TEST_CASE("[SceneTree][InputRouter] Two bindings on one action press and release it independently") {
+	InputRouter *router = InputRouter::get_singleton();
+	REQUIRE(router != nullptr);
+	Input *input = Input::get_singleton();
+	Window *root = SceneTree::get_singleton()->get_root();
+	const Callable counter = callable_mp_static(&count_shared_press);
+	root->connect(StringName("window_input"), counter);
+	InputMap::get_singleton()->add_action("test_shared");
+	const Ref<RouteBindingResource> a = test_binding("test_shared_a", JoyButton::A);
+	const Ref<RouteBindingResource> b = test_binding("test_shared_b", JoyButton::B);
+	a->set_action("test_shared");
+	b->set_action("test_shared");
+	set_test_map(router, { a, b });
+	LocalVector<int> handles;
+	handles.push_back(router->attach(a, "test_context"));
+	handles.push_back(router->attach(b, "test_context"));
+	start_pad_case(router, PackedStringArray({ "test_context" }));
+
+	shared_test_presses = 0;
+	frame_button(router, JoyButton::A, true);
+	frame_button(router, JoyButton::B, true);
+	CHECK(shared_test_presses == 2);
+	frame_button(router, JoyButton::A, false);
+	CHECK(input->is_action_pressed("test_shared")); // B still holds it.
+	CHECK(shared_test_presses == 2);
+	frame_button(router, JoyButton::B, false);
+	CHECK_FALSE(input->is_action_pressed("test_shared"));
+
+	end_pad_case(router, handles);
+	root->disconnect(StringName("window_input"), counter);
+	InputMap::get_singleton()->erase_action("test_shared");
+}
+
+// The engaged mask across a modifier: the stick held as it goes down stops and is eaten until it
+// rests, then drives the layer. The layer binds only the stick's x axis, yet owns the whole stick
+// while held: the base look on the stick slot stays quiet. Letting go of the modifier mid-push
+// engages the stick again, so the look only resumes after the stick has rested.
+TEST_CASE("[SceneTree][InputRouter] A modifier engages a held stick until it rests") {
+	InputRouter *router = InputRouter::get_singleton();
+	REQUIRE(router != nullptr);
+	const Ref<RouteBindingResource> look = test_stick("test_look", JoyButton::INVALID);
+	const Ref<RouteBindingResource> aim = test_axis("test_aim", JoyAxis::LEFT_X, 0, RouteBindingResource::TRIGGER_ANALOG, JoyButton::LEFT_SHOULDER);
+	set_test_map(router, { look, aim });
+	LocalVector<int> handles;
+	handles.push_back(router->attach(look, "test_context", phase_logger(4)));
+	handles.push_back(router->attach(aim, "test_context", phase_logger(5)));
+	start_pad_case(router, PackedStringArray({ "test_context" }));
+
+	frame_axis(router, JoyAxis::LEFT_X, 0.8f);
+	CHECK(logged(4, InputRouter::PHASE_CHANGED));
+	CHECK_FALSE(logged_any(5));
+
+	phase_log.clear();
+	frame_button(router, JoyButton::LEFT_SHOULDER, true);
+	CHECK(logged(4, InputRouter::PHASE_CHANGED)); // The look stops.
+	CHECK_FALSE(logged_any(5));
+	frame_axis(router, JoyAxis::LEFT_X, 0.85f);
+	frame_axis(router, JoyAxis::LEFT_Y, 0.4f); // The other axis of the same stick: eaten too.
+	CHECK_FALSE(logged_any(5));
+
+	frame_axis(router, JoyAxis::LEFT_Y, 0.0f);
+	frame_axis(router, JoyAxis::LEFT_X, 0.0f); // At rest: the mask clears.
+	phase_log.clear();
+	frame_axis(router, JoyAxis::LEFT_X, 0.6f);
+	CHECK(logged(5, InputRouter::PHASE_CHANGED));
+	CHECK_FALSE(logged_any(4));
+
+	phase_log.clear();
+	frame_button(router, JoyButton::LEFT_SHOULDER, false);
+	CHECK(logged(5, InputRouter::PHASE_CHANGED)); // The aim stops.
+	frame_axis(router, JoyAxis::LEFT_X, 0.65f);
+	CHECK_FALSE(logged_any(4));
+
+	frame_axis(router, JoyAxis::LEFT_X, 0.0f);
+	phase_log.clear();
+	frame_axis(router, JoyAxis::LEFT_X, 0.5f);
+	CHECK(logged(4, InputRouter::PHASE_CHANGED));
+	CHECK_FALSE(logged_any(5));
+
+	frame_axis(router, JoyAxis::LEFT_X, 0.0f);
+	end_pad_case(router, handles);
+}
+
+// Inputs already held when the modifier goes down (a stick direction, a whole stick, a trigger)
+// never fire its press chords, however they jitter, until they return to rest.
+TEST_CASE("[SceneTree][InputRouter] Inputs held before their modifier never fire its press chords") {
+	InputRouter *router = InputRouter::get_singleton();
+	REQUIRE(router != nullptr);
+	const Ref<RouteBindingResource> flick = test_axis("test_flick", JoyAxis::LEFT_Y, -1, RouteBindingResource::TRIGGER_PRESS, JoyButton::X);
+	const Ref<RouteBindingResource> push = test_stick("test_push", JoyButton::X);
+	push->set_stick(RouteBindingResource::STICK_RIGHT);
+	push->set_trigger(RouteBindingResource::TRIGGER_PRESS);
+	const Ref<RouteBindingResource> pull = test_axis("test_pull", JoyAxis::TRIGGER_RIGHT, 1, RouteBindingResource::TRIGGER_PRESS, JoyButton::X);
+	set_test_map(router, { flick, push, pull });
+	LocalVector<int> handles;
+	handles.push_back(router->attach(flick, "test_context", phase_logger(6)));
+	handles.push_back(router->attach(push, "test_context", phase_logger(10)));
+	handles.push_back(router->attach(pull, "test_context", phase_logger(11)));
+	start_pad_case(router, PackedStringArray({ "test_context" }));
+
+	frame_axis(router, JoyAxis::LEFT_Y, -0.9f);
+	frame_axis(router, JoyAxis::RIGHT_X, 0.9f);
+	frame_axis(router, JoyAxis::TRIGGER_RIGHT, 0.9f);
+	frame_button(router, JoyButton::X, true);
+	frame_axis(router, JoyAxis::LEFT_Y, -0.95f);
+	frame_axis(router, JoyAxis::RIGHT_X, 0.95f);
+	frame_axis(router, JoyAxis::TRIGGER_RIGHT, 0.95f);
+	CHECK_FALSE(logged_any(6));
+	CHECK_FALSE(logged_any(10));
+	CHECK_FALSE(logged_any(11));
+
+	frame_axis(router, JoyAxis::LEFT_Y, 0.0f);
+	frame_axis(router, JoyAxis::RIGHT_X, 0.0f);
+	frame_axis(router, JoyAxis::TRIGGER_RIGHT, 0.0f);
+	frame_axis(router, JoyAxis::LEFT_Y, -0.9f);
+	frame_axis(router, JoyAxis::RIGHT_X, 0.9f);
+	frame_axis(router, JoyAxis::TRIGGER_RIGHT, 0.9f);
+	CHECK(logged(6, InputRouter::PHASE_PRESSED));
+	CHECK(logged(10, InputRouter::PHASE_PRESSED));
+	CHECK(logged(11, InputRouter::PHASE_PRESSED));
+
+	frame_axis(router, JoyAxis::LEFT_Y, 0.0f);
+	frame_axis(router, JoyAxis::RIGHT_X, 0.0f);
+	frame_axis(router, JoyAxis::TRIGGER_RIGHT, 0.0f);
+	frame_button(router, JoyButton::X, false);
+	end_pad_case(router, handles);
+}
+
+// Activating the pad engages everything it holds off rest: a stick pushed while the keyboard owned
+// the frame is eaten until it rests, so the pad's waking press cannot start a look.
+TEST_CASE("[SceneTree][InputRouter] Activating a pad engages what it holds until it rests") {
+	InputRouter *router = InputRouter::get_singleton();
+	REQUIRE(router != nullptr);
+	const Ref<RouteBindingResource> look = test_stick("test_wake_look", JoyButton::INVALID);
+	set_test_map(router, { look });
+	LocalVector<int> handles;
+	handles.push_back(router->attach(look, "test_context", phase_logger(12)));
+	start_pad_case(router, PackedStringArray({ "test_context" }));
+	router->set_device(InputRouter::DEVICE_KBM, -1);
+	frame_idle(router);
+	REQUIRE(router->get_device() == InputRouter::DEVICE_KBM);
+
+	frame_axis(router, JoyAxis::LEFT_X, 0.8f); // Sticks never wake a device.
+	frame_button(router, JoyButton::A, true); // Wakes the pad.
+	REQUIRE(router->get_device() == InputRouter::DEVICE_PAD);
+	phase_log.clear();
+	frame_axis(router, JoyAxis::LEFT_X, 0.85f);
+	CHECK_FALSE(logged_any(12));
+
+	frame_axis(router, JoyAxis::LEFT_X, 0.0f);
+	frame_axis(router, JoyAxis::LEFT_X, 0.5f);
+	CHECK(logged(12, InputRouter::PHASE_CHANGED));
+
+	frame_axis(router, JoyAxis::LEFT_X, 0.0f);
+	frame_button(router, JoyButton::A, false);
+	end_pad_case(router, handles);
+}
+
+static int repeat_test_presses = 0;
+
+static void count_repeat_press(const Ref<InputEvent> &p_event) {
+	const Ref<InputEventAction> a = p_event;
+	if (a.is_valid() && a->get_action() == StringName("test_repeat") && a->is_pressed()) {
+		repeat_test_presses++;
+	}
+}
+
+// Bug 9: every REPEATED edge re-presses the action, so held D-pad focus navigation steps.
+TEST_CASE("[SceneTree][InputRouter] A held repeat binding re-presses its action") {
+	InputRouter *router = InputRouter::get_singleton();
+	REQUIRE(router != nullptr);
+	Window *root = SceneTree::get_singleton()->get_root();
+	const Callable counter = callable_mp_static(&count_repeat_press);
+	root->connect(StringName("window_input"), counter);
+	InputMap::get_singleton()->add_action("test_repeat");
+	const Ref<RouteBindingResource> b = test_binding("test_repeat", JoyButton::DPAD_DOWN);
+	b->set_trigger(RouteBindingResource::TRIGGER_REPEAT);
+	b->set_repeat_delay(0.01f);
+	b->set_repeat_interval(0.01f);
+	set_test_map(router, { b });
+	LocalVector<int> handles;
+	handles.push_back(router->attach(b, "test_context"));
+	start_pad_case(router, PackedStringArray({ "test_context" }));
+
+	repeat_test_presses = 0;
+	frame_button(router, JoyButton::DPAD_DOWN, true);
+	CHECK(repeat_test_presses == 1);
+	for (int i = 0; i < 3; i++) {
+		OS::get_singleton()->delay_usec(15000);
+		frame_idle(router);
+	}
+	CHECK(repeat_test_presses == 4); // The press, then one repeat per frame: no burst, none missed.
+	frame_button(router, JoyButton::DPAD_DOWN, false);
+	CHECK_FALSE(Input::get_singleton()->is_action_pressed("test_repeat"));
+
+	end_pad_case(router, handles);
+	root->disconnect(StringName("window_input"), counter);
+	InputMap::get_singleton()->erase_action("test_repeat");
+}
+
+static int clear_test_handle = 0;
+
+static void clear_own_callback(int p_phase, const Variant &p_value) {
+	phase_log.push_back(7 * 16 + p_phase);
+	InputRouter::get_singleton()->clear_callback(clear_test_handle);
+}
+
+// One frame with several pad 0 buttons pressed, in order.
+static void frame_buttons(InputRouter *p_router, const Vector<JoyButton> &p_buttons) {
+	for (JoyButton button : p_buttons) {
+		Ref<InputEventJoypadButton> ev;
+		ev.instantiate();
+		ev->set_device(0);
+		ev->set_button_index(button);
+		ev->set_pressed(true);
+		Input::get_singleton()->parse_input_event(ev);
+	}
+	p_router->input_poll_process_flip();
+}
+
+// Bug 6: a callback clearing its own named callback must not shift the others queued that frame.
+TEST_CASE("[SceneTree][InputRouter] Clearing a named callback inside a callback skips only that one") {
+	InputRouter *router = InputRouter::get_singleton();
+	REQUIRE(router != nullptr);
+	const Ref<RouteBindingResource> x = test_binding("test_cb_x", JoyButton::X);
+	const Ref<RouteBindingResource> y = test_binding("test_cb_y", JoyButton::Y);
+	const Ref<RouteBindingResource> z = test_binding("test_cb_z", JoyButton::B);
+	x->set_action(StringName());
+	y->set_action(StringName());
+	z->set_action(StringName());
+	set_test_map(router, { x, y, z });
+	LocalVector<int> handles;
+	handles.push_back(router->attach(x, "test_context"));
+	handles.push_back(router->attach(y, "test_context"));
+	handles.push_back(router->attach(z, "test_context"));
+	clear_test_handle = router->set_callback("test_context", "test_cb_x", callable_mp_static(&clear_own_callback));
+	const int y_handle = router->set_callback("test_context", "test_cb_y", phase_logger(8));
+	const int z_handle = router->set_callback("test_context", "test_cb_z", phase_logger(9));
+	start_pad_case(router, PackedStringArray({ "test_context" }));
+
+	frame_buttons(router, { JoyButton::X, JoyButton::Y, JoyButton::B });
+	CHECK(logged(7, InputRouter::PHASE_PRESSED));
+	CHECK(logged(8, InputRouter::PHASE_PRESSED));
+	CHECK(logged(9, InputRouter::PHASE_PRESSED));
+
+	phase_log.clear();
+	frame_button(router, JoyButton::X, false);
+	frame_button(router, JoyButton::X, true);
+	CHECK_FALSE(logged_any(7)); // Cleared.
+
+	router->clear_callback(y_handle);
+	router->clear_callback(z_handle);
+	end_pad_case(router, handles);
 }
 
 } // namespace TestInputRouter

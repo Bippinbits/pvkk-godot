@@ -44,7 +44,7 @@ constexpr uint32_t MAX_WARNED_IDS = 64;
 constexpr uint32_t MAX_OVERRIDES = 64;
 constexpr uint32_t MAX_NAMED_CALLBACKS = 256;
 constexpr uint32_t PATH_HISTORY = 32;
-constexpr float SUPPRESS_RELEASE = 0.25f; // Suppressed axis slots clear below this.
+constexpr float REST_THRESHOLD = 0.25f; // An axis or stick below this is at rest; its engaged bit clears.
 constexpr float SEQUENCE_TIMEOUT_DEFAULT = 0.8f;
 constexpr float SEQUENCE_TIMEOUT_MIN = 0.3f;
 constexpr float SEQUENCE_TIMEOUT_MAX = 2.0f;
@@ -92,12 +92,12 @@ struct PadState {
 	uint32_t released_edges = 0;
 	uint32_t passed_buttons = 0; // Handed to Godot: a release is owed.
 	uint8_t passed_axes = 0;
-	uint64_t suppressed = 0; // Bit per slot, eaten until released.
+	uint64_t engaged = 0; // Bit per slot: off rest when what it meant changed; eaten until it returns to rest.
 	float axes[AXIS_COUNT] = {};
 	uint8_t reserved[8] = {};
 
 	_FORCE_INLINE_ bool is_down(uint8_t p_button) const { return down & (1u << p_button); }
-	_FORCE_INLINE_ bool is_suppressed(uint8_t p_slot) const { return suppressed & slot_bit(p_slot); }
+	_FORCE_INLINE_ bool is_engaged(uint8_t p_slot) const { return engaged & slot_bit(p_slot); }
 	Vector2 stick(int p_stick) const { return p_stick == 0 ? Vector2(axes[0], axes[1]) : Vector2(axes[2], axes[3]); }
 
 	// Raw: button 0/1, axis half 0..1, full axis -1..1, stick magnitude.
@@ -481,7 +481,7 @@ struct State {
 	LocalVector<Ref<InputEvent>> out; // Godot's at the next flip.
 	LocalVector<uint64_t> sort_keys;
 	FixedVector<Ref<InputEventAction>, MAX_POOLED_ACTIONS> action_pool;
-	FixedVector<StringName, MAX_PULSES> pulses; // Released next frame.
+	FixedVector<StringName, MAX_PULSES> pulses; // Released next frame, or by release_pads() on a device change.
 
 	// Keyed by name, inputs to the frame update rather than frame state.
 	LocalVector<NamedCallback> named_callbacks;
@@ -566,15 +566,25 @@ struct State {
 	void drop_chords(uint64_t p_inputs);
 	void flush_held_back(uint64_t p_inputs);
 	void use_gate(uint8_t p_gate);
+	void release_gated(uint8_t p_gate);
+	void engage_layer(uint8_t p_gate);
+	bool stick_layered(int p_pad, int p_stick) const;
 
 	// Claims and output.
 	Claim &claim(uint8_t p_slot, uint16_t p_row);
 	void end_claim(uint8_t p_slot);
+	bool abandon_claim(uint8_t p_slot);
+	void engage_input(uint8_t p_slot);
 	void cancel_claim(uint8_t p_slot);
 	void cancel_claims();
 	void fire(uint8_t p_slot, uint32_t p_bits);
+	void end_for_layer(uint8_t p_slot);
 	float shaped_for(const RouteBinding &p_row, int p_pad, uint8_t p_slot, Vector2 *r_vector) const;
 	void emit_action(const StringName &p_action, bool p_pressed, float p_strength, int p_device);
+	float action_held_elsewhere(const StringName &p_action, uint8_t p_slot) const;
+	void emit_row_action(uint8_t p_slot, const StringName &p_action, bool p_pressed, float p_strength);
+	void pulse_action(const StringName &p_action);
+	void release_pulses();
 	Queued *push_queued(bool p_signal);
 	void queue_callback(uint16_t p_row, InputRouter::Phase p_phase, const Vector2 &p_value, bool p_vector);
 	void queue_touch(int32_t p_index, InputRouter::Phase p_phase, const Vector2 &p_position, float p_pressure);
@@ -666,19 +676,6 @@ static Ref<InputEventScreenTouch> make_touch_cancel(const TouchState &p_touch) {
 	return ev;
 }
 
-static uint64_t held_slots(const PadState &p_pad) {
-	uint64_t held = p_pad.down;
-	for (uint8_t a = 0; a < AXIS_COUNT; a++) {
-		if (-p_pad.axes[a] >= SUPPRESS_RELEASE) {
-			held |= slot_bit(axis_slot(JoyAxis(a), -1));
-		}
-		if (p_pad.axes[a] >= SUPPRESS_RELEASE) {
-			held |= slot_bit(axis_slot(JoyAxis(a), 1));
-		}
-	}
-	return held;
-}
-
 static JoyAxis partner_axis(JoyAxis p_axis) {
 	switch (p_axis) {
 		case JoyAxis::LEFT_X:
@@ -692,6 +689,66 @@ static JoyAxis partner_axis(JoyAxis p_axis) {
 		default:
 			return p_axis;
 	}
+}
+
+// The stick an axis or stick slot belongs to, -1 for buttons and triggers.
+static int stick_of_slot(uint8_t p_slot) {
+	if (is_stick_slot(p_slot)) {
+		return p_slot - STICK_BASE;
+	}
+	return is_axis_slot(p_slot) ? stick_of_axis(slot_axis(p_slot)) : -1;
+}
+
+// Both axes' halves and full slots, and the stick slot.
+static uint64_t stick_slots(int p_stick) {
+	const JoyAxis x = p_stick == 0 ? JoyAxis::LEFT_X : JoyAxis::RIGHT_X;
+	const JoyAxis y = p_stick == 0 ? JoyAxis::LEFT_Y : JoyAxis::RIGHT_Y;
+	uint64_t slots = slot_bit(stick_slot(p_stick));
+	for (int dir = -1; dir <= 1; dir++) {
+		slots |= slot_bit(axis_slot(x, dir)) | slot_bit(axis_slot(y, dir));
+	}
+	return slots;
+}
+
+// Claimed while the input is off rest, by value rather than by threshold.
+static _FORCE_INLINE_ bool is_continuous(const RouteBinding &p_row) {
+	return p_row.trigger == RouteBindingResource::TRIGGER_ANALOG || (p_row.flags & ROW_POINTER);
+}
+
+// The physical input p_slot belongs to: a button, a trigger's three slots, or a whole stick.
+static uint64_t input_slots(uint8_t p_slot) {
+	if (is_button_slot(p_slot)) {
+		return slot_bit(p_slot);
+	}
+	const int stick = stick_of_slot(p_slot);
+	if (stick >= 0) {
+		return stick_slots(stick);
+	}
+	const JoyAxis axis = slot_axis(p_slot);
+	return slot_bit(axis_slot(axis, -1)) | slot_bit(axis_slot(axis, 0)) | slot_bit(axis_slot(axis, 1));
+}
+
+// That input away from rest: a button down, a trigger or a stick at REST_THRESHOLD or more.
+static bool input_off_rest(const PadState &p_pad, uint8_t p_slot) {
+	if (is_button_slot(p_slot)) {
+		return p_pad.is_down(p_slot);
+	}
+	const int stick = stick_of_slot(p_slot);
+	if (stick >= 0) {
+		return p_pad.stick(stick).length() >= REST_THRESHOLD;
+	}
+	return Math::abs(p_pad.axes[(int)slot_axis(p_slot)]) >= REST_THRESHOLD;
+}
+
+// Every slot of every input off rest.
+static uint64_t off_rest_slots(const PadState &p_pad) {
+	uint64_t held = p_pad.down;
+	for (uint8_t slot = AXIS_BASE; slot < INPUT_COUNT; slot++) {
+		if (input_off_rest(p_pad, slot)) {
+			held |= input_slots(slot);
+		}
+	}
+	return held;
 }
 
 static Key key_of(const InputEventKey *p_key) {
@@ -998,10 +1055,6 @@ void State::disable() {
 		return;
 	}
 	release_all(true);
-	for (const StringName &action : pulses) {
-		emit_action(action, false, 0.0f, f.active_pad);
-	}
-	pulses.clear();
 	Input *input = Input::get_singleton();
 	input->clear_frame_filter(owner);
 	f.enabled = false;
@@ -1024,8 +1077,9 @@ void State::deliver_out() {
 
 // The frame's batch, after _poll() took it. Wakes decide the frame's device; the device in charge
 // keeps it if it woke too. A switch drops the batch (script actions pass), releases what the old
-// device held and suppresses what the batch pressed. Otherwise every event routes in order into
-// `out`, after anything mutators queued since the last flip. Then tick.
+// device held, suppresses what the batch pressed and engages whatever the new pad holds off rest.
+// Otherwise every event routes in order into `out`, after anything mutators queued since the last
+// flip. Then tick.
 void State::route_frame() {
 	if (routes_dirty) {
 		rebuild_routes();
@@ -1132,8 +1186,9 @@ void State::route_frame() {
 	tick();
 }
 
-// Updates the pad's state, whoever owns the frame. Returns the event's slots that stay
-// suppressed. A press of a suppressed button that is not down is a lost release and clears.
+// Updates the pad's state, whoever owns the frame. Returns the event's slots that stay engaged:
+// an input back at rest clears. A button rests when released (a press of an engaged button that
+// is not down is a lost release and clears); a trigger or a whole stick below REST_THRESHOLD.
 uint64_t State::capture(const InputEvent *p_event, EventKind p_kind) {
 	const int pad = p_event->get_device();
 	if (pad < 0 || pad >= Input::JOYPADS_MAX) {
@@ -1156,19 +1211,19 @@ uint64_t State::capture(const InputEvent *p_event, EventKind p_kind) {
 		if (jb->is_pressed()) {
 			if (!was_down) {
 				ps.pressed_edges |= bit;
-				ps.suppressed &= ~slot_bit(b);
+				ps.engaged &= ~slot_bit(b);
 				f.edge_pads |= 1u << pad;
 			}
 			ps.down |= bit;
-			return ps.suppressed & slot_bit(b);
+			return ps.engaged & slot_bit(b);
 		}
 		if (was_down) {
 			ps.released_edges |= bit;
 			f.edge_pads |= 1u << pad;
 		}
 		ps.down &= ~bit;
-		const uint64_t eaten = ps.suppressed & slot_bit(b);
-		ps.suppressed &= ~slot_bit(b);
+		const uint64_t eaten = ps.engaged & slot_bit(b);
+		ps.engaged &= ~slot_bit(b);
 		return eaten;
 	}
 	const InputEventJoypadMotion *jm = static_cast<const InputEventJoypadMotion *>(p_event);
@@ -1177,22 +1232,20 @@ uint64_t State::capture(const InputEvent *p_event, EventKind p_kind) {
 		return 0;
 	}
 	ps.axes[(int)axis] = jm->get_axis_value();
-	uint64_t eaten = 0;
-	for (int dir = -1; dir <= 1; dir += 2) {
-		const uint8_t slot = axis_slot(axis, dir);
-		if (!ps.is_suppressed(slot)) {
-			continue;
-		}
-		if (ps.slot_value(slot) < SUPPRESS_RELEASE) {
-			ps.suppressed &= ~slot_bit(slot);
-		} else {
-			eaten |= slot_bit(slot);
-		}
+	const uint8_t full = axis_slot(axis, 0);
+	const uint64_t input = input_slots(full); // The trigger, or the whole stick.
+	if (!(ps.engaged & input)) {
+		return 0;
 	}
-	return eaten;
+	if (!input_off_rest(ps, full)) {
+		ps.engaged &= ~input;
+		return 0;
+	}
+	return ps.engaged & input;
 }
 
-// Releases what the old device holds; suppresses what the new pad holds, the wake among it.
+// Releases what the old device holds; engages everything the new pad holds off rest, the wake
+// among it: buttons, triggers and sticks are eaten until they return to rest.
 void State::switch_to(IR::Device p_device, int p_pad) {
 	Frame &f = *write_state;
 	const uint8_t prev = f.device;
@@ -1206,7 +1259,7 @@ void State::switch_to(IR::Device p_device, int p_pad) {
 		f.active_pad = p_pad;
 	}
 	if (f.device == IR::DEVICE_PAD && f.active_pad >= 0 && (f.live_pads & (1u << f.active_pad))) {
-		f.pads[f.active_pad].suppressed |= held_slots(f.pads[f.active_pad]);
+		f.pads[f.active_pad].engaged |= off_rest_slots(f.pads[f.active_pad]);
 	}
 	f.switch_frame = true;
 	queue_signal(SIGNAL_DEVICE_CHANGED, f.device, f.active_pad, prev, prev_pad);
@@ -1249,8 +1302,9 @@ void State::suppress_dropped() {
 	}
 }
 
-// Ends the pad side in flight: claims and sequences cancel, passed pad input releases, held pad
-// input is suppressed, the pointer stops. p_emit_releases false: Input already dropped its state.
+// Ends the pad side in flight: claims and sequences cancel, pulses and passed pad input release,
+// everything the active pad holds off rest is engaged, the pointer stops. p_emit_releases false:
+// Input already dropped its state.
 void State::release_pads(bool p_emit_releases) {
 	Frame &f = *write_state;
 	if (!p_emit_releases) {
@@ -1259,6 +1313,11 @@ void State::release_pads(bool p_emit_releases) {
 		}
 	}
 	cancel_claims();
+	if (p_emit_releases) {
+		release_pulses();
+	} else {
+		pulses.clear();
+	}
 	for (uint32_t i = 0; i < f.sequence_count; i++) {
 		f.sequences[i].step = 0;
 	}
@@ -1285,7 +1344,7 @@ void State::release_pads(bool p_emit_releases) {
 		ps.passed_axes = 0;
 	}
 	if (f.active_pad >= 0 && (f.live_pads & (1u << f.active_pad))) {
-		f.pads[f.active_pad].suppressed |= held_slots(f.pads[f.active_pad]);
+		f.pads[f.active_pad].engaged |= off_rest_slots(f.pads[f.active_pad]);
 	}
 	f.pointer_velocity = Vector2();
 	f.pointer_delta = Vector2();
@@ -1390,6 +1449,7 @@ void State::poll_connections() {
 		} else {
 			if (p == f.active_pad) {
 				cancel_claims();
+				release_pulses();
 			}
 			f.pads[p] = PadState();
 			f.connected_pads &= ~(1u << p);
@@ -1406,11 +1466,17 @@ void State::poll_connections() {
 
 // --- State: pad routing ---
 
-// Press: sequences observe, the slot's range claims, chords waiting on this gate complete.
-// Release: the slot's chords close and its claim resolves; an unclaimed passed press passes.
+// Press: sequences observe, the slot's range claims, chords waiting on this gate complete, and
+// what its layer covers off rest is engaged. A gate's unclaimed press never passes: the modifier
+// is the router's.
+// Release: claims this gate holds end, the slot's chords close and its claim resolves; an
+// unclaimed passed press passes.
 void State::route_button(int p_pad, uint8_t p_slot, bool p_pressed, const Ref<InputEvent> &p_event, uint64_t p_eaten) {
 	Frame &f = *write_state;
 	PadState &ps = f.pads[p_pad];
+	if (!p_pressed) {
+		release_gated(p_slot); // Eaten too: a gate engaged mid-hold still ends its layer.
+	}
 	if (p_eaten & slot_bit(p_slot)) {
 		trace_event(p_slot, p_pad, p_pressed ? IR::PHASE_PRESSED : IR::PHASE_RELEASED, p_pressed, -1, NONE, OUTCOME_SUPPRESSED);
 		return;
@@ -1438,20 +1504,19 @@ void State::route_button(int p_pad, uint8_t p_slot, bool p_pressed, const Ref<In
 	}
 
 	if (f.claimed_slots & slot_bit(p_slot)) {
-		// Its release was lost. Not cancel_claim: that would suppress the slot now down.
-		if (f.claims[p_slot].bits & CLAIM_ACTION_DOWN) {
-			emit_action(rows().info[f.claims[p_slot].row].action, false, 0.0f, f.active_pad);
-		}
-		drop_chords(slot_bit(p_slot));
-		end_claim(p_slot);
+		abandon_claim(p_slot); // Its release was lost. Not cancel_claim: that would engage the slot now down.
 	}
 	feed_sequences(p_slot);
 	const bool matched = press_slot(p_pad, p_slot);
 	complete_chords(p_pad, p_slot);
+	const bool gate = routes().slot_flags[p_slot] & SLOT_CHORD_GATE;
+	if (gate) {
+		engage_layer(p_slot);
+	}
 	if (matched) {
 		return;
 	}
-	if ((routes().slot_flags[p_slot] & SLOT_FALLBACK) == GamepadContext::FALLBACK_PASS) {
+	if (!gate && (routes().slot_flags[p_slot] & SLOT_FALLBACK) == GamepadContext::FALLBACK_PASS) {
 		ps.passed_buttons |= 1u << p_slot;
 		out.push_back(p_event);
 		trace_event(p_slot, p_pad, IR::PHASE_PRESSED, 1.0f, -1, NONE, OUTCOME_PASSED);
@@ -1473,7 +1538,7 @@ bool State::press_slot(int p_pad, uint8_t p_slot) {
 		const uint16_t r = table.active[i];
 		const RouteBinding &row = rt.rows[r];
 		if (row.gate != NONE) {
-			if (ps.is_down(row.gate) && !ps.is_suppressed(row.gate)) {
+			if (ps.is_down(row.gate) && !ps.is_engaged(row.gate)) {
 				use_gate(row.gate);
 				Claim &c = claim(p_slot, r);
 				fire(p_slot, trigger_step(row, c, 1.0f, f.now));
@@ -1523,10 +1588,11 @@ void State::route_axis(int p_pad, JoyAxis p_axis, const Ref<InputEvent> &p_event
 
 	bool bound = false;
 	bool pass = false;
+	const bool layered = stick >= 0 && stick_layered(p_pad, stick);
 	for (int si = 0; si < slot_count; si++) {
 		const uint8_t slot = slots[si];
 		const bool own = si < 3 || slot == stick_slot(stick);
-		if ((p_eaten & slot_bit(slot)) || ps.is_suppressed(slot)) {
+		if ((p_eaten & slot_bit(slot)) || ps.is_engaged(slot)) {
 			bound = bound || own;
 			continue;
 		}
@@ -1553,8 +1619,7 @@ void State::route_axis(int p_pad, JoyAxis p_axis, const Ref<InputEvent> &p_event
 			} else {
 				fire(slot, bits);
 			}
-			const bool continuous = row.trigger == RouteBindingResource::TRIGGER_ANALOG || (row.flags & ROW_POINTER);
-			if (continuous ? (v == 0.0f && vec == Vector2()) : !(c.bits & CLAIM_DOWN)) {
+			if (is_continuous(row) ? (v == 0.0f && vec == Vector2()) : !(c.bits & CLAIM_DOWN)) {
 				drop_chords(slot_bit(slot));
 				end_claim(slot);
 			}
@@ -1564,16 +1629,19 @@ void State::route_axis(int p_pad, JoyAxis p_axis, const Ref<InputEvent> &p_event
 			for (uint32_t i = table.slot_first[slot]; i < table.slot_first[slot + 1]; i++) {
 				const uint16_t r = table.active[i];
 				const RouteBinding &row = rt.rows[r];
-				if (row.gate != NONE && (!ps.is_down(row.gate) || ps.is_suppressed(row.gate))) {
+				if (row.gate != NONE && (!ps.is_down(row.gate) || ps.is_engaged(row.gate))) {
 					if (waiting_count < MAX_WAITING_CHORDS) {
 						waiting[waiting_count++] = r;
 					}
 					continue;
 				}
 				bound = bound || own;
+				if (layered && row.gate == NONE) {
+					break; // A held modifier's layer owns the stick.
+				}
 				Vector2 vec;
 				const float v = shaped_for(row, p_pad, slot, &vec);
-				const bool continuous = row.trigger == RouteBindingResource::TRIGGER_ANALOG || (row.flags & ROW_POINTER);
+				const bool continuous = is_continuous(row);
 				if (continuous ? (v != 0.0f || vec != Vector2()) : Math::abs(v) >= row.press) {
 					if (row.gate != NONE) {
 						use_gate(row.gate);
@@ -1676,14 +1744,8 @@ void State::feed_sequences(uint8_t p_slot) {
 			continue;
 		}
 		queue_callback(m.row, IR::PHASE_PRESSED, Vector2(1.0f, 0.0f), false);
-		const StringName &action = rt.info[m.row].action;
-		if (action != StringName()) {
-			emit_action(action, true, 1.0f, f.active_pad);
-			if (!pulses.is_full()) {
-				pulses.push_back(action);
-			} else {
-				emit_action(action, false, 0.0f, f.active_pad);
-			}
+		if (rt.info[m.row].action != StringName()) {
+			pulse_action(rt.info[m.row].action);
 		}
 		trace_event(row.input, f.active_pad, IR::PHASE_PRESSED, 1.0f, m.row, row.context, OUTCOME_ROUTED);
 	}
@@ -1781,6 +1843,68 @@ void State::use_gate(uint8_t p_gate) {
 	if ((f.claimed_slots & slot_bit(p_gate)) && (f.claims[p_gate].bits & CLAIM_GATE_DEFERRED)) {
 		f.claims[p_gate].bits |= CLAIM_GATE_USED;
 	}
+}
+
+// The gate let go (bug 5): every claim it holds ends (end_for_layer), so a lever stops and an
+// action releases, and its input, if still off rest, is engaged: it never drops into the base
+// layer mid-press.
+void State::release_gated(uint8_t p_gate) {
+	Frame &f = *write_state;
+	for (uint64_t held = f.claimed_slots & ~slot_bit(p_gate); held; held &= held - 1) {
+		const uint8_t slot = (uint8_t)lowest_bit(held);
+		if (rows().rows[f.claims[slot].row].gate != p_gate) {
+			continue;
+		}
+		end_for_layer(slot);
+		engage_input(slot);
+	}
+}
+
+// The gate pressed: what its layer covers (every slot it binds, every stick it binds in any
+// direction) changes meaning. Plain claims there end (end_for_layer) and whatever is still off
+// rest is engaged, so a held input neither fires a chord nor carries on in the base; it joins the
+// layer once it has been back to rest. Chords complete_chords() just claimed are left alone.
+void State::engage_layer(uint8_t p_gate) {
+	Frame &f = *write_state;
+	const RouteTable &table = routes();
+	const RowTable &rt = rows();
+	uint64_t layer = 0;
+	for (uint32_t i = 0; i < table.slot_first[INPUT_COUNT]; i++) {
+		const RouteBinding &row = rt.rows[table.active[i]];
+		if (row.gate == p_gate) {
+			const int stick = stick_of_slot(row.input);
+			layer |= stick >= 0 ? stick_slots(stick) : slot_bit(row.input);
+		}
+	}
+	for (uint64_t held = f.claimed_slots & layer; held; held &= held - 1) {
+		const uint8_t slot = (uint8_t)lowest_bit(held);
+		if (rt.rows[f.claims[slot].row].gate == NONE) {
+			end_for_layer(slot);
+		}
+	}
+	for (uint64_t slots = layer; slots; slots &= slots - 1) {
+		engage_input((uint8_t)lowest_bit(slots));
+	}
+}
+
+// A held modifier binds something on this stick: its plain rows yield the whole stick to the layer.
+bool State::stick_layered(int p_pad, int p_stick) const {
+	const PadState &ps = write_state->pads[p_pad];
+	const RouteTable &table = routes();
+	const RowTable &rt = rows();
+	for (uint64_t slots = stick_slots(p_stick); slots; slots &= slots - 1) {
+		const uint8_t slot = (uint8_t)lowest_bit(slots);
+		for (uint32_t i = table.slot_first[slot]; i < table.slot_first[slot + 1]; i++) {
+			const RouteBinding &row = rt.rows[table.active[i]];
+			if (row.gate == NONE) {
+				break; // Gated rows sort first.
+			}
+			if (ps.is_down(row.gate) && !ps.is_engaged(row.gate)) {
+				return true;
+			}
+		}
+	}
+	return false;
 }
 
 // --- State: KB/M and touch ---
@@ -1944,26 +2068,45 @@ void State::end_claim(uint8_t p_slot) {
 	f.claimed_slots &= ~slot_bit(p_slot);
 }
 
-// PHASE_CANCELED, an owed action release, and the input suppressed while held. Its chords close:
-// a suppressed input never delivers the release that would end them.
-void State::cancel_claim(uint8_t p_slot) {
+// PHASE_CANCELED (if the claim fired) and an owed action release; its chords close. The input is
+// left alone. Returns false when the slot held no claim.
+bool State::abandon_claim(uint8_t p_slot) {
 	Frame &f = *write_state;
 	const Claim c = f.claims[p_slot];
 	end_claim(p_slot);
 	drop_chords(slot_bit(p_slot));
 	if (c.row == NO_ROW) {
-		return;
+		return false;
 	}
 	if (!(c.bits & (CLAIM_HELD_BACK | CLAIM_GATE_DEFERRED))) {
 		queue_callback(c.row, IR::PHASE_CANCELED, Vector2(), false);
 	}
 	if (c.bits & CLAIM_ACTION_DOWN) {
-		emit_action(rows().info[c.row].action, false, 0.0f, f.active_pad);
+		emit_row_action(p_slot, rows().info[c.row].action, false, 0.0f);
 	}
 	trace_event(p_slot, f.active_pad, IR::PHASE_CANCELED, 0.0f, c.row, rows().rows[c.row].context, OUTCOME_CANCELED);
-	const bool suppressible = is_button_slot(p_slot) || (is_axis_slot(p_slot) && slot_direction(p_slot) != 0); // Sticks and full axes resume.
-	if (f.active_pad >= 0 && (f.live_pads & (1u << f.active_pad)) && suppressible && f.pads[f.active_pad].slot_value(p_slot) >= SUPPRESS_RELEASE) {
-		f.pads[f.active_pad].suppressed |= slot_bit(p_slot);
+	return true;
+}
+
+// Engages the physical input p_slot belongs to if it is off rest: all its input is eaten until it
+// returns to rest (capture()). An input another claim still holds is left to that claim.
+void State::engage_input(uint8_t p_slot) {
+	Frame &f = *write_state;
+	if (f.active_pad < 0 || !(f.live_pads & (1u << f.active_pad))) {
+		return;
+	}
+	PadState &ps = f.pads[f.active_pad];
+	const uint64_t input = input_slots(p_slot);
+	if (!(f.claimed_slots & input) && input_off_rest(ps, p_slot)) {
+		ps.engaged |= input;
+	}
+}
+
+// abandon_claim(), then the input engaged while off rest: it never delivers the release that would
+// end its chords, and never lands on another binding mid-press.
+void State::cancel_claim(uint8_t p_slot) {
+	if (abandon_claim(p_slot)) {
+		engage_input(p_slot);
 	}
 }
 
@@ -2013,27 +2156,46 @@ void State::fire(uint8_t p_slot, uint32_t p_bits) {
 		return;
 	}
 	if (p_bits & FIRE_PRESSED) {
-		emit_action(action, true, MAX(strength, 0.01f), f.active_pad);
+		emit_row_action(p_slot, action, true, MAX(strength, 0.01f));
 		c.bits |= CLAIM_ACTION_DOWN;
 	}
 	if (p_bits & FIRE_CHANGED) {
-		emit_action(action, strength > 0.0f, strength, f.active_pad);
+		emit_row_action(p_slot, action, strength > 0.0f, strength);
 		c.bits = strength > 0.0f ? (c.bits | CLAIM_ACTION_DOWN) : (c.bits & ~CLAIM_ACTION_DOWN);
 	}
 	// A RELEASE row's only edge is RELEASED, so it pulses too.
 	const uint32_t pulse = FIRE_HELD | FIRE_TAPPED | FIRE_REPEATED | (row.trigger == RouteBindingResource::TRIGGER_RELEASE ? FIRE_RELEASED : 0);
 	if ((p_bits & pulse) && !(c.bits & CLAIM_ACTION_DOWN)) {
-		emit_action(action, true, 1.0f, f.active_pad);
-		if (!pulses.is_full()) {
-			pulses.push_back(action);
-		} else {
-			emit_action(action, false, 0.0f, f.active_pad);
-		}
+		pulse_action(action);
+	} else if ((p_bits & FIRE_REPEATED) && (c.bits & CLAIM_ACTION_DOWN)) {
+		emit_action(action, true, MAX(strength, 0.01f), f.active_pad); // Bug 9: a pressed re-emit, so held D-pad focus navigation steps.
 	}
 	if ((p_bits & FIRE_RELEASED) && (c.bits & CLAIM_ACTION_DOWN)) {
-		emit_action(action, false, 0.0f, f.active_pad);
+		emit_row_action(p_slot, action, false, 0.0f);
 		c.bits &= ~CLAIM_ACTION_DOWN;
 	}
+}
+
+// A layer change took the claim's input; nothing was let go, so it never reads as a release, tap
+// or pulse. A continuous row steps to zero (the control stops, CHANGED); any other row cancels.
+// Ends the claim and its chords.
+void State::end_for_layer(uint8_t p_slot) {
+	Frame &f = *write_state;
+	Claim &c = f.claims[p_slot];
+	const RouteBinding &row = rows().rows[c.row];
+	if (!is_continuous(row) || (c.bits & (CLAIM_HELD_BACK | CLAIM_GATE_DEFERRED))) {
+		abandon_claim(p_slot);
+		return;
+	}
+	if (is_stick_slot(p_slot)) {
+		f.stick_vectors[p_slot - STICK_BASE] = Vector2();
+	}
+	fire(p_slot, trigger_step(row, c, 0.0f, f.now));
+	if (c.bits & CLAIM_ACTION_DOWN) {
+		emit_row_action(p_slot, rows().info[c.row].action, false, 0.0f);
+	}
+	end_claim(p_slot);
+	drop_chords(slot_bit(p_slot));
 }
 
 // lock_axis zeroes a stick axis while its partner is larger, so a diagonal drives one control.
@@ -2078,6 +2240,53 @@ void State::emit_action(const StringName &p_action, bool p_pressed, float p_stre
 	ev->set_strength(p_pressed ? CLAMP(p_strength, 0.0f, 1.0f) : 0.0f);
 	ev->set_device(p_device);
 	out.push_back(ev);
+}
+
+// The strongest other claim holding p_action down, -1 when none. NONE: any claim.
+float State::action_held_elsewhere(const StringName &p_action, uint8_t p_slot) const {
+	const Frame &f = *write_state;
+	const RowTable &rt = rows();
+	const uint64_t others = p_slot == NONE ? f.claimed_slots : f.claimed_slots & ~slot_bit(p_slot);
+	float strongest = -1.0f;
+	for (uint64_t held = others; held; held &= held - 1) {
+		const Claim &c = f.claims[lowest_bit(held)];
+		if ((c.bits & CLAIM_ACTION_DOWN) && rt.info[c.row].action == p_action) {
+			strongest = MAX(strongest, MIN(Math::abs(c.value), 1.0f));
+		}
+	}
+	return strongest;
+}
+
+// Input keeps one routed slot per action, so rows on one action share it (bug 2). While another
+// claim holds the action a release emits nothing (scripts and GUI see no extra press; that claim's
+// own changes and release move it on), and a press takes the stronger of the two.
+void State::emit_row_action(uint8_t p_slot, const StringName &p_action, bool p_pressed, float p_strength) {
+	const float other = action_held_elsewhere(p_action, p_slot);
+	if (other < 0.0f) {
+		emit_action(p_action, p_pressed, p_strength, write_state->active_pad);
+	} else if (p_pressed) {
+		emit_action(p_action, true, MAX(other, p_strength), write_state->active_pad);
+	}
+}
+
+// Pressed now, released at the next _poll(). A device change releases pending pulses first
+// (release_pads()), so the release always reaches the pad that pressed (bug 4). A full list
+// releases at once.
+void State::pulse_action(const StringName &p_action) {
+	emit_action(p_action, true, 1.0f, write_state->active_pad);
+	if (pulses.is_full()) {
+		emit_row_action(NONE, p_action, false, 0.0f);
+		return;
+	}
+	pulses.push_back(p_action);
+}
+
+// A claim still holding the action keeps it pressed.
+void State::release_pulses() {
+	for (const StringName &action : pulses) {
+		emit_row_action(NONE, action, false, 0.0f);
+	}
+	pulses.clear();
 }
 
 // Into the write frame's BODY. Nothing queues while disabled: no frame would run it.
@@ -2395,6 +2604,13 @@ void State::rebuild_routes() {
 	const NameTable &nt = names();
 	if (callbacks_dirty) {
 		callbacks_dirty = false;
+		uint32_t kept = 0;
+		for (uint32_t n = 0; n < named_callbacks.size(); n++) {
+			if (named_callbacks[n].handle != 0) { // clear_callback() tombstones.
+				named_callbacks[kept++] = named_callbacks[n];
+			}
+		}
+		named_callbacks.resize(kept);
 		RowTable &edit = edit_rows();
 		for (uint32_t r = 0; r < edit.rows.size(); r++) {
 			RouteBindingInfo &ri = edit.info[r];
@@ -2467,24 +2683,24 @@ void State::rebuild_routes() {
 		while (end < sort_keys.size() && key_slot(sort_keys[end]) == slot) {
 			end++;
 		}
+		// Gated rows of every context down to the stop, inner first, so a held modifier's layer
+		// reaches past an inner context's plain row. Then the innermost plain row, the last one
+		// reachable; plain rows below it are not.
+		uint16_t plain = NO_ROW;
 		for (uint32_t o = 0; o < order_count; o++) {
-			bool plain = false;
 			for (; k < end && key_depth(sort_keys[k]) == o; k++) {
 				const uint16_t r = key_row(sort_keys[k]);
-				if (plain) {
-					continue; // Below the context's first plain row: unreachable.
+				if (rt.rows[r].gate == NONE) {
+					plain = plain == NO_ROW ? r : plain;
+					continue;
 				}
 				if (active_count == MAX_ACTIVE) {
 					ERR_PRINT_ONCE(vformat("InputRouter: more than %d routed bindings on the path.", MAX_ACTIVE));
 					continue;
 				}
 				table.active[active_count++] = r;
-				plain = rt.rows[r].gate == NONE;
 			}
 			const ContextInfo &ci = nt.contexts[order[o]];
-			if (plain) {
-				break;
-			}
 			if (ci.modal) {
 				fallback = ci.fallback == GamepadContext::FALLBACK_INHERIT ? GamepadContext::FALLBACK_SWALLOW : ci.fallback;
 				break;
@@ -2493,6 +2709,14 @@ void State::rebuild_routes() {
 				fallback = ci.fallback;
 				break;
 			}
+		}
+		if (plain != NO_ROW) {
+			if (active_count < MAX_ACTIVE) {
+				table.active[active_count++] = plain;
+			} else {
+				ERR_PRINT_ONCE(vformat("InputRouter: more than %d routed bindings on the path.", MAX_ACTIVE));
+			}
+			fallback = GamepadContext::FALLBACK_PASS; // Every press claims; as before, a plain row's slot keeps PASS.
 		}
 		k = end;
 		table.slot_flags[slot] = fallback;
@@ -2858,8 +3082,8 @@ bool InputRouter::is_switch_frame() const {
 	return s->read_frame()->switch_frame;
 }
 
-// Same hand-off as a wake: claims cancel, passed input releases, held input is suppressed. Getters
-// see it after the next flip.
+// Same hand-off as a wake: claims cancel, passed input releases, held input is engaged until it
+// returns to rest. Getters see it after the next flip.
 void InputRouter::set_device(Device p_device, int p_pad) {
 	MAIN_OR_DEFER(callable_mp(this, &InputRouter::set_device).bind(p_device, p_pad));
 	ERR_FAIL_INDEX(p_device, 3);
@@ -3254,11 +3478,16 @@ void InputRouter::_set_callback_handle(const StringName &p_context, const String
 	s->routes_dirty = true;
 }
 
+// Tombstones the entry (bug 6): callbacks queued this frame still hold list indices, and a moved
+// entry would call the wrong target. rebuild_routes() compacts the list.
 void InputRouter::clear_callback(int p_handle) {
 	MAIN_OR_DEFER(callable_mp(this, &InputRouter::clear_callback).bind(p_handle));
-	for (uint32_t i = 0; i < s->named_callbacks.size(); i++) {
-		if (s->named_callbacks[i].handle == (uint32_t)p_handle) {
-			s->named_callbacks.remove_at_unordered(i);
+	if (p_handle == 0) {
+		return;
+	}
+	for (NamedCallback &nc : s->named_callbacks) {
+		if (nc.handle == (uint32_t)p_handle) {
+			nc = NamedCallback();
 			s->callbacks_dirty = true;
 			s->routes_dirty = true;
 			return;
@@ -3286,22 +3515,26 @@ void InputRouter::clear() {
 	s->path_changed();
 }
 
-static Dictionary route_dict(const RouteBinding &p_row, const RouteBindingInfo &p_info, const StringName &p_context, int p_family) {
+// p_fallback: the slot's GamepadContext::Fallback, -1 for a sequence.
+static Dictionary route_dict(const RouteBinding &p_row, const RouteBindingInfo &p_info, const StringName &p_context, int p_family, int p_fallback) {
 	Dictionary d;
 	d["input"] = p_row.input;
 	d["label"] = input_label(p_row.input, p_family);
 	d["gate"] = p_row.gate == NONE ? String() : input_label(p_row.gate, p_family);
+	d["gate_input"] = p_row.gate == NONE ? -1 : (int)p_row.gate;
+	d["binding_label"] = p_info.label;
 	d["context"] = p_context;
 	d["id"] = p_info.id;
 	d["action"] = p_info.action;
 	d["trigger"] = trigger_name(p_row.trigger);
 	d["handle"] = p_info.handle;
+	d["fallback"] = p_fallback;
 	return d;
 }
 
-// Physical to virtual on the read frame's path: per input, inner context first, then sequences.
-// {input, label, gate, context, id, action, trigger, handle}, labels in the active pad's family.
-// flip() rebuilds dirty routes before it seals, so the read frame's are current for its rows.
+// Physical to virtual on the read frame's path: per input, gated rows inner context first, then
+// the reachable plain row, then sequences. Labels in the active pad's family. flip() rebuilds dirty
+// routes before it seals, so the read frame's are current for its rows.
 TypedArray<Dictionary> InputRouter::_get_routes() const {
 	MAIN_OR_RETURN(TypedArray<Dictionary>());
 	const Frame &f = *s->read_state;
@@ -3313,12 +3546,12 @@ TypedArray<Dictionary> InputRouter::_get_routes() const {
 	for (uint8_t slot = 0; slot < INPUT_COUNT; slot++) {
 		for (uint32_t i = table.slot_first[slot]; i < table.slot_first[slot + 1]; i++) {
 			const uint16_t r = table.active[i];
-			result.push_back(route_dict(rt.rows[r], rt.info[r], nt.contexts[rt.rows[r].context].id, family));
+			result.push_back(route_dict(rt.rows[r], rt.info[r], nt.contexts[rt.rows[r].context].id, family, table.slot_flags[slot] & SLOT_FALLBACK));
 		}
 	}
 	for (uint32_t i = 0; i < f.sequence_count; i++) {
 		const uint16_t r = f.sequences[i].row;
-		result.push_back(route_dict(rt.rows[r], rt.info[r], nt.contexts[rt.rows[r].context].id, family));
+		result.push_back(route_dict(rt.rows[r], rt.info[r], nt.contexts[rt.rows[r].context].id, family, -1));
 	}
 	return result;
 }
@@ -3605,10 +3838,7 @@ void InputRouter::_poll() {
 	}
 	Input::get_singleton()->take_buffered_events(s->batch);
 	s->poll_connections();
-	for (const StringName &action : s->pulses) {
-		s->emit_action(action, false, 0.0f, f.active_pad);
-	}
-	s->pulses.clear();
+	s->release_pulses();
 }
 
 void InputRouter::_process() {
