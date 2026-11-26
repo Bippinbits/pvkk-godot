@@ -1065,7 +1065,8 @@ void Fog::volumetric_fog_update(const VolumetricFogSettings &p_settings, const P
 	params.fog_frustum_size_end[1] = fog_far_size.y;
 
 	params.ambient_inject = RendererSceneRenderRD::get_singleton()->environment_get_volumetric_fog_ambient_inject(p_settings.env) * RendererSceneRenderRD::get_singleton()->environment_get_ambient_light_energy(p_settings.env);
-	params.z_far = z_far;
+	params.cluster_z_near = p_settings.cluster_builder->get_cluster_z_near();
+	params.inv_cluster_z_range = p_settings.cluster_builder->get_inv_cluster_z_range();
 
 	params.fog_frustum_end = fog_end;
 

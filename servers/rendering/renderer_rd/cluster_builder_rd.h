@@ -98,9 +98,8 @@ class ClusterBuilderSharedDataRD {
 			uint32_t cluster_screen_size[2];
 			uint32_t render_element_count_div_32; // divided by 32
 			uint32_t max_cluster_element_count_div_32; // divided by 32
-
-			uint32_t pad1;
-			uint32_t pad2;
+			float cluster_z_near;
+			float cluster_z_far;
 		};
 
 		ClusterStoreShaderRD cluster_store_shader;
@@ -116,8 +115,8 @@ class ClusterBuilderSharedDataRD {
 
 			uint32_t cluster_shift;
 			uint32_t cluster_type;
-			float z_near;
-			float z_far;
+			float cluster_z_near;
+			float cluster_z_far;
 
 			uint32_t orthogonal;
 			uint32_t max_cluster_element_count_div_32;
@@ -164,8 +163,8 @@ private:
 
 	struct RenderElementData {
 		uint32_t type; // 0-4
-		uint32_t touches_near;
-		uint32_t touches_far;
+		float z_near;
+		float z_far;
 		uint32_t original_index;
 		float transform_inv[12]; // Transposed transform for less space.
 		float scale[3];
@@ -183,8 +182,10 @@ private:
 	Transform3D view_xform;
 	Projection adjusted_projection;
 	Projection projection;
-	float z_far = 0;
-	float z_near = 0;
+	float camera_z_near = 0;
+	float camera_z_far = 0;
+	float cluster_z_far = 0;
+	float cluster_z_near = 0;
 	bool camera_orthogonal = false;
 
 	enum Divisor {
@@ -223,15 +224,16 @@ private:
 
 	struct StateUniform {
 		float projection[16];
-		float inv_z_far;
+
+		float inv_cluster_z_range;
+		float cluster_z_near;
 		uint32_t screen_to_clusters_shift; // Shift to obtain coordinates in block indices.
 		uint32_t cluster_screen_width;
+
 		uint32_t cluster_data_size; // How much data is needed for a single cluster.
 		uint32_t cluster_depth_offset;
-
 		uint32_t pad0;
 		uint32_t pad1;
-		uint32_t pad2;
 	};
 
 	RID state_uniform;
@@ -271,14 +273,17 @@ public:
 
 			float depth = -xform.origin.z;
 			if (camera_orthogonal) {
-				e.touches_near = (depth - radius) < z_near;
+				e.z_near = (depth - radius);
 			} else {
 				// Contains camera inside light.
 				float radius2 = radius * shared->sphere_overfit; // Overfit again for outer size (camera may be outside actual sphere but behind an icosphere vertex)
-				e.touches_near = xform.origin.length_squared() < radius2 * radius2;
+				e.z_near = (xform.origin.length_squared() < radius2 * radius2) ? 0.0f : (depth - radius);
 			}
 
-			e.touches_far = (depth + radius) > z_far;
+			e.z_far = (depth + radius);
+			cluster_z_near = CLAMP(e.z_near, camera_z_near, cluster_z_near);
+			cluster_z_far = CLAMP(e.z_far, cluster_z_far, camera_z_far);
+
 			e.scale[0] = radius;
 			e.scale[1] = radius;
 			e.scale[2] = radius;
@@ -317,20 +322,23 @@ public:
 			CONE_MINMAX(1, -1);
 
 			if (camera_orthogonal) {
-				e.touches_near = min_d < z_near;
+				e.z_near = min_d;
 			} else {
 				Plane base_plane(-xform.basis.get_column(Vector3::AXIS_Z), xform.origin);
 				float dist = base_plane.distance_to(Vector3());
 				if (dist >= 0 && dist < radius) {
 					// Contains camera inside light, check angle.
 					float angle = Math::rad_to_deg(Math::acos((-xform.origin.normalized()).dot(-xform.basis.get_column(Vector3::AXIS_Z))));
-					e.touches_near = angle < p_spot_aperture * 1.05; //overfit aperture a little due to cone overfit
+					e.z_near = (angle < p_spot_aperture * 1.05) ? 0.0f : min_d; //overfit aperture a little due to cone overfit
 				} else {
-					e.touches_near = false;
+					e.z_near = min_d;
 				}
 			}
 
-			e.touches_far = max_d > z_far;
+			e.z_far = max_d;
+			cluster_z_near = CLAMP(e.z_near, camera_z_near, cluster_z_near);
+			cluster_z_far = CLAMP(e.z_far, cluster_z_far, camera_z_far);
+
 			e.scale[0] = len * shared->cone_overfit;
 			e.scale[1] = len * shared->cone_overfit;
 			e.scale[2] = radius;
@@ -370,14 +378,16 @@ public:
 		float depth = -xform.origin.z;
 
 		if (camera_orthogonal) {
-			e.touches_near = depth - box_depth < z_near;
+			e.z_near = depth - box_depth;
 		} else {
 			// Contains camera inside box.
 			Vector3 inside = xform.xform_inv(Vector3(0, 0, 0)).abs();
-			e.touches_near = inside.x < scale.x && inside.y < scale.y && inside.z < scale.z;
+			e.z_near = (inside.x < scale.x && inside.y < scale.y && inside.z < scale.z) ? 0.0f : (depth - box_depth);
 		}
 
-		e.touches_far = depth + box_depth > z_far;
+		e.z_far = depth + box_depth;
+		cluster_z_near = CLAMP(e.z_near, camera_z_near, cluster_z_near);
+		cluster_z_far = CLAMP(e.z_far, cluster_z_far, camera_z_far);
 
 		e.scale[0] = scale.x;
 		e.scale[1] = scale.y;
@@ -400,6 +410,8 @@ public:
 	uint32_t get_cluster_size() const;
 	uint32_t get_max_cluster_elements() const;
 	uint32_t get_cluster_type_mask(uint32_t p_type) const;
+	float get_cluster_z_near() const;
+	float get_inv_cluster_z_range() const;
 
 	void set_shared(ClusterBuilderSharedDataRD *p_shared);
 

@@ -2169,6 +2169,9 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		p_render_data->cluster_type_masks[i] = current_cluster_builder->get_cluster_type_mask(i);
 	}
 
+	p_render_data->scene_data->cluster_z_near = current_cluster_builder->get_cluster_z_near();
+	p_render_data->scene_data->inv_cluster_z_range = current_cluster_builder->get_inv_cluster_z_range();
+
 	RENDER_TIMESTAMP("Render Opaque Pass");
 
 	RD::get_singleton()->draw_command_begin_label("Render Opaque Pass");

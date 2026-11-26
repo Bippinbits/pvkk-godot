@@ -148,8 +148,8 @@ layout(set = 0, binding = 14, std140) uniform Params {
 
 	float fog_frustum_end;
 	float ambient_inject;
-	float z_far;
-	int filter_axis;
+	float inv_cluster_z_range;
+	float cluster_z_near;
 
 	vec3 ambient_color;
 	float sky_contribution;
@@ -178,7 +178,8 @@ layout(set = 0, binding = 14, std140) uniform Params {
 	float temporal_blend;
 
 	vec2 sky_border_size;
-	vec2 pad;
+	int filter_axis;
+	int pad;
 
 	mat3x4 cam_rotation;
 	mat4 to_prev_view;
@@ -347,7 +348,7 @@ void main() {
 		}
 	}
 
-	uint cluster_z = uint(clamp((abs(view_pos.z) / params.z_far) * 32.0, 0.0, 31.0));
+	uint cluster_z = uint(clamp(((-view_pos.z - params.cluster_z_near) * params.inv_cluster_z_range) * 32.0, 0.0, 31.0));
 
 	vec3 total_light = vec3(0.0);
 

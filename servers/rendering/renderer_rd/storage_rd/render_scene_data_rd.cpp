@@ -116,6 +116,9 @@ void RenderSceneDataRD::update_ubo(RID p_uniform_buffer, RS::ViewportDebugDraw p
 	ubo.z_far = z_far;
 	ubo.z_near = z_near;
 
+	ubo.cluster_z_near = cluster_z_near;
+	ubo.inv_cluster_z_range = inv_cluster_z_range;
+
 	ubo.flags = 0;
 
 	ubo.flags |= p_pancake_shadows ? SCENE_DATA_FLAGS_USE_PANCAKE_SHADOWS : 0;

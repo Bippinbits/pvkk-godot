@@ -13,8 +13,8 @@ layout(push_constant, std430) uniform Params {
 	uint render_element_count_div_32; //divided by 32
 
 	uint max_cluster_element_count_div_32; //divided by 32
-	uint pad1;
-	uint pad2;
+	float cluster_z_near;
+	float cluster_z_far;
 }
 params;
 
@@ -30,8 +30,8 @@ cluster_store;
 
 struct RenderElement {
 	uint type; //0-4
-	bool touches_near;
-	bool touches_far;
+	float z_near;
+	float z_far;
 	uint original_index;
 	mat3x4 transform_inv;
 	vec3 scale;
@@ -75,11 +75,11 @@ void main() {
 				uint from_z = findLSB(z_range);
 				uint to_z = findMSB(z_range) + 1;
 
-				if (render_elements.data[index].touches_near) {
+				if (render_elements.data[index].z_near < params.cluster_z_near) {
 					from_z = 0;
 				}
 
-				if (render_elements.data[index].touches_far) {
+				if (render_elements.data[index].z_far > params.cluster_z_far) {
 					to_z = 32;
 				}
 

@@ -50,6 +50,11 @@ struct SceneData {
 	float dual_paraboloid_side;
 	float z_far;
 	float z_near;
+	
+	float cluster_z_near;
+	float inv_cluster_z_range;
+	uint pad0;
+	uint pad1;
 
 	float roughness_limiter_amount;
 	float roughness_limiter_limit;

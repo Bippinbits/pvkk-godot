@@ -153,8 +153,8 @@ private:
 
 			float fog_frustum_end;
 			float ambient_inject;
-			float z_far;
-			uint32_t filter_axis;
+			float inv_cluster_z_range;
+			float cluster_z_near;
 
 			float ambient_color[3];
 			float sky_contribution;
@@ -183,7 +183,8 @@ private:
 			float temporal_blend;
 
 			float sky_border_size[2];
-			float pad[2];
+			uint32_t filter_axis;
+			uint32_t pad;
 
 			float cam_rotation[12];
 			float to_prev_view[16];

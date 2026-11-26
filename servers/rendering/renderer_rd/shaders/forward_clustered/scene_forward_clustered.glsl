@@ -550,10 +550,12 @@ void vertex_shader(vec3 vertex_input,
 	uvec2 screen_pixel = clamp(uvec2(clip_pos * vec2(screen_size)), uvec2(0), screen_size - uvec2(1));
 	uvec2 cluster_pos = screen_pixel >> implementation_data.cluster_shift;
 	uint cluster_offset = (implementation_data.cluster_width * cluster_pos.y + cluster_pos.x) * (implementation_data.max_cluster_element_count_div_32 + 32);
-	uint cluster_z = uint(clamp((-vertex_interp.z / scene_data.z_far) * 32.0, 0.0, 31.0));
+	float cluster_depth = (-vertex_interp.z - scene_data.cluster_z_near) * scene_data.inv_cluster_z_range;
+	uint cluster_mask = (cluster_depth >= 0.0 && cluster_depth <= 1.0) ? 0xFFFFFFFFU : 0U;
+	uint cluster_z = uint(clamp(cluster_depth * 32.0, 0.0, 31.0));
 
 	const uint layer_mask = instances.data[instance_index].layer_mask;
-	if (bool(layer_mask & implementation_data.cluster_type_masks[0])) {
+	if (bool(layer_mask & implementation_data.cluster_type_masks[0] & cluster_mask)) {
 		// Omni lights.
 		uint cluster_omni_offset = cluster_offset;
 
@@ -588,7 +590,7 @@ void vertex_shader(vec3 vertex_input,
 		}
 	}
 
-	if (bool(layer_mask & implementation_data.cluster_type_masks[1])) {
+	if (bool(layer_mask & implementation_data.cluster_type_masks[1] & cluster_mask)) {
 		// Spot lights.
 		uint cluster_spot_offset = cluster_offset + implementation_data.cluster_type_size;
 
@@ -1553,14 +1555,16 @@ void fragment_shader(in SceneData scene_data) {
 #endif
 	uint cluster_offset = (implementation_data.cluster_width * cluster_pos.y + cluster_pos.x) * (implementation_data.max_cluster_element_count_div_32 + 32);
 
-	uint cluster_z = uint(clamp((-vertex.z / scene_data.z_far) * 32.0, 0.0, 31.0));
+	float cluster_depth = (-vertex.z - scene_data.cluster_z_near) * scene_data.inv_cluster_z_range;
+	uint cluster_mask = (cluster_depth >= 0.0 && cluster_depth <= 1.0) ? 0xFFFFFFFFU : 0U;
+	uint cluster_z = uint(clamp(cluster_depth * 32.0, 0.0, 31.0));
 
 	//used for interpolating anything cluster related
 	vec3 vertex_ddx = dFdx(vertex);
 	vec3 vertex_ddy = dFdy(vertex);
 
 	const uint layer_mask = instances.data[instance_index].layer_mask;
-	if (bool(layer_mask & implementation_data.cluster_type_masks[2])) {
+	if (bool(layer_mask & implementation_data.cluster_type_masks[2] & cluster_mask)) {
 		// Process decals.
 		uint cluster_decal_offset = cluster_offset + implementation_data.cluster_type_size * 2;
 
@@ -2051,7 +2055,7 @@ void fragment_shader(in SceneData scene_data) {
 		ao_light_affect = mix(ao_light_affect, max(ao_light_affect, implementation_data.ssao_light_affect), implementation_data.ssao_ao_affect);
 	}
 
-	if (bool(layer_mask & implementation_data.cluster_type_masks[3])) {
+	if (bool(layer_mask & implementation_data.cluster_type_masks[3] & cluster_mask)) {
 		// Process reflections.
 		vec4 reflection_accum = vec4(0.0, 0.0, 0.0, 0.0);
 		vec4 ambient_accum = vec4(0.0, 0.0, 0.0, 0.0);
@@ -2661,7 +2665,7 @@ void fragment_shader(in SceneData scene_data) {
 	}
 
 #ifndef USE_VERTEX_LIGHTING
-	if (bool(layer_mask & implementation_data.cluster_type_masks[0])) {
+	if (bool(layer_mask & implementation_data.cluster_type_masks[0] & cluster_mask)) {
 		// Omni lights.
 		uint cluster_omni_offset = cluster_offset;
 
@@ -2722,7 +2726,7 @@ void fragment_shader(in SceneData scene_data) {
 		}
 	}
 
-	if (bool(layer_mask & implementation_data.cluster_type_masks[1])) {
+	if (bool(layer_mask & implementation_data.cluster_type_masks[1] & cluster_mask)) {
 		// Spot lights.
 		uint cluster_spot_offset = cluster_offset + implementation_data.cluster_type_size;
 

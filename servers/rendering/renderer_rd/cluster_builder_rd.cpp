@@ -467,8 +467,10 @@ void ClusterBuilderRD::setup(Size2i p_screen_size, uint32_t p_max_elements, RID 
 void ClusterBuilderRD::begin(const Transform3D &p_view_transform, const Projection &p_cam_projection, bool p_flip_y) {
 	view_xform = p_view_transform.affine_inverse();
 	projection = p_cam_projection;
-	z_near = projection.get_z_near();
-	z_far = projection.get_z_far();
+	camera_z_near = projection.get_z_near();
+	camera_z_far = projection.get_z_far();
+	cluster_z_near = camera_z_far;
+	cluster_z_far = camera_z_near;
 	camera_orthogonal = p_cam_projection.is_orthogonal();
 	adjusted_projection = projection;
 	if (!camera_orthogonal) {
@@ -505,7 +507,8 @@ void ClusterBuilderRD::bake_cluster() {
 			StateUniform state;
 
 			RendererRD::MaterialStorage::store_camera(adjusted_projection, state.projection);
-			state.inv_z_far = 1.0 / z_far;
+			state.inv_cluster_z_range = 1.0 / (cluster_z_far - cluster_z_near);
+			state.cluster_z_near = cluster_z_near;
 			state.screen_to_clusters_shift = get_shift_from_power_of_2(cluster_size);
 			state.screen_to_clusters_shift -= divisor; //screen is smaller, shift one less
 
@@ -580,8 +583,8 @@ void ClusterBuilderRD::bake_cluster() {
 
 			push_constant.render_element_count_div_32 = Math::division_round_up(render_element_count, 32U);
 			push_constant.max_cluster_element_count_div_32 = max_elements_by_type / 32;
-			push_constant.pad1 = 0;
-			push_constant.pad2 = 0;
+			push_constant.cluster_z_near = cluster_z_near;
+			push_constant.cluster_z_far = cluster_z_far;
 
 			RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(ClusterBuilderSharedDataRD::ClusterStore::PushConstant));
 
@@ -608,8 +611,8 @@ void ClusterBuilderRD::debug(ElementType p_element) {
 	push_constant.cluster_shift = get_shift_from_power_of_2(cluster_size);
 	push_constant.cluster_type = p_element;
 	push_constant.orthogonal = camera_orthogonal;
-	push_constant.z_far = z_far;
-	push_constant.z_near = z_near;
+	push_constant.cluster_z_far = cluster_z_far;
+	push_constant.cluster_z_near = cluster_z_near;
 	push_constant.max_cluster_element_count_div_32 = max_elements_by_type / 32;
 
 	RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(ClusterBuilderSharedDataRD::ClusterDebug::PushConstant));
@@ -633,6 +636,14 @@ uint32_t ClusterBuilderRD::get_max_cluster_elements() const {
 
 uint32_t ClusterBuilderRD::get_cluster_type_mask(uint32_t p_type) const {
 	return cluster_masks_by_type[p_type];
+}
+
+float ClusterBuilderRD::get_cluster_z_near() const {
+	return cluster_z_near;
+}
+
+float ClusterBuilderRD::get_inv_cluster_z_range() const {
+	return 1.0f / (cluster_z_far - cluster_z_near);
 }
 
 void ClusterBuilderRD::set_shared(ClusterBuilderSharedDataRD *p_shared) {

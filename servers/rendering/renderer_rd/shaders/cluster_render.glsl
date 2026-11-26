@@ -20,22 +20,22 @@ params;
 layout(set = 0, binding = 1, std140) uniform State {
 	mat4 projection;
 
-	float inv_z_far;
+	float inv_cluster_z_range;
+	float cluster_z_near;
 	uint screen_to_clusters_shift; // shift to obtain coordinates in block indices
-	uint cluster_screen_width; //
-	uint cluster_data_size; // how much data for a single cluster takes
+	uint cluster_screen_width;
 
+	uint cluster_data_size; // how much data for a single cluster takes
 	uint cluster_depth_offset;
 	uint pad0;
 	uint pad1;
-	uint pad2;
 }
 state;
 
 struct RenderElement {
 	uint type; //0-4
-	bool touches_near;
-	bool touches_far;
+	float z_near;
+	float z_far;
 	uint original_index;
 	mat3x4 transform_inv;
 	vec3 scale;
@@ -74,14 +74,16 @@ layout(location = 1) in flat uint element_index;
 
 layout(set = 0, binding = 1, std140) uniform State {
 	mat4 projection;
-	float inv_z_far;
+
+	float inv_cluster_z_range;
+	float cluster_z_near;
 	uint screen_to_clusters_shift; // shift to obtain coordinates in block indices
-	uint cluster_screen_width; //
+	uint cluster_screen_width;
+
 	uint cluster_data_size; // how much data for a single cluster takes
 	uint cluster_depth_offset;
 	uint pad0;
 	uint pad1;
-	uint pad2;
 }
 state;
 
@@ -144,7 +146,7 @@ void main() {
 	}
 
 	//find the current element in the depth usage list and mark the current depth as used
-	float unit_depth = depth_interp * state.inv_z_far;
+	float unit_depth = (depth_interp - state.cluster_z_near) * state.inv_cluster_z_range;
 
 	uint z_bit = clamp(uint(floor(unit_depth * 32.0)), 0, 31);
 

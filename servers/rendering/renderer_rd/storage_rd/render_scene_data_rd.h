@@ -67,6 +67,9 @@ public:
 	float z_near = 0.0;
 	float z_far = 0.0;
 
+	float cluster_z_near = 0.0f;
+	float inv_cluster_z_range = 1.0f;
+
 	float lod_distance_multiplier = 0.0;
 	float screen_mesh_lod_threshold = 0.0;
 
@@ -151,6 +154,11 @@ private:
 		float dual_paraboloid_side;
 		float z_far;
 		float z_near;
+
+		float cluster_z_near;
+		float inv_cluster_z_range;
+		uint32_t pad0;
+		uint32_t pad1;
 
 		float roughness_limiter_amount;
 		float roughness_limiter_limit;
