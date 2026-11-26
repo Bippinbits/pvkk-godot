@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="GDScriptSyntax" inherits="Object" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../doc/class.xsd">
+	<brief_description>
+		Exposes the syntax tree of GDScript source code.
+	</brief_description>
+	<description>
+		Runs the GDScript parser on source code and returns the resulting syntax tree as plain [Dictionary] and [Array] values. Only the parser runs: types are not resolved and no other scripts or resources are loaded.
+		[codeblock]
+		var tree = GDScriptSyntax.parse(FileAccess.get_file_as_string("res://player.gd"), "res://player.gd")
+		if tree.ok:
+			print(tree["class"].extends_class)
+			for function in tree["class"].functions:
+				for call in function.calls:
+					print(call.name, " ", call.args.size())
+		[/codeblock]
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="parse" qualifiers="static">
+			<return type="Dictionary" />
+			<param index="0" name="source" type="String" />
+			<param index="1" name="path" type="String" default="&quot;&quot;" />
+			<description>
+				Parses [param source] and returns a [Dictionary] with these keys:
+				- [code]ok[/code]: [code]true[/code] if the source parsed without errors.
+				- [code]errors[/code]: an [Array] of [code]{line, column, message}[/code] dictionaries.
+				- [code]class[/code]: the root class node, or [code]null[/code]. Its tree may be incomplete when [code]ok[/code] is [code]false[/code].
+				- [code]strings[/code]: the value of every [String] and [StringName] literal in the source, in parse order.
+				Every node is a [Dictionary] with at least [code]kind[/code], [code]line[/code] and [code]column[/code].
+				A class node has [code]name[/code] (the [code]class_name[/code] for the root class), [code]extends_path[/code], [code]extends_class[/code] (dotted), [code]abstract[/code], [code]icon_path[/code], [code]tool[/code] (root class only), [code]annotations[/code], [code]members[/code] (variables, constants and export groups), [code]functions[/code], [code]signals[/code], [code]enums[/code], [code]inner_classes[/code] and [code]calls[/code] (call expressions outside functions, such as in member initializers).
+				A variable or constant member has [code]name[/code], [code]type[/code] (the declared type text, empty if none), [code]inferred[/code] ([code]:=[/code]), [code]const[/code], [code]static[/code], [code]onready[/code], [code]exported[/code], [code]annotations[/code], [code]initializer[/code] and, for variables, [code]property[/code] with [code]setter[/code] and [code]getter[/code].
+				A function node has [code]name[/code], [code]end_line[/code], [code]static[/code], [code]abstract[/code], [code]coroutine[/code], [code]annotations[/code], [code]params[/code] (each with [code]name[/code], [code]type[/code], [code]inferred[/code] and [code]default[/code]), [code]rest_param[/code], [code]return_type[/code], [code]body[/code] (statement nodes) and [code]calls[/code] (every call expression in the function, including in its lambdas, in source order).
+				An annotation node has [code]name[/code] (including the [code]@[/code]) and [code]args[/code] (expression nodes). [code]@tool[/code], [code]@icon[/code] and [code]@static_unload[/code] on the script are consumed by the parser and are reported through [code]tool[/code] and [code]icon_path[/code] instead.
+				Expression nodes have a [code]kind[/code] such as [code]"literal"[/code], [code]"identifier"[/code], [code]"self"[/code], [code]"attribute"[/code], [code]"subscript"[/code], [code]"call"[/code], [code]"array"[/code], [code]"dictionary"[/code], [code]"unary_op"[/code], [code]"binary_op"[/code], [code]"ternary_op"[/code], [code]"assignment"[/code], [code]"await"[/code], [code]"cast"[/code], [code]"type_test"[/code], [code]"preload"[/code], [code]"get_node"[/code] or [code]"lambda"[/code]. An expression that can be folded to a constant from literals alone has a [code]value[/code] key. Identifier and attribute chains made only of identifiers and [code]self[/code] have a dotted [code]path[/code], such as [code]"CONST.GROUP_SAVEABLE"[/code]. A call node has [code]name[/code] (the called function name), [code]callee[/code], [code]base[/code] (for method calls), [code]path[/code] (when the callee has one), [code]super[/code] and [code]args[/code].
+				[param path] is only used to identify the script in errors and for warning settings.
+			</description>
+		</method>
+	</methods>
+</class>
