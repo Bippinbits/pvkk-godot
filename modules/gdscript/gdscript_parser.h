@@ -1260,6 +1260,8 @@ public:
 
 		bool exported = false;
 		bool onready = false;
+		bool saved = false;
+		Vector<String> marks;
 		PropertyInfo export_info;
 		int assignments = 0;
 		bool is_static = false;
@@ -1560,6 +1562,8 @@ private:
 	bool warning_ignore_annotation(AnnotationNode *p_annotation, Node *p_target, ClassNode *p_class);
 	bool warning_ignore_region_annotations(AnnotationNode *p_annotation, Node *p_target, ClassNode *p_class);
 	bool rpc_annotation(AnnotationNode *p_annotation, Node *p_target, ClassNode *p_class);
+	bool save_annotation(AnnotationNode *p_annotation, Node *p_target, ClassNode *p_class);
+	bool mark_annotation(AnnotationNode *p_annotation, Node *p_target, ClassNode *p_class);
 	// Statements.
 	Node *parse_statement();
 	VariableNode *parse_variable(bool p_is_static);

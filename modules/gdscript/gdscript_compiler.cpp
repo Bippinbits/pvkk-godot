@@ -2749,6 +2749,8 @@ Error GDScriptCompiler::_prepare_compilation(GDScript *p_script, const GDScriptP
 	p_script->implicit_ready = nullptr;
 	p_script->static_initializer = nullptr;
 	p_script->rpc_config.clear();
+	p_script->saved_members.clear();
+	p_script->member_marks.clear();
 	p_script->lambda_info.clear();
 
 	p_script->clearing = false;
@@ -2830,6 +2832,8 @@ Error GDScriptCompiler::_prepare_compilation(GDScript *p_script, const GDScriptP
 	// Base script isn't valid because it should not have been compiled yet, but the reference contains relevant info.
 	if (base_type.kind == GDScriptDataType::GDSCRIPT && p_script->base.is_valid()) {
 		p_script->rpc_config = p_script->base->rpc_config.duplicate();
+		p_script->saved_members = p_script->base->saved_members;
+		p_script->member_marks = p_script->base->member_marks;
 	}
 
 	for (int i = 0; i < p_class->members.size(); i++) {
@@ -2884,6 +2888,13 @@ Error GDScriptCompiler::_prepare_compilation(GDScript *p_script, const GDScriptP
 					minfo.index = p_script->member_indices.size();
 					p_script->member_indices[name] = minfo;
 					p_script->members.insert(name);
+				}
+
+				if (variable->saved) {
+					p_script->saved_members.push_back(name);
+				}
+				if (!variable->marks.is_empty()) {
+					p_script->member_marks[name] = variable->marks;
 				}
 
 #ifdef TOOLS_ENABLED

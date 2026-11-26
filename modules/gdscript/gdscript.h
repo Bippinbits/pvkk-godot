@@ -108,6 +108,8 @@ class GDScript : public Script {
 	HashMap<StringName, Ref<GDScript>> subclasses;
 	HashMap<StringName, MethodInfo> _signals;
 	Dictionary rpc_config;
+	PackedStringArray saved_members;
+	HashMap<StringName, PackedStringArray> member_marks;
 
 public:
 	struct LambdaInfo {
@@ -271,6 +273,9 @@ public:
 	bool is_tool() const override { return tool; }
 	bool is_abstract() const override { return _is_abstract; }
 	Ref<GDScript> get_base() const;
+
+	PackedStringArray get_saved_members() const { return saved_members; }
+	PackedStringArray get_member_marks(const StringName &p_member) const;
 
 	const HashMap<StringName, MemberInfo> &debug_get_member_indices() const { return member_indices; }
 	const HashMap<StringName, GDScriptFunction *> &debug_get_member_functions() const; //this is debug only

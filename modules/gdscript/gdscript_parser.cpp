@@ -188,6 +188,9 @@ GDScriptParser::GDScriptParser() {
 		// Networking.
 		// Keep in sync with `rpc_annotation()` and `SceneRPCInterface::_parse_rpc_config()`.
 		register_annotation(MethodInfo("@rpc", PropertyInfo(Variant::STRING, "mode"), PropertyInfo(Variant::STRING, "sync"), PropertyInfo(Variant::STRING, "transfer_mode"), PropertyInfo(Variant::INT, "transfer_channel")), AnnotationInfo::FUNCTION, &GDScriptParser::rpc_annotation, varray("authority", "call_remote", "reliable", 0));
+		// [pvkk] Save system.
+		register_annotation(MethodInfo("@save"), AnnotationInfo::VARIABLE, &GDScriptParser::save_annotation);
+		register_annotation(MethodInfo("@m", PropertyInfo(Variant::STRING, "mark")), AnnotationInfo::VARIABLE, &GDScriptParser::mark_annotation);
 	}
 
 #ifdef DEBUG_ENABLED
@@ -5250,6 +5253,53 @@ bool GDScriptParser::rpc_annotation(AnnotationNode *p_annotation, Node *p_target
 		}
 	}
 	function->rpc_config = rpc_config;
+	return true;
+}
+
+bool GDScriptParser::save_annotation(AnnotationNode *p_annotation, Node *p_target, ClassNode *p_class) {
+	ERR_FAIL_COND_V_MSG(p_target->type != Node::VARIABLE, false, R"("@save" annotation can only be applied to class variables.)");
+
+	VariableNode *variable = static_cast<VariableNode *>(p_target);
+	if (variable->is_static) {
+		push_error(R"("@save" annotation cannot be applied to a static variable.)", p_annotation);
+		return false;
+	}
+	if (variable->saved) {
+		push_error(R"("@save" annotation can only be used once per variable.)", p_annotation);
+		return false;
+	}
+	if (variable->datatype_specifier == nullptr) {
+		if (!variable->infer_datatype) {
+			push_error(vformat(R"("@save" annotation requires variable "%s" to have a static type. Add a type hint or infer it with ":=".)", variable->identifier->name), p_annotation);
+			return false;
+		}
+		const DataType inferred_type = variable->get_datatype();
+		if (!inferred_type.is_hard_type() || inferred_type.is_variant()) {
+			push_error(vformat(R"("@save" annotation cannot infer a static type for variable "%s". Add an explicit type hint.)", variable->identifier->name), p_annotation);
+			return false;
+		}
+	}
+	variable->saved = true;
+	return true;
+}
+
+bool GDScriptParser::mark_annotation(AnnotationNode *p_annotation, Node *p_target, ClassNode *p_class) {
+	ERR_FAIL_COND_V_MSG(p_target->type != Node::VARIABLE, false, R"("@m" annotation can only be applied to class variables.)");
+	if (p_annotation->resolved_arguments.is_empty()) {
+		return false;
+	}
+
+	VariableNode *variable = static_cast<VariableNode *>(p_target);
+	const String mark = p_annotation->resolved_arguments[0];
+	if (mark.is_empty()) {
+		push_error(R"("@m" annotation requires a non-empty mark.)", p_annotation->arguments[0]);
+		return false;
+	}
+	if (variable->marks.has(mark)) {
+		push_error(vformat(R"(Mark "%s" is already applied to variable "%s".)", mark, variable->identifier->name), p_annotation);
+		return false;
+	}
+	variable->marks.push_back(mark);
 	return true;
 }
 

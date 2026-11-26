@@ -12,6 +12,19 @@
 		<link title="GDScript documentation index">$DOCS_URL/tutorials/scripting/gdscript/index.html</link>
 	</tutorials>
 	<methods>
+		<method name="get_member_marks" qualifiers="const">
+			<return type="PackedStringArray" />
+			<param index="0" name="member" type="StringName" />
+			<description>
+				Returns the marks applied to the class variable [param member] with the [annotation @GDScript.@m] annotation, in declaration order. Variables of base scripts are included. Returns an empty array if the variable has no marks or does not exist.
+			</description>
+		</method>
+		<method name="get_saved_members" qualifiers="const">
+			<return type="PackedStringArray" />
+			<description>
+				Returns the names of the class variables marked with the [annotation @GDScript.@save] annotation. Variables of base scripts are included and come first, followed by this script's variables in declaration order.
+			</description>
+		</method>
 		<method name="new" qualifiers="vararg">
 			<return type="Variant" />
 			<description>

@@ -775,6 +775,16 @@
 				[b]Note:[/b] Unlike most other annotations, the argument of the [annotation @icon] annotation must be a string literal (constant expressions are not supported).
 			</description>
 		</annotation>
+		<annotation name="@m">
+			<return type="void" />
+			<param index="0" name="mark" type="String" />
+			<description>
+				Attaches the constant string [param mark] to the following class variable. A variable can have several different marks, but the same mark can only be applied once. The marks are readable at runtime with [method GDScript.get_member_marks].
+				[codeblock]
+				@save @m("transient") @m("ui") var hovered_slot: int = -1
+				[/codeblock]
+			</description>
+		</annotation>
 		<annotation name="@onready">
 			<return type="void" />
 			<description>
@@ -808,6 +818,16 @@
 				func fn_default(): pass
 				[/codeblock]
 				[b]Note:[/b] Methods annotated with [annotation @rpc] cannot receive objects which define required parameters in [method Object._init]. See [method Object._init] for more details.
+			</description>
+		</annotation>
+		<annotation name="@save">
+			<return type="void" />
+			<description>
+				Marks the following class variable as saved. The variable must be statically typed, either with an explicit type hint or with an inferred type ([code]:=[/code]) that is known at compile time and is not [Variant]. [code]@save[/code] cannot be applied to static variables. The saved variables are readable at runtime with [method GDScript.get_saved_members].
+				[codeblock]
+				@save var health: int = 100
+				@save var position_offset := Vector2.ZERO
+				[/codeblock]
 			</description>
 		</annotation>
 		<annotation name="@static_unload">

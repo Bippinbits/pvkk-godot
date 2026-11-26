@@ -1072,6 +1072,13 @@ void GDScript::_get_property_list(List<PropertyInfo> *p_properties) const {
 
 void GDScript::_bind_methods() {
 	ClassDB::bind_vararg_method(METHOD_FLAGS_DEFAULT, "new", &GDScript::_new, MethodInfo("new"));
+	ClassDB::bind_method(D_METHOD("get_saved_members"), &GDScript::get_saved_members);
+	ClassDB::bind_method(D_METHOD("get_member_marks", "member"), &GDScript::get_member_marks);
+}
+
+PackedStringArray GDScript::get_member_marks(const StringName &p_member) const {
+	const PackedStringArray *marks = member_marks.getptr(p_member);
+	return marks ? *marks : PackedStringArray();
 }
 
 void GDScript::set_path_cache(const String &p_path) {

@@ -1,0 +1,5 @@
+GDTEST_ANALYZER_ERROR
+>> ERROR at line 1: "@save" annotation requires variable "untyped" to have a static type. Add a type hint or infer it with ":=".
+>> ERROR at line 7: "@save" annotation cannot infer a static type for variable "inferred_variant". Add an explicit type hint.
+>> ERROR at line 8: "@save" annotation cannot be applied to a static variable.
+>> ERROR at line 9: "@save" annotation can only be used once per variable.
