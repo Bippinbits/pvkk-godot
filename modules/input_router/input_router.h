@@ -80,11 +80,13 @@ public:
 	void set_trigger_wake_threshold(float p_threshold);
 	float get_trigger_wake_threshold() const;
 
-	// Pad identity.
+	// Pad identity and prompts.
 	PadFamily get_pad_family(int p_pad = -1) const; // [any]
 	String get_pad_name(int p_pad = -1) const;
+	static PadFamily detect_pad_family(int p_pad); // From Input: router off and editor too.
 	static String get_input_label(int p_input, PadFamily p_family);
-	Ref<Texture2D> get_input_glyph(int p_input, PadFamily p_family);
+	Ref<GlyphFontMap> get_glyph_map() const;
+	String get_input_glyph(int p_input, PadFamily p_family) const;
 
 	// Captured pad state. p_pad -1: active pad.
 	bool is_pad_button_down(JoyButton p_button, int p_pad = -1) const; // [any]

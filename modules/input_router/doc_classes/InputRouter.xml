@@ -90,6 +90,13 @@
 				Restores every binding's authored input and gate.
 			</description>
 		</method>
+		<method name="detect_pad_family" qualifiers="static">
+			<return type="int" enum="InputRouter.PadFamily" />
+			<param index="0" name="pad" type="int" />
+			<description>
+				Returns the family of [param pad], read straight from [Input] by the same rules as [method get_pad_family]. Works with the router off and in the editor. Returns [constant PAD_FAMILY_GENERIC] for a pad that is not connected.
+			</description>
+		</method>
 		<method name="detach">
 			<return type="void" />
 			<param index="0" name="handle" type="int" />
@@ -145,12 +152,18 @@
 				Returns the context path, outer to inner: base contexts, then pushed ones.
 			</description>
 		</method>
-		<method name="get_input_glyph">
-			<return type="Texture2D" />
+		<method name="get_glyph_map" qualifiers="const">
+			<return type="GlyphFontMap" />
+			<description>
+				Returns the [GlyphFontMap] at [member ProjectSettings.input_devices/router/glyph_map], loaded on first use, or [code]null[/code] if none is set. In the editor a changed path takes effect on the next call.
+			</description>
+		</method>
+		<method name="get_input_glyph" qualifiers="const">
+			<return type="String" />
 			<param index="0" name="input" type="int" />
 			<param index="1" name="family" type="int" enum="InputRouter.PadFamily" />
 			<description>
-				Returns the prompt texture for input slot [param input] in [param family]'s style, from the [GamepadGlyphProvider] at [member ProjectSettings.input_devices/router/glyph_provider]. Returns [code]null[/code] if no provider is set or it has no glyph.
+				Returns the prompt glyph for input slot [param input] in [param family]'s glyph set, a one-character [String] to draw with the map's fonts. See [method GlyphFontMap.get_input_glyph]. Empty if no glyph map is set or it has no glyph.
 			</description>
 		</method>
 		<method name="get_input_label" qualifiers="static">
@@ -220,7 +233,7 @@
 		<method name="get_routes" qualifiers="const">
 			<return type="Dictionary[]" />
 			<description>
-				Returns what each physical input reaches on the current path: per input its gated bindings, inner context first, then the ungated binding that wins it, then the sequences being watched. Each entry is [code]{input, label, gate, gate_input, binding_label, context, id, action, trigger, handle, fallback}[/code]: [code]label[/code] and [code]gate[/code] are the input and gate names in the active pad's family, [code]gate_input[/code] is the gate's button slot ([code]-1[/code] for none), [code]binding_label[/code] is [member RouteBindingResource.label], and [code]fallback[/code] is the input's [enum GamepadContext.Fallback] on this path ([code]-1[/code] for a sequence). For debug overlays and prompts.
+				Returns what each physical input reaches on the current path: per input its gated bindings, inner context first, then the ungated binding that wins it, then the sequences being watched. Each entry is [code]{input, label, glyph, gate, gate_glyph, gate_input, binding_label, context, id, action, trigger, handle, fallback}[/code]: [code]label[/code] and [code]gate[/code] are the input and gate names in the active pad's family, [code]glyph[/code] and [code]gate_glyph[/code] their glyphs from [method get_glyph_map] (empty without one), [code]gate_input[/code] is the gate's button slot ([code]-1[/code] for none), [code]binding_label[/code] is [member RouteBindingResource.label], and [code]fallback[/code] is the input's [enum GamepadContext.Fallback] on this path ([code]-1[/code] for a sequence). For debug overlays and prompts.
 			</description>
 		</method>
 		<method name="get_scheme" qualifiers="const">
@@ -250,7 +263,7 @@
 		<method name="get_trace">
 			<return type="Dictionary[]" />
 			<description>
-				Returns the trace records since the last call, oldest first, and empties the trace. Each record is [code]{usec, frame, path, context, id, pad, input, label, phase, outcome, value}[/code]. [code]outcome[/code] is one of [code]"routed"[/code], [code]"passed"[/code], [code]"swallowed"[/code], [code]"suppressed"[/code], [code]"dropped_switch"[/code], [code]"sequence_abandoned"[/code], [code]"switch"[/code] or [code]"canceled"[/code]. [code]path[/code] is the context path at the time, while it is still among the last 32 paths. See [method set_trace_enabled].
+				Returns the trace records since the last call, oldest first, and empties the trace. Each record is [code]{usec, frame, path, context, id, pad, input, label, glyph, phase, outcome, value}[/code]; [code]glyph[/code] is the input's glyph from [method get_glyph_map], empty without one. [code]outcome[/code] is one of [code]"routed"[/code], [code]"passed"[/code], [code]"swallowed"[/code], [code]"suppressed"[/code], [code]"dropped_switch"[/code], [code]"sequence_abandoned"[/code], [code]"switch"[/code] or [code]"canceled"[/code]. [code]path[/code] is the context path at the time, while it is still among the last 32 paths. See [method set_trace_enabled].
 			</description>
 		</method>
 		<method name="get_trigger_wake_threshold" qualifiers="const">

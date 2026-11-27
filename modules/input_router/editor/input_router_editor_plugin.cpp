@@ -22,6 +22,24 @@ using namespace InputRouterInternal;
 static const char *FAMILY_NAMES[] = { "Xbox", "PlayStation", "Nintendo", "Steam Deck" };
 static const int FAMILIES[] = { InputRouter::PAD_FAMILY_XBOX, InputRouter::PAD_FAMILY_PLAYSTATION, InputRouter::PAD_FAMILY_NINTENDO, InputRouter::PAD_FAMILY_STEAM };
 static const char *PRESET_NAMES[] = { "Linear", "Smooth", "Precise", "Aggressive" };
+static constexpr float GLYPH_SCALE = 1.6f; // Over label text: glyphs stand about 2/3 em tall.
+static constexpr float PREVIEW_GLYPH_SCALE = 2.5f;
+
+// The project's glyph map (input_devices/router/glyph_map), or null.
+static Ref<GlyphFontMap> glyph_map() {
+	InputRouter *router = InputRouter::get_singleton();
+	return router ? router->get_glyph_map() : Ref<GlyphFontMap>();
+}
+
+// Gate then input glyph for p_family; empty when either has none.
+static String binding_glyphs(const GlyphFontMap &p_map, uint8_t p_input, uint8_t p_gate, int p_family) {
+	const String input = p_input == NONE ? String() : p_map.get_input_glyph(p_input, p_family);
+	if (p_gate == NONE || input.is_empty()) {
+		return input;
+	}
+	const String gate = p_map.get_input_glyph(p_gate, p_family);
+	return gate.is_empty() ? String() : gate + input;
+}
 
 static String fire_names(uint32_t p_bits) {
 	static const struct {
@@ -47,6 +65,27 @@ static void add_cell(Node *p_grid, const String &p_text) {
 	label->set_text(p_text);
 	label->set_h_size_flags(Control::SIZE_EXPAND_FILL);
 	p_grid->add_child(label);
+}
+
+// The glyph in p_font, then the text. Text alone without a glyph or font.
+static void add_glyph_cell(Node *p_grid, const String &p_glyph, const String &p_text, const Ref<Font> &p_font, int p_size) {
+	if (p_glyph.is_empty() || p_font.is_null()) {
+		add_cell(p_grid, p_text);
+		return;
+	}
+	HBoxContainer *cell = memnew(HBoxContainer);
+	cell->set_h_size_flags(Control::SIZE_EXPAND_FILL);
+	Label *glyph = memnew(Label);
+	glyph->set_text(p_glyph);
+	glyph->set_vertical_alignment(VERTICAL_ALIGNMENT_CENTER);
+	glyph->add_theme_font_override(SNAME("font"), p_font);
+	glyph->add_theme_font_size_override(SNAME("font_size"), p_size);
+	cell->add_child(glyph);
+	Label *label = memnew(Label);
+	label->set_text(p_text);
+	label->set_vertical_alignment(VERTICAL_ALIGNMENT_CENTER);
+	cell->add_child(label);
+	p_grid->add_child(cell);
 }
 
 // Do sets p_value, undo restores the current one.
@@ -187,7 +226,8 @@ void InputRouterPadPreview::_draw_response(const Rect2 &p_rect) {
 	draw_string(font, Vector2(p_rect.position.x + 6 * EDSCALE, p_rect.get_end().y - 6 * EDSCALE), line, HORIZONTAL_ALIGNMENT_LEFT, p_rect.size.x - 12 * EDSCALE, font_size, text);
 }
 
-// Pad name, then the stick with its rings, or raw and shaped bars for an axis or button.
+// Pad name and the binding's glyphs in that pad's family, then the stick with its rings, or raw
+// and shaped bars for an axis or button.
 void InputRouterPadPreview::_draw_stick(const Rect2 &p_rect) {
 	const Ref<Font> font = get_theme_font(SNAME("font"), SNAME("Label"));
 	const int font_size = get_theme_font_size(SNAME("font_size"), SNAME("Label"));
@@ -203,6 +243,13 @@ void InputRouterPadPreview::_draw_stick(const Rect2 &p_rect) {
 	draw_string(font, p_rect.position + Vector2(0, font_size), title, HORIZONTAL_ALIGNMENT_LEFT, p_rect.size.x, font_size, text);
 	if (!valid) {
 		return;
+	}
+	const Ref<GlyphFontMap> map = glyph_map();
+	const Ref<Font> glyph_font = map.is_valid() ? map->get_default_font() : Ref<Font>();
+	if (glyph_font.is_valid()) {
+		const int glyph_size = (int)(font_size * PREVIEW_GLYPH_SCALE);
+		const String glyphs = binding_glyphs(**map, row.input, row.gate, InputRouter::detect_pad_family(p));
+		draw_string(glyph_font, p_rect.position + Vector2(0, font_size + glyph_size), glyphs, HORIZONTAL_ALIGNMENT_RIGHT, p_rect.size.x, glyph_size, text);
 	}
 	const Rect2 area(p_rect.position + Vector2(0, font_size + 6 * EDSCALE), p_rect.size - Vector2(0, font_size + 6 * EDSCALE));
 	if (is_stick_slot(row.input)) {
@@ -290,7 +337,7 @@ void InputRouterBindingPanel::set_binding(const Ref<RouteBindingResource> &p_bin
 	_update();
 }
 
-// Summary, then the input and gate as each pad family names them.
+// Summary, then the input and gate as each pad family shows and names them.
 void InputRouterBindingPanel::_update() {
 	if (binding.is_null()) {
 		return;
@@ -301,6 +348,9 @@ void InputRouterBindingPanel::_update() {
 		labels->remove_child(child);
 		memdelete(child);
 	}
+	const Ref<GlyphFontMap> map = glyph_map();
+	const Ref<Font> glyph_font = map.is_valid() ? map->get_default_font() : Ref<Font>();
+	const int glyph_size = (int)(get_theme_font_size(SNAME("font_size"), SNAME("Label")) * GLYPH_SCALE);
 	add_cell(labels, String());
 	for (const char *name : FAMILY_NAMES) {
 		add_cell(labels, name);
@@ -308,12 +358,15 @@ void InputRouterBindingPanel::_update() {
 	const uint8_t slot = preview->get_input();
 	add_cell(labels, "Input");
 	for (int family : FAMILIES) {
-		add_cell(labels, slot == NONE ? String("?") : input_label(slot, family));
+		const String glyph = map.is_valid() ? binding_glyphs(**map, slot, NONE, family) : String();
+		add_glyph_cell(labels, glyph, slot == NONE ? String("?") : input_label(slot, family), glyph_font, glyph_size);
 	}
 	if (binding->get_gate() != JoyButton::INVALID) {
+		const uint8_t gate = button_slot(binding->get_gate());
 		add_cell(labels, "Gate");
 		for (int family : FAMILIES) {
-			add_cell(labels, button_label(binding->get_gate(), family));
+			const String glyph = map.is_valid() ? binding_glyphs(**map, gate, NONE, family) : String();
+			add_glyph_cell(labels, glyph, button_label(binding->get_gate(), family), glyph_font, glyph_size);
 		}
 	}
 }
@@ -444,6 +497,9 @@ void InputRouterBindingPanel::_notification(int p_what) {
 		case NOTIFICATION_EXIT_TREE:
 			Input::get_singleton()->disconnect(SNAME("joy_connection_changed"), callable_mp(this, &InputRouterBindingPanel::_refresh_pads).unbind(2));
 			break;
+		case NOTIFICATION_THEME_CHANGED:
+			_update();
+			break;
 		case NOTIFICATION_INTERNAL_PROCESS:
 			if (listen->is_pressed()) {
 				_poll_listen();
@@ -456,12 +512,13 @@ void InputRouterBindingPanel::_notification(int p_what) {
 
 InputRouterMapPanel::InputRouterMapPanel() {
 	tree = memnew(Tree);
-	tree->set_columns(4);
+	tree->set_columns(5);
 	tree->set_column_titles_visible(true);
 	tree->set_column_title(0, "Id");
 	tree->set_column_title(1, "Binding");
-	tree->set_column_title(2, "Action");
-	tree->set_column_title(3, "Issues");
+	tree->set_column_title(2, "Pads");
+	tree->set_column_title(3, "Action");
+	tree->set_column_title(4, "Issues");
 	tree->set_hide_root(true);
 	tree->set_custom_minimum_size(Size2(0, 160) * EDSCALE);
 	add_child(tree);
@@ -475,12 +532,37 @@ void InputRouterMapPanel::set_map(const Ref<GamepadMap> &p_map) {
 	_update();
 }
 
-// One row per binding, with check_maps() findings for this map alone.
+// Each family's gate and input glyphs, Xbox to Steam Deck. Empty if the binding cannot compile.
+static String family_glyphs(const GlyphFontMap &p_map, const RouteBindingResource &p_binding) {
+	RouteBinding row;
+	float lut[LUT_STRIDE];
+	bool has_lut = false;
+	String error;
+	if (!compile_binding(p_binding, row, lut, has_lut, error)) {
+		return String();
+	}
+	PackedStringArray parts;
+	for (int family : FAMILIES) {
+		parts.push_back(binding_glyphs(p_map, row.input, row.gate, family));
+	}
+	return String("  ").join(parts);
+}
+
+void InputRouterMapPanel::_notification(int p_what) {
+	if (p_what == NOTIFICATION_THEME_CHANGED) {
+		_update();
+	}
+}
+
+// One row per binding: its glyphs per family and the check_maps() findings for this map alone.
 void InputRouterMapPanel::_update() {
 	tree->clear();
 	if (map.is_null()) {
 		return;
 	}
+	const Ref<GlyphFontMap> glyphs = glyph_map();
+	const Ref<Font> glyph_font = glyphs.is_valid() ? glyphs->get_default_font() : Ref<Font>();
+	const int glyph_size = (int)(get_theme_font_size(SNAME("font_size"), SNAME("Tree")) * GLYPH_SCALE);
 	TreeItem *root = tree->create_item();
 	TypedArray<GamepadContext> contexts;
 	if (map->get_context().is_valid()) {
@@ -506,7 +588,12 @@ void InputRouterMapPanel::_update() {
 		const String id = b->get_id();
 		item->set_text(0, id);
 		item->set_text(1, b->describe());
-		item->set_text(2, b->get_action());
+		if (glyph_font.is_valid()) {
+			item->set_text(2, family_glyphs(**glyphs, **b));
+			item->set_custom_font(2, glyph_font);
+			item->set_custom_font_size(2, glyph_size);
+		}
+		item->set_text(3, b->get_action());
 		String issues;
 		bool error = false;
 		for (int f = 0; f < findings.size(); f++) {
@@ -516,9 +603,9 @@ void InputRouterMapPanel::_update() {
 				error = error || String(d["severity"]) == "error";
 			}
 		}
-		item->set_text(3, issues);
+		item->set_text(4, issues);
 		if (error) {
-			item->set_custom_color(3, Color(1, 0.45f, 0.45f));
+			item->set_custom_color(4, Color(1, 0.45f, 0.45f));
 		}
 	}
 }

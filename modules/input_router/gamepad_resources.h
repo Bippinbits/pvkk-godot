@@ -6,10 +6,9 @@
 
 #include "core/input/input_enums.h"
 #include "core/io/resource.h"
-#include "core/object/gdvirtual.gen.inc"
 #include "core/variant/typed_array.h"
 #include "scene/resources/curve.h"
-#include "scene/resources/texture.h"
+#include "scene/resources/font.h"
 
 class GamepadContext : public Resource {
 	GDCLASS(GamepadContext, Resource);
@@ -212,16 +211,42 @@ public:
 	Dictionary get_data() const { return data; }
 };
 
-class GamepadGlyphProvider : public Resource {
-	GDCLASS(GamepadGlyphProvider, Resource);
+// Prompt glyphs: fonts plus glyph name -> codepoint tables. Each pad family picks a glyph set;
+// a set names one glyph per input slot. Every font uses the same codepoints.
+class GlyphFontMap : public Resource {
+	GDCLASS(GlyphFontMap, Resource);
+
+	Dictionary fonts; // Font id -> Font.
+	Dictionary font_sets; // Font id -> PackedStringArray of the sets it holds.
+	Dictionary sets; // Set id -> {glyph name: codepoint}.
+	Dictionary pad_inputs; // Set id -> PackedStringArray, a glyph name per input slot.
+	PackedStringArray family_sets; // InputRouter::PadFamily -> set id.
+	StringName default_font_id; // The editor and debug views draw with it; holds every pad set.
 
 protected:
 	static void _bind_methods();
 
-	GDVIRTUAL2RC(Ref<Texture2D>, _get_glyph, int, int)
-
 public:
-	Ref<Texture2D> get_glyph(int p_family, int p_input) const;
+	int get_codepoint(const String &p_set, const String &p_glyph) const;
+	String get_glyph(const String &p_set, const String &p_glyph) const;
+	String get_family_set(int p_family) const;
+	String get_set_input_glyph(const String &p_set, int p_input) const;
+	String get_input_glyph(int p_input, int p_family) const;
+	Ref<Font> get_font(const StringName &p_font) const;
+	Ref<Font> get_default_font() const;
+
+	void set_fonts(const Dictionary &p_fonts);
+	Dictionary get_fonts() const { return fonts; }
+	void set_font_sets(const Dictionary &p_font_sets);
+	Dictionary get_font_sets() const { return font_sets; }
+	void set_sets(const Dictionary &p_sets);
+	Dictionary get_sets() const { return sets; }
+	void set_pad_inputs(const Dictionary &p_pad_inputs);
+	Dictionary get_pad_inputs() const { return pad_inputs; }
+	void set_family_sets(const PackedStringArray &p_family_sets);
+	PackedStringArray get_family_sets() const { return family_sets; }
+	void set_default_font_id(const StringName &p_font);
+	StringName get_default_font_id() const { return default_font_id; }
 };
 
 VARIANT_ENUM_CAST(GamepadContext::Fallback);

@@ -147,6 +147,40 @@ TEST_CASE("[InputRouter] Labels are positional per family") {
 	CHECK(input_label(button_slot(JoyButton::PADDLE1), InputRouter::PAD_FAMILY_STEAM) == "R4");
 }
 
+TEST_CASE("[InputRouter] The glyph map resolves input slots through each family's set") {
+	Ref<GlyphFontMap> map;
+	map.instantiate();
+	Dictionary xbox;
+	xbox["xbox_button_a"] = 0xE604;
+	Dictionary playstation;
+	playstation["playstation_button_cross"] = 0xE800;
+	Dictionary sets;
+	sets["xbox"] = xbox;
+	sets["playstation"] = playstation;
+	map->set_sets(sets);
+	PackedStringArray xbox_inputs;
+	xbox_inputs.resize(INPUT_COUNT);
+	xbox_inputs.set(button_slot(JoyButton::A), "xbox_button_a");
+	xbox_inputs.set(button_slot(JoyButton::B), "xbox_button_missing");
+	PackedStringArray playstation_inputs;
+	playstation_inputs.resize(INPUT_COUNT);
+	playstation_inputs.set(button_slot(JoyButton::A), "playstation_button_cross");
+	Dictionary pad_inputs;
+	pad_inputs["xbox"] = xbox_inputs;
+	pad_inputs["playstation"] = playstation_inputs;
+	map->set_pad_inputs(pad_inputs);
+	map->set_family_sets({ "xbox", "xbox", "playstation" });
+
+	CHECK(map->get_codepoint("xbox", "xbox_button_a") == 0xE604);
+	CHECK(map->get_input_glyph(button_slot(JoyButton::A), InputRouter::PAD_FAMILY_GENERIC) == String::chr(0xE604));
+	CHECK(map->get_input_glyph(button_slot(JoyButton::A), InputRouter::PAD_FAMILY_PLAYSTATION) == String::chr(0xE800));
+	CHECK(map->get_input_glyph(button_slot(JoyButton::B), InputRouter::PAD_FAMILY_XBOX).is_empty()); // Name not in the set.
+	CHECK(map->get_input_glyph(button_slot(JoyButton::X), InputRouter::PAD_FAMILY_XBOX).is_empty()); // No name.
+	CHECK(map->get_input_glyph(button_slot(JoyButton::A), InputRouter::PAD_FAMILY_NINTENDO).is_empty()); // No set.
+	CHECK(map->get_input_glyph(INPUT_COUNT, InputRouter::PAD_FAMILY_XBOX).is_empty());
+	CHECK(map->get_default_font().is_null());
+}
+
 TEST_CASE("[InputRouter] Rows survive a byte copy; tuning ignores placement") {
 	RouteBinding row;
 	row.input = axis_slot(JoyAxis::TRIGGER_RIGHT, 1);

@@ -47,7 +47,9 @@ void InputRouter::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_pad_name", "pad"), &InputRouter::get_pad_name, DEFVAL(-1));
 	ClassDB::bind_method(D_METHOD("get_pad_info", "pad"), &InputRouter::_get_pad_info, DEFVAL(-1));
 	ClassDB::bind_method(D_METHOD("get_connected_pads"), &InputRouter::_get_connected_pads);
+	ClassDB::bind_static_method("InputRouter", D_METHOD("detect_pad_family", "pad"), &InputRouter::detect_pad_family);
 	ClassDB::bind_static_method("InputRouter", D_METHOD("get_input_label", "input", "family"), &InputRouter::get_input_label);
+	ClassDB::bind_method(D_METHOD("get_glyph_map"), &InputRouter::get_glyph_map);
 	ClassDB::bind_method(D_METHOD("get_input_glyph", "input", "family"), &InputRouter::get_input_glyph);
 	ClassDB::bind_static_method("InputRouter", D_METHOD("button_input", "button"), &InputRouter::_button_input);
 	ClassDB::bind_static_method("InputRouter", D_METHOD("axis_input", "axis", "direction"), &InputRouter::_axis_input);

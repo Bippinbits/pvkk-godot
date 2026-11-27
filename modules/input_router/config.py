@@ -10,8 +10,8 @@ def get_doc_classes():
     return [
         "GamepadBakedMaps",
         "GamepadContext",
-        "GamepadGlyphProvider",
         "GamepadMap",
+        "GlyphFontMap",
         "InputRouter",
         "RouteBindingResource",
     ]

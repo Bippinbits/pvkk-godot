@@ -19,7 +19,7 @@ void initialize_input_router_module(ModuleInitializationLevel p_level) {
 		GDREGISTER_CLASS(RouteBindingResource);
 		GDREGISTER_CLASS(GamepadMap);
 		GDREGISTER_CLASS(GamepadBakedMaps);
-		GDREGISTER_CLASS(GamepadGlyphProvider);
+		GDREGISTER_CLASS(GlyphFontMap);
 		GDREGISTER_ABSTRACT_CLASS(InputRouter);
 
 		input_router = memnew(InputRouter);

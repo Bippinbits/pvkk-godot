@@ -507,8 +507,9 @@ struct State {
 	uint32_t trace_count = 0;
 	LocalVector<Pair<uint32_t, PackedStringArray>> path_history;
 	uint32_t path_history_head = 0;
-	Ref<GamepadGlyphProvider> glyph_provider;
-	bool glyph_provider_loaded = false;
+	Ref<GlyphFontMap> glyph_map;
+	String glyph_map_path; // Editor builds reload when the setting changes.
+	bool glyph_map_loaded = false;
 	InputRouter *owner = nullptr;
 #ifdef TOOLS_ENABLED
 	Callable binding_changed; // owner's _binding_changed(), unbound.
@@ -3022,7 +3023,7 @@ InputRouter::InputRouter() {
 #endif
 	GLOBAL_DEF("input_devices/router/enabled", false);
 	GLOBAL_DEF(PropertyInfo(Variant::STRING, "input_devices/router/baked_map", PROPERTY_HINT_FILE, "*.res"), "res://gamepad_baked_maps.res");
-	GLOBAL_DEF(PropertyInfo(Variant::STRING, "input_devices/router/glyph_provider", PROPERTY_HINT_FILE, "*.tres,*.res"), "");
+	GLOBAL_DEF(PropertyInfo(Variant::STRING, "input_devices/router/glyph_map", PROPERTY_HINT_FILE, "*.tres,*.res"), "");
 	if (MessageQueue::get_main_singleton()) {
 		MessageQueue::get_main_singleton()->push_callable(callable_mp(this, &InputRouter::_auto_enable));
 	}
@@ -3183,17 +3184,36 @@ String InputRouter::get_input_label(int p_input, PadFamily p_family) {
 	return input_label((uint8_t)p_input, p_family);
 }
 
-// The project's GamepadGlyphProvider (input_devices/router/glyph_provider), loaded once.
-Ref<Texture2D> InputRouter::get_input_glyph(int p_input, PadFamily p_family) {
-	MAIN_OR_RETURN(Ref<Texture2D>());
-	if (!s->glyph_provider_loaded) {
-		s->glyph_provider_loaded = true;
-		const String file = GLOBAL_GET("input_devices/router/glyph_provider");
-		if (!file.is_empty()) {
-			s->glyph_provider = ResourceLoader::load(file);
-		}
+// Straight from Input's joy info, so it answers with the router off and in the editor. A pad
+// that is not connected reads as GENERIC.
+InputRouter::PadFamily InputRouter::detect_pad_family(int p_pad) {
+	if (p_pad < 0 || p_pad >= Input::JOYPADS_MAX) {
+		return PAD_FAMILY_GENERIC;
 	}
-	return s->glyph_provider.is_valid() ? s->glyph_provider->get_glyph(p_family, p_input) : Ref<Texture2D>();
+	return (PadFamily)family_for(PadInfo::from_input(p_pad));
+}
+
+// The project's GlyphFontMap (input_devices/router/glyph_map), loaded on first use. Editor builds
+// recheck the setting so a new path applies without a restart.
+Ref<GlyphFontMap> InputRouter::get_glyph_map() const {
+	MAIN_OR_RETURN(Ref<GlyphFontMap>());
+	bool stale = !s->glyph_map_loaded;
+#ifdef TOOLS_ENABLED
+	stale = stale || String(GLOBAL_GET("input_devices/router/glyph_map")) != s->glyph_map_path;
+#endif
+	if (stale) {
+		s->glyph_map_loaded = true;
+		s->glyph_map_path = GLOBAL_GET("input_devices/router/glyph_map");
+		s->glyph_map = s->glyph_map_path.is_empty() ? Ref<GlyphFontMap>() : Ref<GlyphFontMap>(ResourceLoader::load(s->glyph_map_path));
+		ERR_FAIL_COND_V_MSG(!s->glyph_map_path.is_empty() && s->glyph_map.is_null(), s->glyph_map, vformat("InputRouter: %s is not a GlyphFontMap.", s->glyph_map_path));
+	}
+	return s->glyph_map;
+}
+
+// Input slot p_input in p_family's glyph set; empty without a glyph map or a glyph.
+String InputRouter::get_input_glyph(int p_input, PadFamily p_family) const {
+	const Ref<GlyphFontMap> map = get_glyph_map();
+	return map.is_valid() ? map->get_input_glyph(p_input, p_family) : String();
 }
 
 // --- Captured pad state ---
@@ -3515,12 +3535,14 @@ void InputRouter::clear() {
 	s->path_changed();
 }
 
-// p_fallback: the slot's GamepadContext::Fallback, -1 for a sequence.
-static Dictionary route_dict(const RouteBinding &p_row, const RouteBindingInfo &p_info, const StringName &p_context, int p_family, int p_fallback) {
+// p_fallback: the slot's GamepadContext::Fallback, -1 for a sequence. p_glyphs may be null.
+static Dictionary route_dict(const RouteBinding &p_row, const RouteBindingInfo &p_info, const StringName &p_context, int p_family, int p_fallback, const GlyphFontMap *p_glyphs) {
 	Dictionary d;
 	d["input"] = p_row.input;
 	d["label"] = input_label(p_row.input, p_family);
+	d["glyph"] = p_glyphs ? p_glyphs->get_input_glyph(p_row.input, p_family) : String();
 	d["gate"] = p_row.gate == NONE ? String() : input_label(p_row.gate, p_family);
+	d["gate_glyph"] = p_glyphs && p_row.gate != NONE ? p_glyphs->get_input_glyph(p_row.gate, p_family) : String();
 	d["gate_input"] = p_row.gate == NONE ? -1 : (int)p_row.gate;
 	d["binding_label"] = p_info.label;
 	d["context"] = p_context;
@@ -3542,16 +3564,17 @@ TypedArray<Dictionary> InputRouter::_get_routes() const {
 	const RowTable &rt = s->rows_of(f);
 	const NameTable &nt = s->names_of(f);
 	const int family = f.active_pad >= 0 && (f.live_pads & (1u << f.active_pad)) ? f.pads[f.active_pad].family : PAD_FAMILY_GENERIC;
+	const Ref<GlyphFontMap> glyphs = get_glyph_map();
 	TypedArray<Dictionary> result;
 	for (uint8_t slot = 0; slot < INPUT_COUNT; slot++) {
 		for (uint32_t i = table.slot_first[slot]; i < table.slot_first[slot + 1]; i++) {
 			const uint16_t r = table.active[i];
-			result.push_back(route_dict(rt.rows[r], rt.info[r], nt.contexts[rt.rows[r].context].id, family, table.slot_flags[slot] & SLOT_FALLBACK));
+			result.push_back(route_dict(rt.rows[r], rt.info[r], nt.contexts[rt.rows[r].context].id, family, table.slot_flags[slot] & SLOT_FALLBACK, glyphs.ptr()));
 		}
 	}
 	for (uint32_t i = 0; i < f.sequence_count; i++) {
 		const uint16_t r = f.sequences[i].row;
-		result.push_back(route_dict(rt.rows[r], rt.info[r], nt.contexts[rt.rows[r].context].id, family, -1));
+		result.push_back(route_dict(rt.rows[r], rt.info[r], nt.contexts[rt.rows[r].context].id, family, -1, glyphs.ptr()));
 	}
 	return result;
 }
@@ -3773,6 +3796,7 @@ TypedArray<Dictionary> InputRouter::_get_trace() {
 	const Frame &f = *s->write_state; // Records span frames: names resolve against the newest.
 	const NameTable &nt = s->names();
 	const RowTable &rt = s->rows();
+	const Ref<GlyphFontMap> glyphs = get_glyph_map();
 	for (uint32_t n = 0; n < s->trace_count; n++) {
 		const TraceRecord &r = s->trace[(start + n) % size];
 		Dictionary d;
@@ -3792,7 +3816,9 @@ TypedArray<Dictionary> InputRouter::_get_trace() {
 		d["id"] = r.row >= 0 && r.row < (int)rt.info.size() ? rt.info[r.row].id : StringName();
 		d["pad"] = r.pad;
 		d["input"] = r.input == NONE ? -1 : (int)r.input;
-		d["label"] = r.input == NONE ? String() : input_label(r.input, r.pad >= 0 && (f.live_pads & (1u << r.pad)) ? f.pads[r.pad].family : PAD_FAMILY_GENERIC);
+		const int family = r.pad >= 0 && (f.live_pads & (1u << r.pad)) ? f.pads[r.pad].family : PAD_FAMILY_GENERIC;
+		d["label"] = r.input == NONE ? String() : input_label(r.input, family);
+		d["glyph"] = r.input == NONE || glyphs.is_null() ? String() : glyphs->get_input_glyph(r.input, family);
 		d["phase"] = r.phase;
 		d["outcome"] = OUTCOME_NAMES[MIN(r.outcome, (uint8_t)OUTCOME_CANCELED)];
 		d["value"] = r.value;

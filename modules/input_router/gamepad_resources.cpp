@@ -276,13 +276,83 @@ void GamepadMap::set_bindings(const TypedArray<RouteBindingResource> &p_bindings
 	emit_changed();
 }
 
-// --- GamepadGlyphProvider ---
+// --- GlyphFontMap ---
 
-// p_family: InputRouter::PadFamily. p_input: input slot.
-Ref<Texture2D> GamepadGlyphProvider::get_glyph(int p_family, int p_input) const {
-	Ref<Texture2D> glyph;
-	GDVIRTUAL_CALL(_get_glyph, p_family, p_input, glyph);
-	return glyph;
+// 0 when the set or the glyph is missing.
+int GlyphFontMap::get_codepoint(const String &p_set, const String &p_glyph) const {
+	const Variant *glyphs = sets.getptr(p_set);
+	if (!glyphs || glyphs->get_type() != Variant::DICTIONARY) {
+		return 0;
+	}
+	const Dictionary codes = *glyphs;
+	const Variant *code = codes.getptr(p_glyph);
+	return code ? (int)*code : 0;
+}
+
+// One character, or empty.
+String GlyphFontMap::get_glyph(const String &p_set, const String &p_glyph) const {
+	const int code = get_codepoint(p_set, p_glyph);
+	return code > 0 ? String::chr(code) : String();
+}
+
+// p_family: InputRouter::PadFamily.
+String GlyphFontMap::get_family_set(int p_family) const {
+	return p_family >= 0 && p_family < family_sets.size() ? family_sets[p_family] : String();
+}
+
+// p_input: input slot, as InputRouter::button_input() and its siblings number them.
+String GlyphFontMap::get_set_input_glyph(const String &p_set, int p_input) const {
+	const Variant *names = pad_inputs.getptr(p_set);
+	if (!names || names->get_type() != Variant::PACKED_STRING_ARRAY) {
+		return String();
+	}
+	const PackedStringArray list = *names;
+	if (p_input < 0 || p_input >= list.size() || list[p_input].is_empty()) {
+		return String();
+	}
+	return get_glyph(p_set, list[p_input]);
+}
+
+String GlyphFontMap::get_input_glyph(int p_input, int p_family) const {
+	return get_set_input_glyph(get_family_set(p_family), p_input);
+}
+
+Ref<Font> GlyphFontMap::get_font(const StringName &p_font) const {
+	return fonts.get(p_font, Ref<Font>());
+}
+
+Ref<Font> GlyphFontMap::get_default_font() const {
+	return get_font(default_font_id);
+}
+
+void GlyphFontMap::set_fonts(const Dictionary &p_fonts) {
+	fonts = p_fonts;
+	emit_changed();
+}
+
+void GlyphFontMap::set_font_sets(const Dictionary &p_font_sets) {
+	font_sets = p_font_sets;
+	emit_changed();
+}
+
+void GlyphFontMap::set_sets(const Dictionary &p_sets) {
+	sets = p_sets;
+	emit_changed();
+}
+
+void GlyphFontMap::set_pad_inputs(const Dictionary &p_pad_inputs) {
+	pad_inputs = p_pad_inputs;
+	emit_changed();
+}
+
+void GlyphFontMap::set_family_sets(const PackedStringArray &p_family_sets) {
+	family_sets = p_family_sets;
+	emit_changed();
+}
+
+void GlyphFontMap::set_default_font_id(const StringName &p_font) {
+	default_font_id = p_font;
+	emit_changed();
 }
 
 // --- Bindings ---
@@ -443,8 +513,32 @@ void GamepadBakedMaps::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::DICTIONARY, "data", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_STORAGE), "set_data", "get_data");
 }
 
-void GamepadGlyphProvider::_bind_methods() {
-	ClassDB::bind_method(D_METHOD("get_glyph", "family", "input"), &GamepadGlyphProvider::get_glyph);
+void GlyphFontMap::_bind_methods() {
+	ClassDB::bind_method(D_METHOD("get_codepoint", "set_id", "glyph"), &GlyphFontMap::get_codepoint);
+	ClassDB::bind_method(D_METHOD("get_glyph", "set_id", "glyph"), &GlyphFontMap::get_glyph);
+	ClassDB::bind_method(D_METHOD("get_family_set", "family"), &GlyphFontMap::get_family_set);
+	ClassDB::bind_method(D_METHOD("get_set_input_glyph", "set_id", "input"), &GlyphFontMap::get_set_input_glyph);
+	ClassDB::bind_method(D_METHOD("get_input_glyph", "input", "family"), &GlyphFontMap::get_input_glyph);
+	ClassDB::bind_method(D_METHOD("get_font", "font"), &GlyphFontMap::get_font);
+	ClassDB::bind_method(D_METHOD("get_default_font"), &GlyphFontMap::get_default_font);
 
-	GDVIRTUAL_BIND(_get_glyph, "family", "input");
+	ClassDB::bind_method(D_METHOD("set_fonts", "fonts"), &GlyphFontMap::set_fonts);
+	ClassDB::bind_method(D_METHOD("get_fonts"), &GlyphFontMap::get_fonts);
+	ClassDB::bind_method(D_METHOD("set_font_sets", "font_sets"), &GlyphFontMap::set_font_sets);
+	ClassDB::bind_method(D_METHOD("get_font_sets"), &GlyphFontMap::get_font_sets);
+	ClassDB::bind_method(D_METHOD("set_sets", "sets"), &GlyphFontMap::set_sets);
+	ClassDB::bind_method(D_METHOD("get_sets"), &GlyphFontMap::get_sets);
+	ClassDB::bind_method(D_METHOD("set_pad_inputs", "pad_inputs"), &GlyphFontMap::set_pad_inputs);
+	ClassDB::bind_method(D_METHOD("get_pad_inputs"), &GlyphFontMap::get_pad_inputs);
+	ClassDB::bind_method(D_METHOD("set_family_sets", "family_sets"), &GlyphFontMap::set_family_sets);
+	ClassDB::bind_method(D_METHOD("get_family_sets"), &GlyphFontMap::get_family_sets);
+	ClassDB::bind_method(D_METHOD("set_default_font_id", "font"), &GlyphFontMap::set_default_font_id);
+	ClassDB::bind_method(D_METHOD("get_default_font_id"), &GlyphFontMap::get_default_font_id);
+
+	ADD_PROPERTY(PropertyInfo(Variant::DICTIONARY, "fonts"), "set_fonts", "get_fonts");
+	ADD_PROPERTY(PropertyInfo(Variant::DICTIONARY, "font_sets"), "set_font_sets", "get_font_sets");
+	ADD_PROPERTY(PropertyInfo(Variant::DICTIONARY, "sets"), "set_sets", "get_sets");
+	ADD_PROPERTY(PropertyInfo(Variant::DICTIONARY, "pad_inputs"), "set_pad_inputs", "get_pad_inputs");
+	ADD_PROPERTY(PropertyInfo(Variant::PACKED_STRING_ARRAY, "family_sets"), "set_family_sets", "get_family_sets");
+	ADD_PROPERTY(PropertyInfo(Variant::STRING_NAME, "default_font_id"), "set_default_font_id", "get_default_font_id");
 }

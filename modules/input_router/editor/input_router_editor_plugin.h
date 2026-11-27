@@ -91,6 +91,9 @@ class InputRouterMapPanel : public VBoxContainer {
 
 	void _update();
 
+protected:
+	void _notification(int p_what);
+
 public:
 	void set_map(const Ref<GamepadMap> &p_map);
 
