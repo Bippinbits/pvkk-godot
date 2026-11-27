@@ -779,9 +779,23 @@
 			<return type="void" />
 			<param index="0" name="mark" type="String" />
 			<description>
-				Attaches the constant string [param mark] to the following class variable. A variable can have several different marks, but the same mark can only be applied once. The marks are readable at runtime with [method GDScript.get_member_marks].
+				Attaches the constant string [param mark] to the following class variable, function, signal or class. A target can have several different marks, but the same mark can only be applied once. Constants and enums cannot be marked. The marks are readable at runtime with [method GDScript.get_member_marks], [method GDScript.get_method_marks], [method GDScript.get_signal_marks] and [method GDScript.get_script_marks].
+				To mark the script's own class, place the annotation at the top of the script, before [code]class_name[/code] or [code]extends[/code], like [annotation @abstract]. Without [code]class_name[/code] or [code]extends[/code], a top-level [code]@m[/code] applies to the first member instead.
 				[codeblock]
+				@m("persistent")
+				class_name Inventory
+				extends Node
+
+				@m("ui") signal slot_changed(index: int)
+
 				@save @m("transient") @m("ui") var hovered_slot: int = -1
+
+				@m("command") static func clear_all() -&gt; void:
+					pass
+
+				@m("internal")
+				class Slot:
+					pass
 				[/codeblock]
 			</description>
 		</annotation>

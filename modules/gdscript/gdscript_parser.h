@@ -750,6 +750,7 @@ public:
 		bool is_abstract = false;
 		bool has_static_data = false;
 		bool annotated_static_unload = false;
+		Vector<String> marks;
 		String extends_path;
 		Vector<IdentifierNode *> extends; // List for indexing: extends A.B.C
 		DataType base_type;
@@ -858,6 +859,7 @@ public:
 		bool is_static = false; // For lambdas it's determined in the analyzer.
 		bool is_coroutine = false;
 		Variant rpc_config;
+		Vector<String> marks;
 		MethodInfo info;
 		LambdaNode *source_lambda = nullptr;
 		Vector<Variant> default_arg_values;
@@ -1061,6 +1063,7 @@ public:
 		Vector<ParameterNode *> parameters;
 		HashMap<StringName, int> parameters_indices;
 		MethodInfo method_info;
+		Vector<String> marks;
 #ifdef TOOLS_ENABLED
 		MemberDocData doc_data;
 #endif // TOOLS_ENABLED

@@ -2751,6 +2751,9 @@ Error GDScriptCompiler::_prepare_compilation(GDScript *p_script, const GDScriptP
 	p_script->rpc_config.clear();
 	p_script->saved_members.clear();
 	p_script->member_marks.clear();
+	p_script->method_marks.clear();
+	p_script->signal_marks.clear();
+	p_script->script_marks.clear();
 	p_script->lambda_info.clear();
 
 	p_script->clearing = false;
@@ -2834,6 +2837,15 @@ Error GDScriptCompiler::_prepare_compilation(GDScript *p_script, const GDScriptP
 		p_script->rpc_config = p_script->base->rpc_config.duplicate();
 		p_script->saved_members = p_script->base->saved_members;
 		p_script->member_marks = p_script->base->member_marks;
+		p_script->method_marks = p_script->base->method_marks;
+		p_script->signal_marks = p_script->base->signal_marks;
+		p_script->script_marks = p_script->base->script_marks;
+	}
+
+	for (const String &mark : p_class->marks) {
+		if (!p_script->script_marks.has(mark)) {
+			p_script->script_marks.push_back(mark);
+		}
 	}
 
 	for (int i = 0; i < p_class->members.size(); i++) {
@@ -2926,6 +2938,9 @@ Error GDScriptCompiler::_prepare_compilation(GDScript *p_script, const GDScriptP
 				StringName name = signal->identifier->name;
 
 				p_script->_signals[name] = signal->method_info;
+				if (!signal->marks.is_empty()) {
+					p_script->signal_marks[name] = signal->marks;
+				}
 			} break;
 
 			case GDScriptParser::ClassNode::Member::ENUM: {
@@ -2960,6 +2975,14 @@ Error GDScriptCompiler::_prepare_compilation(GDScript *p_script, const GDScriptP
 				Variant config = function_n->rpc_config;
 				if (config.get_type() != Variant::NIL) {
 					p_script->rpc_config[function_n->identifier->name] = config;
+				}
+				if (!function_n->marks.is_empty()) {
+					PackedStringArray &marks = p_script->method_marks[function_n->identifier->name];
+					for (const String &mark : function_n->marks) {
+						if (!marks.has(mark)) {
+							marks.push_back(mark);
+						}
+					}
 				}
 			} break;
 			default:

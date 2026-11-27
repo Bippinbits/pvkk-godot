@@ -190,7 +190,7 @@ GDScriptParser::GDScriptParser() {
 		register_annotation(MethodInfo("@rpc", PropertyInfo(Variant::STRING, "mode"), PropertyInfo(Variant::STRING, "sync"), PropertyInfo(Variant::STRING, "transfer_mode"), PropertyInfo(Variant::INT, "transfer_channel")), AnnotationInfo::FUNCTION, &GDScriptParser::rpc_annotation, varray("authority", "call_remote", "reliable", 0));
 		// [pvkk] Save system.
 		register_annotation(MethodInfo("@save"), AnnotationInfo::VARIABLE, &GDScriptParser::save_annotation);
-		register_annotation(MethodInfo("@m", PropertyInfo(Variant::STRING, "mark")), AnnotationInfo::VARIABLE, &GDScriptParser::mark_annotation);
+		register_annotation(MethodInfo("@m", PropertyInfo(Variant::STRING, "mark")), AnnotationInfo::CLASS | AnnotationInfo::VARIABLE | AnnotationInfo::SIGNAL | AnnotationInfo::FUNCTION, &GDScriptParser::mark_annotation);
 	}
 
 #ifdef DEBUG_ENABLED
@@ -5284,22 +5284,56 @@ bool GDScriptParser::save_annotation(AnnotationNode *p_annotation, Node *p_targe
 }
 
 bool GDScriptParser::mark_annotation(AnnotationNode *p_annotation, Node *p_target, ClassNode *p_class) {
-	ERR_FAIL_COND_V_MSG(p_target->type != Node::VARIABLE, false, R"("@m" annotation can only be applied to class variables.)");
+	Vector<String> *marks = nullptr;
+	const IdentifierNode *identifier = nullptr;
+	String target_kind;
+	switch (p_target->type) {
+		case Node::VARIABLE: {
+			VariableNode *variable = static_cast<VariableNode *>(p_target);
+			marks = &variable->marks;
+			identifier = variable->identifier;
+			target_kind = "variable";
+		} break;
+		case Node::FUNCTION: {
+			FunctionNode *function = static_cast<FunctionNode *>(p_target);
+			marks = &function->marks;
+			identifier = function->identifier;
+			target_kind = "function";
+		} break;
+		case Node::SIGNAL: {
+			SignalNode *signal = static_cast<SignalNode *>(p_target);
+			marks = &signal->marks;
+			identifier = signal->identifier;
+			target_kind = "signal";
+		} break;
+		case Node::CLASS: {
+			ClassNode *class_node = static_cast<ClassNode *>(p_target);
+			marks = &class_node->marks;
+			identifier = class_node->identifier;
+			target_kind = "class";
+		} break;
+		default:
+			break;
+	}
+	ERR_FAIL_NULL_V_MSG(marks, false, R"("@m" annotation can only be applied to class variables, functions, signals and classes.)");
 	if (p_annotation->resolved_arguments.is_empty()) {
 		return false;
 	}
 
-	VariableNode *variable = static_cast<VariableNode *>(p_target);
 	const String mark = p_annotation->resolved_arguments[0];
 	if (mark.is_empty()) {
 		push_error(R"("@m" annotation requires a non-empty mark.)", p_annotation->arguments[0]);
 		return false;
 	}
-	if (variable->marks.has(mark)) {
-		push_error(vformat(R"(Mark "%s" is already applied to variable "%s".)", mark, variable->identifier->name), p_annotation);
+	if (marks->has(mark)) {
+		if (identifier != nullptr) {
+			push_error(vformat(R"(Mark "%s" is already applied to %s "%s".)", mark, target_kind, identifier->name), p_annotation);
+		} else {
+			push_error(vformat(R"(Mark "%s" is already applied to this script.)", mark), p_annotation);
+		}
 		return false;
 	}
-	variable->marks.push_back(mark);
+	marks->push_back(mark);
 	return true;
 }
 

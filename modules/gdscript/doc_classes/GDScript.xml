@@ -19,10 +19,30 @@
 				Returns the marks applied to the class variable [param member] with the [annotation @GDScript.@m] annotation, in declaration order. Variables of base scripts are included. Returns an empty array if the variable has no marks or does not exist.
 			</description>
 		</method>
+		<method name="get_method_marks" qualifiers="const">
+			<return type="PackedStringArray" />
+			<param index="0" name="method" type="StringName" />
+			<description>
+				Returns the marks applied to the function [param method] with the [annotation @GDScript.@m] annotation. Marks from base scripts come first, followed by the marks this script adds when it overrides the function, without duplicates. Returns an empty array if the function has no marks or does not exist.
+			</description>
+		</method>
 		<method name="get_saved_members" qualifiers="const">
 			<return type="PackedStringArray" />
 			<description>
 				Returns the names of the class variables marked with the [annotation @GDScript.@save] annotation. Variables of base scripts are included and come first, followed by this script's variables in declaration order.
+			</description>
+		</method>
+		<method name="get_script_marks" qualifiers="const">
+			<return type="PackedStringArray" />
+			<description>
+				Returns the marks applied to this script's class with the [annotation @GDScript.@m] annotation. For an inner class, these are the marks placed before its [code]class[/code] declaration. Marks of base scripts are inherited and come first, followed by this class's own marks, without duplicates. Marks of an outer class are not inherited by its inner classes.
+			</description>
+		</method>
+		<method name="get_signal_marks" qualifiers="const">
+			<return type="PackedStringArray" />
+			<param index="0" name="signal" type="StringName" />
+			<description>
+				Returns the marks applied to the signal [param signal] with the [annotation @GDScript.@m] annotation, in declaration order. Signals of base scripts are included. Returns an empty array if the signal has no marks or does not exist.
 			</description>
 		</method>
 		<method name="new" qualifiers="vararg">

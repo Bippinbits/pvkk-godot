@@ -110,6 +110,9 @@ class GDScript : public Script {
 	Dictionary rpc_config;
 	PackedStringArray saved_members;
 	HashMap<StringName, PackedStringArray> member_marks;
+	HashMap<StringName, PackedStringArray> method_marks;
+	HashMap<StringName, PackedStringArray> signal_marks;
+	PackedStringArray script_marks;
 
 public:
 	struct LambdaInfo {
@@ -276,6 +279,9 @@ public:
 
 	PackedStringArray get_saved_members() const { return saved_members; }
 	PackedStringArray get_member_marks(const StringName &p_member) const;
+	PackedStringArray get_method_marks(const StringName &p_method) const;
+	PackedStringArray get_signal_marks(const StringName &p_signal) const;
+	PackedStringArray get_script_marks() const { return script_marks; }
 
 	const HashMap<StringName, MemberInfo> &debug_get_member_indices() const { return member_indices; }
 	const HashMap<StringName, GDScriptFunction *> &debug_get_member_functions() const; //this is debug only

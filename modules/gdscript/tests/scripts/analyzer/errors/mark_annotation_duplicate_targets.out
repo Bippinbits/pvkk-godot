@@ -1,0 +1,6 @@
+GDTEST_ANALYZER_ERROR
+>> ERROR at line 1: Mark "a" is already applied to this script.
+>> ERROR at line 10: Mark "e" is already applied to class "DuplicateClass".
+>> ERROR at line 5: Mark "b" is already applied to signal "duplicate_signal".
+>> ERROR at line 6: Mark "c" is already applied to function "duplicate_function".
+>> ERROR at line 8: Mark "d" is already applied to function "duplicate_static_function".

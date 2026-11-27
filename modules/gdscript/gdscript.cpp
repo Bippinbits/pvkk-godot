@@ -1074,10 +1074,23 @@ void GDScript::_bind_methods() {
 	ClassDB::bind_vararg_method(METHOD_FLAGS_DEFAULT, "new", &GDScript::_new, MethodInfo("new"));
 	ClassDB::bind_method(D_METHOD("get_saved_members"), &GDScript::get_saved_members);
 	ClassDB::bind_method(D_METHOD("get_member_marks", "member"), &GDScript::get_member_marks);
+	ClassDB::bind_method(D_METHOD("get_method_marks", "method"), &GDScript::get_method_marks);
+	ClassDB::bind_method(D_METHOD("get_signal_marks", "signal"), &GDScript::get_signal_marks);
+	ClassDB::bind_method(D_METHOD("get_script_marks"), &GDScript::get_script_marks);
 }
 
 PackedStringArray GDScript::get_member_marks(const StringName &p_member) const {
 	const PackedStringArray *marks = member_marks.getptr(p_member);
+	return marks ? *marks : PackedStringArray();
+}
+
+PackedStringArray GDScript::get_method_marks(const StringName &p_method) const {
+	const PackedStringArray *marks = method_marks.getptr(p_method);
+	return marks ? *marks : PackedStringArray();
+}
+
+PackedStringArray GDScript::get_signal_marks(const StringName &p_signal) const {
+	const PackedStringArray *marks = signal_marks.getptr(p_signal);
 	return marks ? *marks : PackedStringArray();
 }
 
