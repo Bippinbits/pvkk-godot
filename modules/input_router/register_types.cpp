@@ -8,6 +8,8 @@
 
 #ifdef TOOLS_ENABLED
 #include "editor/input_router_editor_plugin.h"
+
+#include "editor/inspector/editor_resource_picker.h"
 #endif
 
 static InputRouter *input_router = nullptr;
@@ -29,6 +31,7 @@ void initialize_input_router_module(ModuleInitializationLevel p_level) {
 #ifdef TOOLS_ENABLED
 	if (p_level == MODULE_INITIALIZATION_LEVEL_EDITOR) {
 		EditorPlugins::add_by_type<InputRouterEditorPlugin>();
+		EditorResourcePicker::add_label_func(&InputRouterEditorPlugin::resource_label);
 	}
 #endif
 }

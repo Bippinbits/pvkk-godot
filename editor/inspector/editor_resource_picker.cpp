@@ -50,6 +50,22 @@
 #include "scene/resources/gradient_texture.h"
 #include "scene/resources/image_texture.h"
 
+static LocalVector<EditorResourcePicker::LabelFunc> label_funcs;
+
+// Modules register at MODULE_INITIALIZATION_LEVEL_EDITOR; the first func that answers wins.
+void EditorResourcePicker::add_label_func(LabelFunc p_func) {
+	label_funcs.push_back(p_func);
+}
+
+static bool _resource_label(const Ref<Resource> &p_resource, String &r_text, Ref<Font> &r_font) {
+	for (EditorResourcePicker::LabelFunc func : label_funcs) {
+		if (func(p_resource, r_text, r_font)) {
+			return !r_text.is_empty();
+		}
+	}
+	return false;
+}
+
 static bool _has_sub_resources(const Ref<Resource> &p_res) {
 	List<PropertyInfo> property_list;
 	p_res->get_property_list(&property_list);
@@ -97,8 +113,19 @@ void EditorResourcePicker::_update_resource() {
 		} else {
 			assign_button->set_button_icon(EditorNode::get_singleton()->get_object_icon(edited_resource.operator->()));
 
+			String label;
+			Ref<Font> label_font;
+			const bool labeled = edited_resource->get_name().is_empty() && _resource_label(edited_resource, label, label_font);
+			if (labeled && label_font.is_valid()) {
+				assign_button->add_theme_font_override(SceneStringName(font), label_font);
+			} else {
+				assign_button->remove_theme_font_override(SceneStringName(font));
+			}
+
 			if (!edited_resource->get_name().is_empty()) {
 				assign_button->set_text(edited_resource->get_name());
+			} else if (labeled) {
+				assign_button->set_text(label);
 			} else if (edited_resource->get_path().is_resource_file()) {
 				assign_button->set_text(edited_resource->get_path().get_file());
 			} else {

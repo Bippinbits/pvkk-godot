@@ -111,10 +111,18 @@ public:
 class InputRouterEditorPlugin : public EditorPlugin {
 	GDCLASS(InputRouterEditorPlugin, EditorPlugin);
 
+	static inline InputRouterEditorPlugin *singleton = nullptr;
+	Ref<FontVariation> label_font;
+	Ref<Font> label_glyphs;
+
 public:
+	static bool resource_label(const Ref<Resource> &p_resource, String &r_text, Ref<Font> &r_font); // EditorResourcePicker::LabelFunc
+	Ref<Font> get_label_font(const Ref<Font> &p_glyphs);
+
 	virtual String get_plugin_name() const override { return "InputRouter"; }
 
 	InputRouterEditorPlugin();
+	~InputRouterEditorPlugin();
 };
 
 #endif // TOOLS_ENABLED

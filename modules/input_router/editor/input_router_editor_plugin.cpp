@@ -9,6 +9,8 @@
 #include "core/core_string_names.h"
 #include "core/input/input.h"
 #include "core/os/os.h"
+#include "editor/editor_node.h"
+#include "editor/editor_string_names.h"
 #include "editor/editor_undo_redo_manager.h"
 #include "editor/themes/editor_scale.h"
 #include "scene/gui/button.h"
@@ -22,8 +24,8 @@ using namespace InputRouterInternal;
 static const char *FAMILY_NAMES[] = { "Xbox", "PlayStation", "Nintendo", "Steam Deck" };
 static const int FAMILIES[] = { InputRouter::PAD_FAMILY_XBOX, InputRouter::PAD_FAMILY_PLAYSTATION, InputRouter::PAD_FAMILY_NINTENDO, InputRouter::PAD_FAMILY_STEAM };
 static const char *PRESET_NAMES[] = { "Linear", "Smooth", "Precise", "Aggressive" };
-static constexpr float GLYPH_SCALE = 1.6f; // Over label text: glyphs stand about 2/3 em tall.
-static constexpr float PREVIEW_GLYPH_SCALE = 2.5f;
+static constexpr float GLYPH_SCALE = 3.2f; // Over label text: glyphs stand about 2/3 em tall.
+static constexpr float PREVIEW_GLYPH_SCALE = 5.0f;
 
 // The project's glyph map (input_devices/router/glyph_map), or null.
 static Ref<GlyphFontMap> glyph_map() {
@@ -39,6 +41,31 @@ static String binding_glyphs(const GlyphFontMap &p_map, uint8_t p_input, uint8_t
 	}
 	const String gate = p_map.get_input_glyph(p_gate, p_family);
 	return gate.is_empty() ? String() : gate + input;
+}
+
+// A compiled row's glyphs: gate and input, or the sequence's steps. Empty when one has none.
+static String row_glyphs(const GlyphFontMap &p_map, const RouteBinding &p_row, int p_family) {
+	if (p_row.trigger != RouteBindingResource::TRIGGER_SEQUENCE) {
+		return binding_glyphs(p_map, p_row.input, p_row.gate, p_family);
+	}
+	String steps;
+	for (uint8_t step : p_row.sequence) {
+		if (step == NONE) {
+			break;
+		}
+		const String glyph = p_map.get_input_glyph(step, p_family);
+		if (glyph.is_empty()) {
+			return String();
+		}
+		steps += glyph;
+	}
+	return steps;
+}
+
+// The family the editor shows: the first connected pad's, else generic.
+static int editor_family() {
+	const TypedArray<int> pads = Input::get_singleton()->get_connected_joypads();
+	return InputRouter::detect_pad_family(pads.is_empty() ? -1 : (int)pads[0]);
 }
 
 static String fire_names(uint32_t p_bits) {
@@ -67,25 +94,21 @@ static void add_cell(Node *p_grid, const String &p_text) {
 	p_grid->add_child(label);
 }
 
-// The glyph in p_font, then the text. Text alone without a glyph or font.
+// The glyph in p_font, its name as the tooltip. The name as text without a glyph or font.
 static void add_glyph_cell(Node *p_grid, const String &p_glyph, const String &p_text, const Ref<Font> &p_font, int p_size) {
 	if (p_glyph.is_empty() || p_font.is_null()) {
 		add_cell(p_grid, p_text);
 		return;
 	}
-	HBoxContainer *cell = memnew(HBoxContainer);
-	cell->set_h_size_flags(Control::SIZE_EXPAND_FILL);
 	Label *glyph = memnew(Label);
 	glyph->set_text(p_glyph);
+	glyph->set_tooltip_text(p_text);
+	glyph->set_mouse_filter(Control::MOUSE_FILTER_PASS);
+	glyph->set_h_size_flags(Control::SIZE_EXPAND_FILL);
 	glyph->set_vertical_alignment(VERTICAL_ALIGNMENT_CENTER);
-	glyph->add_theme_font_override(SNAME("font"), p_font);
-	glyph->add_theme_font_size_override(SNAME("font_size"), p_size);
-	cell->add_child(glyph);
-	Label *label = memnew(Label);
-	label->set_text(p_text);
-	label->set_vertical_alignment(VERTICAL_ALIGNMENT_CENTER);
-	cell->add_child(label);
-	p_grid->add_child(cell);
+	glyph->add_theme_font_override(SceneStringName(font), p_font);
+	glyph->add_theme_font_size_override(SceneStringName(font_size), p_size);
+	p_grid->add_child(glyph);
 }
 
 // Do sets p_value, undo restores the current one.
@@ -248,7 +271,7 @@ void InputRouterPadPreview::_draw_stick(const Rect2 &p_rect) {
 	const Ref<Font> glyph_font = map.is_valid() ? map->get_default_font() : Ref<Font>();
 	if (glyph_font.is_valid()) {
 		const int glyph_size = (int)(font_size * PREVIEW_GLYPH_SCALE);
-		const String glyphs = binding_glyphs(**map, row.input, row.gate, InputRouter::detect_pad_family(p));
+		const String glyphs = row_glyphs(**map, row, InputRouter::detect_pad_family(p));
 		draw_string(glyph_font, p_rect.position + Vector2(0, font_size + glyph_size), glyphs, HORIZONTAL_ALIGNMENT_RIGHT, p_rect.size.x, glyph_size, text);
 	}
 	const Rect2 area(p_rect.position + Vector2(0, font_size + 6 * EDSCALE), p_rect.size - Vector2(0, font_size + 6 * EDSCALE));
@@ -543,7 +566,7 @@ static String family_glyphs(const GlyphFontMap &p_map, const RouteBindingResourc
 	}
 	PackedStringArray parts;
 	for (int family : FAMILIES) {
-		parts.push_back(binding_glyphs(p_map, row.input, row.gate, family));
+		parts.push_back(row_glyphs(p_map, row, family));
 	}
 	return String("  ").join(parts);
 }
@@ -628,13 +651,66 @@ void InputRouterInspectorPlugin::parse_begin(Object *p_object) {
 	}
 }
 
+// The editor font with the glyph font behind it, so one label mixes words and glyphs. Rebuilt
+// when the editor theme or the glyph map's font changes.
+Ref<Font> InputRouterEditorPlugin::get_label_font(const Ref<Font> &p_glyphs) {
+	const Ref<Font> base = EditorNode::get_singleton()->get_editor_theme()->get_font(SNAME("main"), EditorStringName(EditorFonts));
+	if (p_glyphs.is_null()) {
+		return base;
+	}
+	if (label_font.is_null() || label_font->get_base_font() != base || label_glyphs != p_glyphs) {
+		label_font.instantiate();
+		label_font->set_base_font(base);
+		TypedArray<Font> fallbacks;
+		fallbacks.push_back(p_glyphs);
+		label_font->set_fallbacks(fallbacks);
+		label_glyphs = p_glyphs;
+	}
+	return label_font;
+}
+
+// EditorResourcePicker label func: a collapsed RouteBindingResource row reads gate and input
+// glyphs in the editor family, the trigger and the id. Without glyphs, describe() and the id.
+bool InputRouterEditorPlugin::resource_label(const Ref<Resource> &p_resource, String &r_text, Ref<Font> &r_font) {
+	const RouteBindingResource *binding = Object::cast_to<RouteBindingResource>(p_resource.ptr());
+	if (!binding) {
+		return false;
+	}
+	const Ref<GlyphFontMap> map = glyph_map();
+	RouteBinding row;
+	float lut[LUT_STRIDE];
+	bool has_lut = false;
+	String error;
+	String glyphs;
+	if (singleton && map.is_valid() && compile_binding(*binding, row, lut, has_lut, error)) {
+		glyphs = row_glyphs(**map, row, editor_family());
+	}
+	if (glyphs.is_empty()) {
+		r_text = binding->describe();
+	} else {
+		r_text = glyphs + "  " + trigger_name(row.trigger);
+		r_font = singleton->get_label_font(map->get_default_font());
+	}
+	if (binding->get_id() != StringName()) {
+		r_text += "   " + String(binding->get_id());
+	}
+	return true;
+}
+
 InputRouterEditorPlugin::InputRouterEditorPlugin() {
+	singleton = this;
 	Ref<InputRouterInspectorPlugin> inspector;
 	inspector.instantiate();
 	add_inspector_plugin(inspector);
 	Ref<InputRouterExportPlugin> exporter;
 	exporter.instantiate();
 	add_export_plugin(exporter);
+}
+
+InputRouterEditorPlugin::~InputRouterEditorPlugin() {
+	if (singleton == this) {
+		singleton = nullptr;
+	}
 }
 
 #endif // TOOLS_ENABLED

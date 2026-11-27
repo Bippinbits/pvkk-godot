@@ -36,6 +36,7 @@
 class Button;
 class ConfirmationDialog;
 class EditorFileDialog;
+class Font;
 class PopupMenu;
 class TextureRect;
 class Tree;
@@ -136,6 +137,10 @@ protected:
 	GDVIRTUAL1R(bool, _handle_menu_selected, int)
 
 public:
+	// Button text, and an optional font, for a resource without a name; false passes it on.
+	typedef bool (*LabelFunc)(const Ref<Resource> &p_resource, String &r_text, Ref<Font> &r_font);
+	static void add_label_func(LabelFunc p_func);
+
 	void set_base_type(const String &p_base_type);
 	String get_base_type() const;
 	Vector<String> get_allowed_types() const;
