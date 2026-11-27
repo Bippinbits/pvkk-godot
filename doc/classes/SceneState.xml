@@ -174,6 +174,28 @@
 				Returns [code]true[/code] if the node at [param idx] is an [InstancePlaceholder].
 			</description>
 		</method>
+		<method name="scan_text_scene" qualifiers="static">
+			<return type="Dictionary[]" />
+			<param index="0" name="path" type="String" />
+			<description>
+				Reads the node structure of the text scene file ([code].tscn[/code]) at [param path] without loading the scene or any of its dependencies. Returns one [Dictionary] per node, in file order, with these keys:
+				- [code]path[/code]: The node's path relative to the scene root, like [code]"Body/Mesh"[/code]. The root is [code]"."[/code].
+				- [code]name[/code]: The node's name.
+				- [code]type[/code]: The node's class name, or an empty [String] for nodes that come from an instanced or inherited scene.
+				- [code]parent[/code]: The parent's path as written in the file ([code]"."[/code] for children of the root), or an empty [String] for the root.
+				- [code]instance[/code]: The path of the scene this node instances, the base scene for the root of an inherited scene, or the placeholder's scene path if [code]placeholder[/code] is [code]true[/code]. Empty otherwise.
+				- [code]placeholder[/code]: [code]true[/code] if the node is an [InstancePlaceholder].
+				- [code]script[/code]: The path of the node's external script. Empty if it has none, if it is [code]null[/code] or if it is a built-in script.
+				- [code]groups[/code]: The node's groups as a [PackedStringArray].
+				- [code]unique_id[/code]: The node's unique scene ID, or [code]0[/code] if it has none.
+				External resource paths are resolved through their UID when it is known, like when loading. No other property values are read, so nothing is loaded, instantiated or cached.
+				Returns an empty array and prints an error if the file isn't a text scene or can't be parsed. Binary scenes ([code].scn[/code]) are not supported.
+				[codeblock]
+				for node in SceneState.scan_text_scene("res://level.tscn"):
+					print(node.path, " ", node.type, " ", node.script)
+				[/codeblock]
+			</description>
+		</method>
 	</methods>
 	<constants>
 		<constant name="GEN_EDIT_STATE_DISABLED" value="0" enum="GenEditState">

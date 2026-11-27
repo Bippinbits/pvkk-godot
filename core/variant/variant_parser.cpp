@@ -35,6 +35,7 @@
 #include "core/io/resource_uid.h"
 #include "core/object/script_language.h"
 #include "core/string/string_buffer.h"
+#include "core/templates/local_vector.h"
 
 char32_t VariantParser::Stream::get_char() {
 	// is within buffer?
@@ -1640,6 +1641,81 @@ Error VariantParser::parse_value(Token &token, Variant &value, Stream *p_stream,
 	}
 }
 
+Error VariantParser::skip_value(Token &token, Stream *p_stream, int &line, String &r_err_str) {
+	if (token.type == TK_NUMBER || token.type == TK_STRING || token.type == TK_STRING_NAME || token.type == TK_COLOR) {
+		return OK;
+	}
+
+	if (token.type == TK_IDENTIFIER) {
+		const String id = token.value;
+		if (id == "true" || id == "false" || id == "null" || id == "nil" || id == "inf" || id == "-inf" || id == "inf_neg" || id == "nan") {
+			return OK;
+		}
+
+		// Constructors, optionally typed like `Array[int]([1])`.
+		Error err = get_token(p_stream, token, line, r_err_str);
+		if (err) {
+			return err;
+		}
+		if (token.type == TK_BRACKET_OPEN) {
+			err = skip_value(token, p_stream, line, r_err_str);
+			if (err) {
+				return err;
+			}
+			err = get_token(p_stream, token, line, r_err_str);
+			if (err) {
+				return err;
+			}
+		}
+		if (token.type != TK_PARENTHESIS_OPEN) {
+			r_err_str = "Expected '('";
+			return ERR_PARSE_ERROR;
+		}
+	} else if (token.type != TK_CURLY_BRACKET_OPEN && token.type != TK_BRACKET_OPEN) {
+		r_err_str = vformat("Expected value, got '%s'", String(tk_name[token.type]));
+		return ERR_PARSE_ERROR;
+	}
+
+	// Skip tokens until the bracket opened by `token` is closed, checking that nested brackets match.
+	LocalVector<TokenType> closers;
+	while (true) {
+		switch (token.type) {
+			case TK_CURLY_BRACKET_OPEN: {
+				closers.push_back(TK_CURLY_BRACKET_CLOSE);
+			} break;
+			case TK_BRACKET_OPEN: {
+				closers.push_back(TK_BRACKET_CLOSE);
+			} break;
+			case TK_PARENTHESIS_OPEN: {
+				closers.push_back(TK_PARENTHESIS_CLOSE);
+			} break;
+			case TK_CURLY_BRACKET_CLOSE:
+			case TK_BRACKET_CLOSE:
+			case TK_PARENTHESIS_CLOSE: {
+				if (token.type != closers[closers.size() - 1]) {
+					r_err_str = vformat("Expected %s", String(tk_name[closers[closers.size() - 1]]));
+					return ERR_PARSE_ERROR;
+				}
+				closers.remove_at(closers.size() - 1);
+				if (closers.is_empty()) {
+					return OK;
+				}
+			} break;
+			case TK_EOF: {
+				r_err_str = "Unexpected EOF while parsing value";
+				return ERR_FILE_CORRUPT;
+			}
+			default: {
+			} break;
+		}
+
+		Error err = get_token(p_stream, token, line, r_err_str);
+		if (err) {
+			return err;
+		}
+	}
+}
+
 Error VariantParser::_parse_array(Array &array, Stream *p_stream, int &line, String &r_err_str, ResourceParser *p_res_parser) {
 	Token token;
 	bool need_comma = false;
@@ -1888,8 +1964,25 @@ Error VariantParser::parse_tag(Stream *p_stream, int &line, String &r_err_str, T
 }
 
 Error VariantParser::parse_tag_assign_eof(Stream *p_stream, int &line, String &r_err_str, Tag &r_tag, String &r_assign, Variant &r_value, ResourceParser *p_res_parser, bool p_simple_tag) {
+	bool at_tag = false;
+	Error err = parse_assign_key_eof(p_stream, line, r_err_str, r_assign, at_tag);
+	if (err) {
+		return err;
+	}
+
+	if (at_tag) {
+		return parse_tag(p_stream, line, r_err_str, r_tag, p_res_parser, p_simple_tag);
+	}
+
+	Token token;
+	get_token(p_stream, token, line, r_err_str);
+	return parse_value(token, r_value, p_stream, line, r_err_str, p_res_parser);
+}
+
+Error VariantParser::parse_assign_key_eof(Stream *p_stream, int &line, String &r_err_str, String &r_assign, bool &r_at_tag) {
 	//assign..
 	r_assign = "";
+	r_at_tag = false;
 	String what;
 
 	while (true) {
@@ -1923,10 +2016,8 @@ Error VariantParser::parse_tag_assign_eof(Stream *p_stream, int &line, String &r
 		if (c == '[' && what.length() == 0) {
 			//it's a tag!
 			p_stream->saved = '['; //go back one
-
-			Error err = parse_tag(p_stream, line, r_err_str, r_tag, p_res_parser, p_simple_tag);
-
-			return err;
+			r_at_tag = true;
+			return OK;
 		}
 
 		if (c > 32) {
@@ -1948,10 +2039,7 @@ Error VariantParser::parse_tag_assign_eof(Stream *p_stream, int &line, String &r
 				what += c;
 			} else {
 				r_assign = what;
-				Token token;
-				get_token(p_stream, token, line, r_err_str);
-				Error err = parse_value(token, r_value, p_stream, line, r_err_str, p_res_parser);
-				return err;
+				return OK;
 			}
 		} else if (c == '\n') {
 			line++;

@@ -125,6 +125,8 @@ private:
 	Ref<Resource> resource;
 
 	Ref<PackedScene> _parse_node_tag(VariantParser::ResourceParser &parser);
+	Error _scan_ext_resource_path(const HashMap<String, String> &p_ext_paths, String &r_path);
+	Error _scan_tag(const HashMap<String, String> &p_ext_paths, VariantParser::Tag &r_tag);
 
 public:
 	Ref<Resource> get_resource();
@@ -141,6 +143,7 @@ public:
 	void get_dependencies(Ref<FileAccess> p_f, List<String> *p_dependencies, bool p_add_types);
 	Error rename_dependencies(Ref<FileAccess> p_f, const String &p_path, const HashMap<String, String> &p_map);
 	Error get_classes_used(HashSet<StringName> *r_classes);
+	TypedArray<Dictionary> scan_scene();
 
 	ResourceLoaderText();
 };
@@ -162,6 +165,8 @@ public:
 	virtual bool has_custom_uid_support() const override;
 	virtual void get_dependencies(const String &p_path, List<String> *p_dependencies, bool p_add_types = false) override;
 	virtual Error rename_dependencies(const String &p_path, const HashMap<String, String> &p_map) override;
+
+	static TypedArray<Dictionary> scan_scene(const String &p_path);
 
 	ResourceFormatLoaderText() { singleton = this; }
 };

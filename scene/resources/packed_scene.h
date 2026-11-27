@@ -232,6 +232,8 @@ public:
 	// Used when saving pointers (saves a path property instead).
 	static String get_meta_pointer_property(const String &p_property);
 
+	static TypedArray<Dictionary> scan_text_scene(const String &p_path);
+
 #ifdef TOOLS_ENABLED
 	static void set_instantiation_warning_notify_func(InstantiationWarningNotify p_warn_notify) { instantiation_warn_notify = p_warn_notify; }
 #endif

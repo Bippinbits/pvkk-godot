@@ -30,9 +30,14 @@
 
 #pragma once
 
+#include "core/io/dir_access.h"
+#include "core/io/file_access.h"
+#include "core/io/resource_uid.h"
 #include "scene/resources/packed_scene.h"
 
 #include "tests/test_macros.h"
+#include "tests/test_tools.h"
+#include "tests/test_utils.h"
 
 namespace TestPackedScene {
 
@@ -278,6 +283,134 @@ TEST_CASE("[PackedScene] Recreate State") {
 	CHECK(state->get_node_count() == 0); // Since the state was recreated, it should be empty.
 
 	memdelete(scene);
+}
+
+TEST_CASE("[PackedScene][SceneState] scan_text_scene reads the node structure without loading anything") {
+	ResourceUID::ID known_uid = ResourceUID::get_singleton()->create_id();
+	ResourceUID::get_singleton()->add_id(known_uid, "res://resolved_root.gd");
+	const String unknown_uid = ResourceUID::get_singleton()->id_to_text(ResourceUID::get_singleton()->create_id());
+
+	const String scene_path = TestUtils::get_temp_path("scan_text_scene.tscn");
+	{
+		Ref<FileAccess> f = FileAccess::open(scene_path, FileAccess::WRITE);
+		REQUIRE(f.is_valid());
+		f->store_string(vformat(R"([gd_scene load_steps=4 format=3]
+
+[ext_resource type="Script" uid="%s" path="res://stale_root.gd" id="1_script"]
+[ext_resource type="Texture2D" path="res://a.png" id="2_tex"]
+[ext_resource type="PackedScene" uid="%s" path="res://child.tscn" id="3_scene"]
+[ext_resource type="Script" path="res://child.gd" id="4_script"]
+
+[sub_resource type="GDScript" id="GDScript_1"]
+script/source = "extends Node
+"
+
+[sub_resource type="Resource" id="Resource_1"]
+script = ExtResource("1_script")
+textures = Array[Texture2D]([ExtResource("2_tex")])
+
+[node name="Root" type="Node3D" groups=["saveable", "level"] unique_id=1234]
+script = ExtResource("1_script")
+textures = Array[Texture2D]([ExtResource("2_tex"), ExtResource("2_tex")])
+by_name = Dictionary[String, Texture2D]({
+"a": ExtResource("2_tex")
+})
+helper = Object(Node3D,"name":"Helper","script":ExtResource("1_script"))
+data = SubResource("Resource_1")
+metadata/note = "[node name=\"Fake\"]"
+
+[node name="Child" parent="." unique_id=5 instance=ExtResource("3_scene")]
+script = ExtResource("4_script")
+
+[node name="Inner" parent="Child/Body" type="Node"]
+script = null
+
+[node name="BuiltIn" parent="." type="Node"]
+script = SubResource("GDScript_1")
+
+[node name="Lazy" parent="." instance_placeholder="res://lazy.tscn"]
+
+[editable path="Child"]
+
+[connection signal="ready" from="." to="Child" method="_on_ready" binds=[Object(Node3D,"name":"Bound")]]
+)",
+				ResourceUID::get_singleton()->id_to_text(known_uid), unknown_uid));
+	}
+
+	const String inherited_path = TestUtils::get_temp_path("scan_text_scene_inherited.tscn");
+	{
+		Ref<FileAccess> f = FileAccess::open(inherited_path, FileAccess::WRITE);
+		REQUIRE(f.is_valid());
+		f->store_string(R"([gd_scene format=3]
+
+[ext_resource type="PackedScene" path="res://base.tscn" id="1_base"]
+
+[node name="Derived" instance=ExtResource("1_base")]
+
+[node name="Extra" parent="." type="Node" groups=["g"]]
+)");
+	}
+
+	const int object_count = ObjectDB::get_object_count();
+	ErrorDetector ed;
+	TypedArray<Dictionary> nodes = SceneState::scan_text_scene(scene_path);
+	TypedArray<Dictionary> inherited = SceneState::scan_text_scene(inherited_path);
+	CHECK_FALSE(ed.has_error);
+	CHECK(ObjectDB::get_object_count() == object_count);
+
+	const auto make_node = [](const String &p_path, const String &p_name, const String &p_type, const String &p_parent, const String &p_instance, bool p_placeholder, const String &p_script, const PackedStringArray &p_groups, int p_unique_id) {
+		Dictionary node;
+		node["path"] = p_path;
+		node["name"] = p_name;
+		node["type"] = p_type;
+		node["parent"] = p_parent;
+		node["instance"] = p_instance;
+		node["placeholder"] = p_placeholder;
+		node["script"] = p_script;
+		node["groups"] = p_groups;
+		node["unique_id"] = p_unique_id;
+		return node;
+	};
+
+	REQUIRE(nodes.size() == 5);
+	CHECK(Dictionary(nodes[0]) == make_node(".", "Root", "Node3D", "", "", false, "res://resolved_root.gd", { "saveable", "level" }, 1234));
+	CHECK(Dictionary(nodes[1]) == make_node("Child", "Child", "", ".", "res://child.tscn", false, "res://child.gd", {}, 5));
+	CHECK(Dictionary(nodes[2]) == make_node("Child/Body/Inner", "Inner", "Node", "Child/Body", "", false, "", {}, 0));
+	CHECK(Dictionary(nodes[3]) == make_node("BuiltIn", "BuiltIn", "Node", ".", "", false, "", {}, 0));
+	CHECK(Dictionary(nodes[4]) == make_node("Lazy", "Lazy", "", ".", "res://lazy.tscn", true, "", {}, 0));
+
+	REQUIRE(inherited.size() == 2);
+	CHECK(Dictionary(inherited[0]) == make_node(".", "Derived", "", "", "res://base.tscn", false, "", {}, 0));
+	CHECK(Dictionary(inherited[1]) == make_node("Extra", "Extra", "Node", ".", "", false, "", { "g" }, 0));
+
+	ResourceUID::get_singleton()->remove_id(known_uid);
+	DirAccess::remove_absolute(scene_path);
+	DirAccess::remove_absolute(inherited_path);
+}
+
+TEST_CASE("[PackedScene][SceneState] scan_text_scene fails on non-scenes and parse errors") {
+	const String broken_path = TestUtils::get_temp_path("scan_text_scene_broken.tscn");
+	{
+		Ref<FileAccess> f = FileAccess::open(broken_path, FileAccess::WRITE);
+		REQUIRE(f.is_valid());
+		f->store_string(R"([gd_scene format=3]
+
+[node name="Root" type="Node"]
+position = Vector2(1, 2]
+)");
+	}
+
+	ERR_PRINT_OFF;
+	ErrorDetector ed;
+	CHECK(SceneState::scan_text_scene("res://not_a_scene.tres").is_empty());
+	CHECK(ed.has_error);
+
+	ed.clear();
+	CHECK(SceneState::scan_text_scene(broken_path).is_empty());
+	CHECK(ed.has_error);
+	ERR_PRINT_ON;
+
+	DirAccess::remove_absolute(broken_path);
 }
 
 } // namespace TestPackedScene

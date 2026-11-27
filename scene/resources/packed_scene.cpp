@@ -42,6 +42,7 @@
 #include "scene/main/instance_placeholder.h"
 #include "scene/main/missing_node.h"
 #include "scene/property_utils.h"
+#include "scene/resources/resource_format_text.h"
 
 #ifndef _3D_DISABLED
 #include "scene/3d/node_3d.h"
@@ -1944,6 +1945,12 @@ Vector<StringName> SceneState::get_node_groups(int p_idx) const {
 	return groups;
 }
 
+TypedArray<Dictionary> SceneState::scan_text_scene(const String &p_path) {
+	const String path = ResourceUID::ensure_path(p_path);
+	ERR_FAIL_COND_V_MSG(path.get_extension().to_lower() != "tscn", TypedArray<Dictionary>(), vformat("Can't scan scene '%s': only text scenes (.tscn) are supported.", p_path));
+	return ResourceFormatLoaderText::scan_scene(path);
+}
+
 Node *SceneState::_recover_node_path_index(Node *p_base, int p_idx) const {
 	// ID paths are only used for recovery, since they are slower to traverse.
 	// This function attempts to recover a node by using IDs in case the path
@@ -2448,6 +2455,8 @@ void SceneState::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_connection_flags", "idx"), &SceneState::get_connection_flags);
 	ClassDB::bind_method(D_METHOD("get_connection_binds", "idx"), &SceneState::get_connection_binds);
 	ClassDB::bind_method(D_METHOD("get_connection_unbinds", "idx"), &SceneState::get_connection_unbinds);
+
+	ClassDB::bind_static_method("SceneState", D_METHOD("scan_text_scene", "path"), &SceneState::scan_text_scene);
 
 	BIND_ENUM_CONSTANT(GEN_EDIT_STATE_DISABLED);
 	BIND_ENUM_CONSTANT(GEN_EDIT_STATE_INSTANCE);

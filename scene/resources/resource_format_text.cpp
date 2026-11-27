@@ -1308,6 +1308,192 @@ Error ResourceLoaderText::get_classes_used(HashSet<StringName> *r_classes) {
 	return OK;
 }
 
+Error ResourceLoaderText::_scan_ext_resource_path(const HashMap<String, String> &p_ext_paths, String &r_path) {
+	VariantParser::Token token;
+	VariantParser::get_token(&stream, token, lines, error_text);
+	if (token.type != VariantParser::TK_PARENTHESIS_OPEN) {
+		error_text = "Expected '('";
+		return ERR_PARSE_ERROR;
+	}
+
+	VariantParser::get_token(&stream, token, lines, error_text);
+	if (token.type != VariantParser::TK_STRING && token.type != VariantParser::TK_NUMBER) {
+		error_text = "Expected string as argument for ExtResource()";
+		return ERR_PARSE_ERROR;
+	}
+
+	const String id = token.value;
+	const String *path = p_ext_paths.getptr(id);
+	if (!path) {
+		error_text = vformat("Unknown ExtResource id '%s'", id);
+		return ERR_PARSE_ERROR;
+	}
+	r_path = *path;
+
+	VariantParser::get_token(&stream, token, lines, error_text);
+	if (token.type != VariantParser::TK_PARENTHESIS_CLOSE) {
+		error_text = "Expected ')'";
+		return ERR_PARSE_ERROR;
+	}
+	return OK;
+}
+
+Error ResourceLoaderText::_scan_tag(const HashMap<String, String> &p_ext_paths, VariantParser::Tag &r_tag) {
+	r_tag.name = "";
+	r_tag.fields.clear();
+
+	VariantParser::Token token;
+	VariantParser::get_token(&stream, token, lines, error_text);
+	if (token.type != VariantParser::TK_BRACKET_OPEN) {
+		error_text = "Expected '['";
+		return ERR_PARSE_ERROR;
+	}
+
+	VariantParser::get_token(&stream, token, lines, error_text);
+	if (token.type != VariantParser::TK_IDENTIFIER) {
+		error_text = "Expected identifier (tag name)";
+		return ERR_PARSE_ERROR;
+	}
+	r_tag.name = token.value;
+
+	while (true) {
+		Error err = VariantParser::get_token(&stream, token, lines, error_text);
+		if (err) {
+			return err;
+		}
+		if (token.type == VariantParser::TK_BRACKET_CLOSE) {
+			return OK;
+		}
+		if (token.type != VariantParser::TK_IDENTIFIER) {
+			error_text = token.type == VariantParser::TK_EOF ? vformat("Unexpected EOF while parsing tag '%s'", r_tag.name) : String("Expected identifier");
+			return ERR_PARSE_ERROR;
+		}
+		const String key = token.value;
+
+		VariantParser::get_token(&stream, token, lines, error_text);
+		if (token.type != VariantParser::TK_EQUAL) {
+			error_text = "Expected '=' after identifier";
+			return ERR_PARSE_ERROR;
+		}
+
+		VariantParser::get_token(&stream, token, lines, error_text);
+		if (token.type == VariantParser::TK_STRING || token.type == VariantParser::TK_STRING_NAME || token.type == VariantParser::TK_NUMBER) {
+			r_tag.fields[key] = token.value;
+		} else if (token.type == VariantParser::TK_IDENTIFIER && token.value == "ExtResource") {
+			String path;
+			err = _scan_ext_resource_path(p_ext_paths, path);
+			if (err) {
+				return err;
+			}
+			r_tag.fields[key] = path;
+		} else if (token.type == VariantParser::TK_BRACKET_OPEN && key == "groups") {
+			PackedStringArray groups;
+			while (true) {
+				VariantParser::get_token(&stream, token, lines, error_text);
+				if (token.type == VariantParser::TK_BRACKET_CLOSE) {
+					break;
+				} else if (token.type == VariantParser::TK_STRING || token.type == VariantParser::TK_STRING_NAME) {
+					groups.push_back(token.value);
+				} else if (token.type != VariantParser::TK_COMMA) {
+					error_text = "Expected string in groups";
+					return ERR_PARSE_ERROR;
+				}
+			}
+			r_tag.fields[key] = groups;
+		} else {
+			err = VariantParser::skip_value(token, &stream, lines, error_text);
+			if (err) {
+				return err;
+			}
+		}
+	}
+}
+
+TypedArray<Dictionary> ResourceLoaderText::scan_scene() {
+	if (error) {
+		return TypedArray<Dictionary>();
+	}
+
+	if (!is_scene) {
+		error = ERR_FILE_UNRECOGNIZED;
+		error_text = "Not a scene file";
+		_printerr();
+		return TypedArray<Dictionary>();
+	}
+
+	TypedArray<Dictionary> nodes;
+	HashMap<String, String> ext_paths;
+	VariantParser::Tag tag;
+	Dictionary node;
+
+	while (true) {
+		String assign;
+		bool at_tag = false;
+		error = VariantParser::parse_assign_key_eof(&stream, lines, error_text, assign, at_tag);
+		if (error == ERR_FILE_EOF) {
+			error = OK;
+			return nodes;
+		}
+
+		if (!error && at_tag) {
+			node = Dictionary();
+			error = _scan_tag(ext_paths, tag);
+			if (!error && tag.name == "ext_resource") {
+				if (!tag.fields.has("path") || !tag.fields.has("id")) {
+					error = ERR_FILE_CORRUPT;
+					error_text = "Missing 'path' or 'id' in external resource tag";
+				} else {
+					String path = tag.fields["path"];
+					if (tag.fields.has("uid")) {
+						ResourceUID::ID uid = ResourceUID::get_singleton()->text_to_id(tag.fields["uid"]);
+						if (uid != ResourceUID::INVALID_ID && ResourceUID::get_singleton()->has_id(uid)) {
+							path = ResourceUID::get_singleton()->get_id_path(uid);
+						}
+					}
+					if (!path.contains("://") && path.is_relative_path()) {
+						path = ProjectSettings::get_singleton()->localize_path(local_path.get_base_dir().path_join(path));
+					}
+					ext_paths[tag.fields["id"]] = path;
+				}
+			} else if (!error && tag.name == "node") {
+				const String name = tag.fields.has("name") ? String(tag.fields["name"]) : String();
+				const String instance_key = tag.fields.has("instance_placeholder") ? "instance_placeholder" : "instance";
+				String path = ".";
+				String parent;
+				if (tag.fields.has("parent")) {
+					parent = tag.fields["parent"];
+					path = parent == "." ? name : parent + "/" + name;
+				}
+				node["path"] = path;
+				node["name"] = name;
+				node["type"] = tag.fields.has("type") ? String(tag.fields["type"]) : String();
+				node["parent"] = parent;
+				node["instance"] = tag.fields.has(instance_key) ? String(tag.fields[instance_key]) : String();
+				node["placeholder"] = instance_key == "instance_placeholder";
+				node["script"] = String();
+				node["groups"] = tag.fields.has("groups") ? PackedStringArray(tag.fields["groups"]) : PackedStringArray();
+				node["unique_id"] = tag.fields.has("unique_id") ? int(tag.fields["unique_id"]) : int(Node::UNIQUE_SCENE_ID_UNASSIGNED);
+				nodes.push_back(node);
+			}
+		} else if (!error) {
+			VariantParser::Token token;
+			VariantParser::get_token(&stream, token, lines, error_text);
+			if (assign == "script" && !node.is_empty() && token.type == VariantParser::TK_IDENTIFIER && token.value == "ExtResource") {
+				String script_path;
+				error = _scan_ext_resource_path(ext_paths, script_path);
+				node["script"] = script_path;
+			} else {
+				error = VariantParser::skip_value(token, &stream, lines, error_text);
+			}
+		}
+
+		if (error) {
+			_printerr();
+			return TypedArray<Dictionary>();
+		}
+	}
+}
+
 String ResourceLoaderText::recognize_script_class(Ref<FileAccess> p_f) {
 	error = OK;
 
@@ -1602,6 +1788,18 @@ Error ResourceFormatLoaderText::rename_dependencies(const String &p_path, const 
 	}
 
 	return err;
+}
+
+TypedArray<Dictionary> ResourceFormatLoaderText::scan_scene(const String &p_path) {
+	Error err;
+	Ref<FileAccess> f = FileAccess::open(p_path, FileAccess::READ, &err);
+	ERR_FAIL_COND_V_MSG(err != OK, TypedArray<Dictionary>(), vformat("Cannot open file '%s'.", p_path));
+
+	ResourceLoaderText loader;
+	loader.local_path = ProjectSettings::get_singleton()->localize_path(p_path);
+	loader.res_path = loader.local_path;
+	loader.open(f, true);
+	return loader.scan_scene();
 }
 
 ResourceFormatLoaderText *ResourceFormatLoaderText::singleton = nullptr;
